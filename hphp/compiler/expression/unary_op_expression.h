@@ -18,12 +18,13 @@
 #define incl_HPHP_UNARY_OP_EXPRESSION_H_
 
 #include "hphp/compiler/expression/expression.h"
-#include "hphp/runtime/base/complex-types.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 DECLARE_BOOST_TYPES(UnaryOpExpression);
+
+struct Variant;
 
 class UnaryOpExpression : public Expression,
                           public LocalEffectsContainer {
@@ -39,25 +40,25 @@ public:
   DECLARE_EXPRESSION_VIRTUAL_FUNCTIONS;
   DECL_AND_IMPL_LOCAL_EFFECTS_METHODS;
 
-  ExpressionPtr preOptimize(AnalysisResultConstPtr ar);
-  virtual void onParse(AnalysisResultConstPtr ar, FileScopePtr scope);
-  virtual bool isTemporary() const;
-  virtual bool isRefable(bool checkError = false) const;
-  virtual bool isScalar() const;
-  virtual bool isThis() const;
-  virtual bool containsDynamicConstant(AnalysisResultPtr ar) const;
-  virtual bool getScalarValue(Variant &value);
+  ExpressionPtr preOptimize(AnalysisResultConstPtr ar) override;
+  void onParse(AnalysisResultConstPtr ar, FileScopePtr scope);
+  bool isTemporary() const override;
+  bool isRefable(bool checkError = false) const override;
+  bool isScalar() const override;
+  bool isThis() const override;
+  bool containsDynamicConstant(AnalysisResultPtr ar) const override;
+  bool getScalarValue(Variant &value) override;
 
   ExpressionPtr getExpression() { return m_exp;}
-  ExpressionPtr getStoreVariable() const { return m_exp;}
+  ExpressionPtr getStoreVariable() const override { return m_exp;}
   int getOp() const { return m_op;}
   bool isLogicalNot() const { return m_op == '!'; }
   bool isCast() const;
   TypePtr getCastType() const;
   bool getFront() const { return m_front; }
 
-  virtual bool canonCompare(ExpressionPtr e) const;
-  virtual ExpressionPtr unneededHelper();
+  bool canonCompare(ExpressionPtr e) const override;
+  ExpressionPtr unneededHelper() override;
   void setDefinedScope(BlockScopeRawPtr scope);
 protected:
   ExpressionPtr m_exp;

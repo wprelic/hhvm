@@ -22,10 +22,14 @@
 #include "hphp/util/alloc.h"
 #include "hphp/util/word-mem.h"
 
+#include "hphp/runtime/base/datatype.h"
 #include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/memory-manager.h"
 #include "hphp/runtime/base/countable.h"
 #include "hphp/runtime/base/bstring.h"
 #include "hphp/runtime/base/exceptions.h"
+#include "hphp/runtime/base/cap-code.h"
+
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
@@ -77,18 +81,19 @@ struct StringData {
   static constexpr uint32_t MaxSize = 0x7ffffffe; // 2^31-2
 
   /*
-   * Creates an empty request-local string with an unspecified amount
-   * of reserved space.
+   * Creates an empty request-local string with an unspecified amount of
+   * reserved space. Ref-count is pre-initialized to 1.
    */
   static StringData* Make();
 
   /*
-   * Constructors that copy the string memory into this StringData,
-   * for request-local strings.
+   * Constructors that copy the string memory into this StringData, for
+   * request-local strings. Ref-count is pre-initialized to 1.
    *
    * Most strings are created this way.
    */
   static StringData* Make(const char* data);
+  static StringData* Make(const std::string& data);
   static StringData* Make(const char* data, CopyStringMode);
   static StringData* Make(const char* data, size_t len, CopyStringMode);
   static StringData* Make(const StringData* s, CopyStringMode);
@@ -97,15 +102,15 @@ struct StringData {
   /*
    * Attach constructors for request-local strings.
    *
-   * These do the same thing as the above CopyStringMode constructors,
-   * except that it will also free `data'.
+   * These do the same thing as the above CopyStringMode constructors, except
+   * that it will also free `data'. Ref-count is pre-initialized to 1.
    */
   static StringData* Make(char* data, AttachStringMode);
   static StringData* Make(char* data, size_t len, AttachStringMode);
 
   /*
    * Create a new request-local string by concatenating two existing
-   * strings.
+   * strings. Ref-count is pre-initialized to 1.
    */
   static StringData* Make(const StringData* s1, const StringData* s2);
   static StringData* Make(const StringData* s1, StringSlice s2);
@@ -118,14 +123,15 @@ struct StringData {
                           StringSlice s3, StringSlice s4);
 
   /*
-   * Create a new request-local empty string big enough to hold
-   * strings of length `reserve' (not counting the \0 terminator).
+   * Create a new request-local empty string big enough to hold strings of
+   * length `reserve' (not counting the \0 terminator). Ref-count is
+   * pre-initialized to 1.
    */
   static StringData* Make(size_t reserve);
 
   /*
-   * Create a request-local StringData that wraps an APCString
-   * that contains a string.
+   * Create a request-local StringData that wraps an APCString that contains a
+   * string. Ref-count is pre-initialized to 1.
    */
   static StringData* Make(const APCString* shared);
 
@@ -153,8 +159,9 @@ struct StringData {
   static StringData* MakeEmpty();
 
   /*
-   * Offset accessor for the JIT compiler.
+   * Offset accessors for the JIT compiler.
    */
+  static constexpr ptrdiff_t dataOff() { return offsetof(StringData, m_data); }
   static constexpr ptrdiff_t sizeOff() { return offsetof(StringData, m_len); }
 
   /*
@@ -169,7 +176,7 @@ struct StringData {
    * normally called when the reference count goes to zero (e.g. with
    * a helper like decRefStr).
    */
-  void release();
+  void release() noexcept;
   size_t heapSize() const;
 
   /*
@@ -188,14 +195,13 @@ struct StringData {
    * Reference-counting related.
    */
   IMPLEMENT_COUNTABLE_METHODS_NO_STATIC
-  void setRefCount(RefCount n);
   bool isStatic() const;
   bool isUncounted() const;
 
   /*
-   * Append the supplied range to this string.  If there is not
-   * sufficient capacity in this string to contain the range, a new
-   * string may be returned.
+   * Append the supplied range to this string.  If there is not sufficient
+   * capacity in this string to contain the range, a new string may be
+   * returned. The new string's reference count will be pre-initialized to 1.
    *
    * Pre: !hasMultipleRefs()
    * Pre: the string is request-local
@@ -211,8 +217,8 @@ struct StringData {
    * May not be called for strings created with MakeUncounted or
    * MakeStatic.
    *
-   * Returns: possibly a new StringData, if we had to reallocate.  The
-   * returned pointer is not yet incref'd.
+   * Returns: possibly a new StringData, if we had to reallocate.  The new
+   * string's reference count will be pre-initialized to 1.
    */
   StringData* reserve(size_t maxLen);
 
@@ -222,9 +228,9 @@ struct StringData {
    * May not be called for strings created with MakeUncounted or
    * MakeStatic.
    *
-   * Returns: possibly a new StringData, if we decided to reallocate. The
-   * returned pointer is not yet incref'd.  shrinkImpl always returns a new
-   * StringData.
+   * Returns: possibly a new StringData, if we decided to reallocate. The new
+   * string's reference count is be pre-initialized to 1.  shrinkImpl
+   * always returns a new StringData.
    */
   StringData* shrink(size_t len);
   StringData* shrinkImpl(size_t len);
@@ -349,7 +355,7 @@ struct StringData {
    * Change the character at offset `offset' to `c'.
    *
    * May return a reallocated StringData* if this string was a shared
-   * string.
+   * string. The new string's reference count is pre-initialized to 1.
    *
    * Pre: offset >= 0 && offset < size()
    *      !hasMultipleRefs()
@@ -366,8 +372,9 @@ struct StringData {
   StringData* getChar(int offset) const;
 
   /*
-   * Increment this string in the manner of php's ++ operator.  May
-   * return a new string if it had to resize.
+   * Increment this string in the manner of php's ++ operator.  May return a new
+   * string if it had to resize. The new string's reference count is
+   * pre-initialized to 1.
    *
    * Pre: !isStatic() && !isEmpty()
    *      string must be request local
@@ -390,6 +397,7 @@ struct StringData {
    * Returns: case insensitive hash value for this string.
    */
   strhash_t hash() const;
+  NEVER_INLINE strhash_t hashHelper() const;
 
   /*
    * Equality comparison, in the sense of php's string == operator.
@@ -425,6 +433,14 @@ struct StringData {
    */
   void dump() const;
 
+  static StringData* node2str(StringDataNode* node) {
+    return reinterpret_cast<StringData*>(
+      uintptr_t(node) - offsetof(SharedPayload, node)
+                   - sizeof(StringData)
+    );
+  }
+  bool isShared() const;
+
 private:
   struct SharedPayload {
     StringDataNode node;
@@ -445,7 +461,6 @@ private:
   const SharedPayload* sharedPayload() const;
   SharedPayload* sharedPayload();
 
-  bool isShared() const;
   bool isFlat() const;
   bool isImmutable() const;
 
@@ -455,11 +470,10 @@ private:
   void enlist();
   void delist();
   void incrementHelper();
-  strhash_t hashHelper() const NEVER_INLINE;
   bool checkSane() const;
-  void preCompute() const;
-  void setStatic() const;
-  void setUncounted() const;
+  void preCompute();
+  void setStatic();
+  void setUncounted();
 
 private:
   char* m_data;
@@ -467,16 +481,7 @@ private:
   // We have the next fields blocked into qword-size unions so
   // StringData initialization can do fewer stores to initialize the
   // fields.  (gcc does not combine the stores itself.)
-  union {
-    struct {
-      union {
-        struct { char m_pad[3]; HeaderKind m_kind; };
-        uint32_t m_capCode;
-      };
-      mutable RefCount m_count;
-    };
-    uint64_t m_capAndCount;
-  };
+  HeaderWord<CapCode> m_hdr;
   union {
     struct {
       uint32_t m_len;

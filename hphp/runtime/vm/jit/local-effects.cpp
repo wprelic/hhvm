@@ -18,6 +18,7 @@
 #include "hphp/runtime/vm/jit/ir-instruction.h"
 #include "hphp/runtime/vm/jit/frame-state.h"
 #include "hphp/runtime/vm/jit/analysis.h"
+#include "hphp/runtime/vm/jit/minstr-effects.h"
 
 namespace HPHP { namespace jit {
 
@@ -52,7 +53,6 @@ void local_effects(const FrameStateMgr& frameState,
       hook.updateLocalRefPredictions(inst->src(0), inst->src(1));
       break;
 
-    case StLocNT:
     case StLoc:
       hook.setLocalValue(inst->extra<LocalId>()->locId, inst->src(1));
       break;
@@ -61,12 +61,16 @@ void local_effects(const FrameStateMgr& frameState,
       hook.setLocalValue(inst->extra<LdLoc>()->locId, inst->dst());
       break;
 
+    case StLocPseudoMain:
+      hook.setLocalPredictedType(inst->extra<LocalId>()->locId,
+                            inst->src(1)->type());
+      break;
+
     case AssertLoc:
-    case GuardLoc:
     case CheckLoc: {
       auto id = inst->extra<LocalId>()->locId;
       if (inst->marker().func()->isPseudoMain()) {
-        hook.predictLocalType(id, inst->typeParam());
+        hook.setLocalPredictedType(id, inst->typeParam());
       } else {
         hook.refineLocalType(id,
                              inst->typeParam(),
@@ -114,7 +118,7 @@ void local_effects(const FrameStateMgr& frameState,
     case InterpOne:
     case InterpOneCF: {
       auto const& id = *inst->extra<InterpOneData>();
-      assert(!id.smashesAllLocals || id.nChangedLocals == 0);
+      assertx(!id.smashesAllLocals || id.nChangedLocals == 0);
       if (id.smashesAllLocals || inst->marker().func()->isPseudoMain()) {
         hook.clearLocals();
       } else {
@@ -124,7 +128,7 @@ void local_effects(const FrameStateMgr& frameState,
           auto& loc = *it;
           // If changing the inner type of a boxed local, also drop the
           // information about inner types for any other boxed locals.
-          if (loc.type.isBoxed()) hook.dropLocalRefsInnerTypes();
+          if (loc.type <= TBoxedCell) hook.dropLocalRefsInnerTypes();
           hook.setLocalType(loc.id, loc.type);
         }
       }
@@ -142,4 +146,3 @@ void local_effects(const FrameStateMgr& frameState,
 //////////////////////////////////////////////////////////////////////
 
 }}
-

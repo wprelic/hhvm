@@ -14,9 +14,6 @@
 (*****************************************************************************)
 open Utils
 
-(* filename => functions defined, classes defined *)
-type fast = (SSet.t * SSet.t * SSet.t * SSet.t) SMap.t
-
 (* The set of files that failed *)
 type failed = Relative_path.Set.t
 
@@ -86,22 +83,10 @@ let get_classes fast =
   end fast SMap.empty
 
 (*****************************************************************************)
-(* The bucket size, given a list of files, give me a sublist such as
- * every worker is busy long enough. If the bucket is too big, it hurts
- * load balancing, if it is too small, the overhead in synchronization time
- * hurts *)
-(*****************************************************************************)
-
-(* The bucket size at initialization, we want high throughput and we don't
- * care about the latency
-*)
-let init_bucket_size = 1000
-
-(*****************************************************************************)
 (* Let's go! That's where the action is *)
 (*****************************************************************************)
 
-let go workers nenv fast =
+let go (workers:Worker.t list option) nenv fast =
   let all_classes = get_classes fast in
   TypeDeclarationStore.store (all_classes, nenv);
   let fast_l = Relative_path.Map.fold (fun x _ y -> x :: y) fast [] in

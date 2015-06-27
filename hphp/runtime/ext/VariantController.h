@@ -17,7 +17,9 @@
 #ifndef VARIANTCONTROLLER_H
 #define VARIANTCONTROLLER_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/array-iterator.h"
+#include "hphp/runtime/ext/extension.h"
 #include <algorithm>
 
 namespace HPHP {
@@ -86,8 +88,8 @@ struct VariantController {
     return type(k);
   }
   static int64_t mapKeyAsInt64(const Variant& k) { return k.toInt64(); }
-  static const String& mapKeyAsString(const Variant& k) {
-    return k.toCStrRef();
+  static String mapKeyAsString(const Variant& k) {
+    return k.toString();
   }
   template <typename Key>
   static void mapSet(MapType& map, Key&& k, VariantType&& v) {
@@ -138,13 +140,13 @@ struct VariantController {
     return empty_string();
   }
   static char* getMutablePtr(StringType& s) {
-    return s.bufferSlice().ptr;
+    return s.mutableData();
   }
   static void shrinkString(String& s, size_t length) {
     s.shrink(length);
   }
   static StringType stringFromData(const char* src, int n) {
-    return StringData::Make(src, n, CopyString);
+    return StringType::attach(StringData::Make(src, n, CopyString));
   }
   static size_t stringLen(const StringType& str) { return str.size(); }
   static const char* stringData(const StringType& str) {

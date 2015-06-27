@@ -20,7 +20,6 @@
 #include <sstream>
 #include <cstring>
 
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/vm/unit.h"
 #include "hphp/runtime/base/zend-string.h"
@@ -257,14 +256,19 @@ int64_t decodeMemberCodeImm(const unsigned char** immPtr, MemberCode mcode) {
 
     case MET:
     case MPT:
+    case MQT:
       return decodeImm<int32_t>(immPtr);
 
     case MEI:
       return decodeImm<int64_t>(immPtr);
 
-    default:
-      not_reached();
+    case MEC:
+    case MPC:
+    case MW:
+    case InvalidMemberCode:
+      break;
   }
+  not_reached();
 }
 
 // TODO: merge with emitIVA in unit.h
@@ -399,7 +403,7 @@ OffsetSet instrSuccOffsets(Op* opc, const Unit* unit) {
 
   if (isSwitch(*opc)) {
     foreachSwitchTarget(opc, [&](Offset& offset) {
-        succBcOffs.insert(offset);
+        succBcOffs.insert(offset + opc - bcStart);
       });
   } else {
     Offset target = instrJumpTarget(bcStart, opc - bcStart);
@@ -415,7 +419,6 @@ OffsetSet instrSuccOffsets(Op* opc, const Unit* unit) {
  * implicit exception paths.
  */
 int numSuccs(const Op* instr) {
-  if (!instrIsControlFlow(*instr)) return 1;
   if ((instrFlags(*instr) & TF) != 0) {
     if (isSwitch(*instr)) {
       return *(int*)(instr + 1);
@@ -423,6 +426,7 @@ int numSuccs(const Op* instr) {
     if (isUnconditionalJmp(*instr) || *instr == OpIterBreak) return 1;
     return 0;
   }
+  if (!instrIsControlFlow(*instr)) return 1;
   if (instrJumpOffset(const_cast<Op*>(instr))) return 2;
   return 1;
 }
@@ -558,7 +562,8 @@ FlavorDesc minstrFlavor(const Op* op, uint32_t i, FlavorDesc top) {
       i -= 2;
       break;
 
-    case NumLocationCodes: not_reached();
+    case InvalidLocationCode:
+      not_reached();
   }
 
   if (i < getImmVector(op).numStackValues()) return CV;
@@ -822,7 +827,7 @@ LocationCode parseLocationCode(const char* s) {
 }
 
 const char* const memberNames[] =
-  { "EC", "PC", "EL", "PL", "ET", "PT", "EI", "W" };
+  { "EC", "PC", "EL", "PL", "ET", "PT", "QT", "EI", "W"};
 const size_t memberNamesCount = sizeof(memberNames) /
                                 sizeof(*memberNames);
 
@@ -830,25 +835,17 @@ static_assert(memberNamesCount == NumMemberCodes,
              "Member code missing for memberCodeString");
 
 const char* memberCodeString(MemberCode mcode) {
-  assert(mcode >= 0 && mcode < NumMemberCodes);
+  assert(mcode >= 0 && mcode < InvalidMemberCode);
   return memberNames[mcode];
 }
 
 MemberCode parseMemberCode(const char* s) {
-  int incr;
-  switch (*s) {
-  case 'W': return MW;
-  case 'E': incr = 0; break;
-  case 'P': incr = 1; break;
-  default:  return InvalidMemberCode;
+  for (auto i = 0; i < memberNamesCount; i++) {
+    if (!strcmp(memberNames[i], s)) {
+      return MemberCode(i);
+    }
   }
-  switch (s[1]) {
-  case 'C': return MemberCode(MEC + incr);
-  case 'L': return MemberCode(MEL + incr);
-  case 'T': return MemberCode(MET + incr);
-  case 'I': return incr ? InvalidMemberCode : MEI;
-  default:  return InvalidMemberCode;
-  }
+  return InvalidMemberCode;
 }
 
 std::string instrToString(const Op* it, const Unit* u /* = NULL */) {
@@ -1069,7 +1066,7 @@ OPCODES
 }
 
 const char* opcodeToName(Op op) {
-  const char* namesArr[] = {
+  static const char* namesArr[] = {
 #define O(name, imm, inputs, outputs, flags) \
     #name ,
     OPCODES
@@ -1137,6 +1134,12 @@ static const char* ObjMethodOp_names[] = {
 #undef OBJMETHOD_OP
 };
 
+static const char* SwitchKind_names[] = {
+#define KIND(x) #x,
+  SWITCH_KINDS
+#undef KIND
+};
+
 template<class T, size_t Sz>
 const char* subopToNameImpl(const char* (&arr)[Sz], T opcode) {
   static_assert(
@@ -1186,6 +1189,7 @@ X(BareThisOp)
 X(SilenceOp)
 X(OODeclExistsOp)
 X(ObjMethodOp)
+X(SwitchKind)
 
 #undef X
 
@@ -1195,6 +1199,9 @@ bool instrIsNonCallControlFlow(Op opcode) {
   if (!instrIsControlFlow(opcode) || isFCallStar(opcode)) return false;
 
   switch (opcode) {
+    case OpAwait:
+    case OpYield:
+    case OpYieldK:
     case OpContEnter:
     case OpContRaise:
     case OpFCallBuiltin:
@@ -1380,6 +1387,7 @@ const MInstrInfo& getMInstrInfo(Op op) {
       MInstrAttr((attrs) & MIA_intermediate), /* MPL */                 \
       MInstrAttr((attrs) & MIA_intermediate), /* MET */                 \
       MInstrAttr((attrs) & MIA_intermediate), /* MPT */                 \
+      MInstrAttr((attrs) & MIA_intermediate), /* MQT */                 \
       MInstrAttr((attrs) & MIA_intermediate), /* MEI */                 \
       MInstrAttr((attrs) & MIA_final)},       /* MW */                  \
      unsigned(vC), bool((attrs) & MIA_new), bool((attrs) & MIA_final_get), \

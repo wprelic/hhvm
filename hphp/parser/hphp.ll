@@ -178,6 +178,7 @@ static int getNextTokenType(int t) {
     case T_GROUP:
     case T_BY:
       return NextTokenType::TypeListMaybe;
+    case T_SUPER:
     case T_XHP_ATTRIBUTE:
       return NextTokenType::XhpClassName |
              NextTokenType::TypeListMaybe;
@@ -285,6 +286,7 @@ BACKQUOTE_CHARS     ("{"*([^$`\\{]|("\\"{ANY_CHAR}))|{BACKQUOTE_LITERAL_DOLLAR})
 <ST_IN_SCRIPTING>"enddeclare"           { RETTOKEN(T_ENDDECLARE);}
 <ST_IN_SCRIPTING>"instanceof"           { RETTOKEN(T_INSTANCEOF);}
 <ST_IN_SCRIPTING>"as"                   { RETTOKEN(T_AS);}
+<ST_IN_SCRIPTING>"super"                { RETTOKEN(T_SUPER);}
 <ST_IN_SCRIPTING>"switch"               { RETTOKEN(T_SWITCH);}
 <ST_IN_SCRIPTING>"endswitch"            { RETTOKEN(T_ENDSWITCH);}
 <ST_IN_SCRIPTING>"case"                 { RETTOKEN(T_CASE);}
@@ -482,9 +484,6 @@ BACKQUOTE_CHARS     ("{"*([^$`\\{]|("\\"{ANY_CHAR}))|{BACKQUOTE_LITERAL_DOLLAR})
 <ST_IN_SCRIPTING>"<<"                 { RETSTEP(T_SL);}
 
 <ST_IN_SCRIPTING>"shape"              { HH_ONLY_KEYWORD(T_SHAPE); }
-<ST_IN_SCRIPTING>"varray"             { HH_ONLY_KEYWORD(T_VARRAY); }
-<ST_IN_SCRIPTING>"miarray"            { HH_ONLY_KEYWORD(T_MIARRAY); }
-<ST_IN_SCRIPTING>"msarray"            { HH_ONLY_KEYWORD(T_MSARRAY); }
 <ST_IN_SCRIPTING>"type"               { HH_ONLY_KEYWORD(T_UNRESOLVED_TYPE); }
 <ST_IN_SCRIPTING>"newtype"            { HH_ONLY_KEYWORD(T_UNRESOLVED_NEWTYPE); }
 <ST_IN_SCRIPTING>"await"              { HH_ONLY_KEYWORD(T_AWAIT);}
@@ -835,15 +834,43 @@ BACKQUOTE_CHARS     ("{"*([^$`\\{]|("\\"{ANY_CHAR}))|{BACKQUOTE_LITERAL_DOLLAR})
         return T_HH_ERROR;
 }
 
-<INITIAL,ST_IN_HTML,ST_AFTER_HASHBANG>"<%="|"<?=" {
-        if ((yytext[1]=='%' && _scanner->aspTags()) ||
-            (yytext[1]=='?' && _scanner->shortTags())) {
+<ST_IN_HTML>"<?=" {
+        if  (_scanner->shortTags()) {
+          yy_pop_state(yyscanner);
+          RETTOKEN(T_ECHO);
+        } else {
+          RETTOKEN(T_INLINE_HTML);
+        }
+}
+
+<INITIAL,ST_AFTER_HASHBANG>"<?=" {
+        if (_scanner->shortTags()) {
           if (YY_START == INITIAL) {
             BEGIN(ST_IN_SCRIPTING);
           } else {
             yy_pop_state(yyscanner);
           }
-          RETTOKEN(T_ECHO); //return T_OPEN_TAG_WITH_ECHO;
+          RETTOKEN(T_OPEN_TAG_WITH_ECHO);
+        } else {
+          if (YY_START == INITIAL) {
+            BEGIN(ST_IN_SCRIPTING);
+            yy_push_state(ST_IN_HTML, yyscanner);
+          } else {
+            BEGIN(ST_IN_HTML);
+          }
+          RETTOKEN(T_INLINE_HTML);
+        }
+}
+
+
+<INITIAL,ST_IN_HTML,ST_AFTER_HASHBANG>"<%=" {
+        if (_scanner->aspTags()) {
+          if (YY_START == INITIAL) {
+            BEGIN(ST_IN_SCRIPTING);
+          } else {
+            yy_pop_state(yyscanner);
+          }
+          RETTOKEN(T_ECHO);
         } else {
           if (YY_START == INITIAL) {
             BEGIN(ST_IN_SCRIPTING);
@@ -934,49 +961,30 @@ BACKQUOTE_CHARS     ("{"*([^$`\\{]|("\\"{ANY_CHAR}))|{BACKQUOTE_LITERAL_DOLLAR})
         RETSTEP(T_WHITESPACE);
 }
 
-<ST_IN_SCRIPTING,ST_XHP_IN_TAG>"#"|"//" {
-        yy_push_state(ST_ONE_LINE_COMMENT, yyscanner);
-        yymore();
-}
-
-<ST_ONE_LINE_COMMENT>"?"|"%"|">" {
-        yymore();
-}
-
-<ST_ONE_LINE_COMMENT>[^\n\r?%>]*{ANY_CHAR} {
-        switch (yytext[yyleng-1]) {
-        case '?':
-        case '%':
-        case '>':
-                yyless(yyleng-1);
-                yymore();
-                break;
-        default:
-                STEPPOS(T_COMMENT);
-                yy_pop_state(yyscanner);
-                return T_COMMENT;
+<ST_IN_SCRIPTING,ST_XHP_IN_TAG>("#"|"//")[^\r\n]*{NEWLINE}? {
+        const char* asptag = nullptr;
+        if (_scanner->aspTags()) {
+                asptag = static_cast<const char*>(
+                  memmem(yytext, yyleng, "%>", 2)
+                );
         }
-}
-
-<ST_ONE_LINE_COMMENT>{NEWLINE} {
-        STEPPOS(T_COMMENT);
-        yy_pop_state(yyscanner);
-        return T_COMMENT;
-}
-
-<ST_ONE_LINE_COMMENT>"?>"|"%>" {
-        if (_scanner->isHHFile()) {
-          _scanner->error("HH mode: ?> not allowed");
-          return T_HH_ERROR;
+        auto phptag = static_cast<const char*>(
+          memmem(yytext, yyleng, "?>", 2)
+        );
+        if (asptag && (!phptag || (asptag < phptag))) {
+                if (_scanner->isHHFile()) {
+                        _scanner->error("HH mode: %%> not allowed");
+                        RETTOKEN(T_HH_ERROR);
+                }
+                yyless(asptag - yytext);
+        } else if (phptag) {
+                if (_scanner->isHHFile()) {
+                        _scanner->error("HH mode: ?> not allowed");
+                        RETTOKEN(T_HH_ERROR);
+                }
+                yyless(phptag - yytext);
         }
-        if (_scanner->aspTags() || yytext[yyleng-2] != '%') {
-          _scanner->setToken(yytext, yyleng-2, yytext, yyleng-2, T_COMMENT);
-                yyless(yyleng-2);
-                yy_pop_state(yyscanner);
-                return T_COMMENT;
-        } else {
-                yymore();
-        }
+        RETTOKEN(T_COMMENT);
 }
 
 <ST_IN_SCRIPTING,ST_XHP_IN_TAG>"/**"{WHITESPACE} {

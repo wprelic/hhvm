@@ -156,4 +156,3 @@ class FilesystemIterator extends DirectoryIterator {
     return $this->getPathname();
   }
 }
-

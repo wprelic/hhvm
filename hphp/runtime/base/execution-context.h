@@ -13,6 +13,7 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #ifndef incl_HPHP_EXECUTION_CONTEXT_H_
 #define incl_HPHP_EXECUTION_CONTEXT_H_
 
@@ -23,20 +24,21 @@
 #include <utility>
 #include <vector>
 
+#include "hphp/util/lock.h"
+#include "hphp/util/thread-local.h"
+#include "hphp/util/tiny-vector.h"
 #include "hphp/runtime/base/apc-handle.h"
 #include "hphp/runtime/base/class-info.h"
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/base/mixed-array.h"
 #include "hphp/runtime/base/string-buffer.h"
+#include "hphp/runtime/ext/stream/ext_stream.h"
 #include "hphp/runtime/server/transport.h"
 #include "hphp/runtime/server/virtual-host.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/minstr-state.h"
 #include "hphp/runtime/vm/pc-filter.h"
-#include "hphp/util/lock.h"
-#include "hphp/util/thread-local.h"
 
 namespace vixl { class Simulator; }
 
@@ -44,7 +46,6 @@ namespace HPHP {
 struct RequestEventHandler;
 struct EventHook;
 struct Resumable;
-struct PhpFile;
 namespace jit { struct Translator; }
 }
 
@@ -58,6 +59,7 @@ struct VMState {
   ActRec* firstAR;
   TypedValue* sp;
   MInstrState mInstrState;
+  ActRec* jitCalledFrame;
 };
 
 enum class CallType {
@@ -100,6 +102,8 @@ struct DebuggerSettings {
   int printLevel = -1;
 };
 
+using InvokeArgs = folly::Range<const TypedValue*>;
+
 ///////////////////////////////////////////////////////////////////////////////
 
 struct ExecutionContext {
@@ -128,11 +132,11 @@ public:
   ~ExecutionContext();
   void sweep();
 
-  void* operator new(size_t s)  { return smart_malloc(s); }
-  void* operator new(size_t s, void* p) { return p; }
-  void operator delete(void* p) { smart_free(p); }
+  void* operator new(size_t s);
+  void* operator new(size_t s, void* p);
+  void operator delete(void* p);
 
-  // For RPCRequestHandler
+  // For RPCRequestHandler.
   void backupSession();
   void restoreSession();
 
@@ -147,31 +151,31 @@ public:
   /**
    * System settings.
    */
-  Transport* getTransport() { return m_transport; }
-  void setTransport(Transport* transport) { m_transport = transport; }
+  Transport* getTransport();
+  void setTransport(Transport*);
   std::string getRequestUrl(size_t szLimit = std::string::npos);
   String getMimeType() const;
   void setContentType(const String& mimetype, const String& charset);
-  String getCwd() const { return m_cwd; }
-  void setCwd(const String& cwd) { m_cwd = cwd; }
+  String getCwd() const;
+  void setCwd(const String&);
 
   /**
    * Write to output.
    */
-  void write(const String& s);
+  void write(const String&);
   void write(const char* s, int len);
-  void write(const char* s) { write(s, strlen(s)); }
+  void write(const char*);
+
   void writeStdout(const char* s, int len);
   size_t getStdoutBytesWritten() const;
 
-  typedef void (*PFUNC_STDOUT)(const char* s, int len, void* data);
+  using PFUNC_STDOUT = void (*)(const char* s, int len, void* data);
   void setStdout(PFUNC_STDOUT func, void* data);
 
   /**
    * Output buffering.
    */
-  void obStart(const Variant& handler = uninit_null(),
-               int chunk_size = 0);
+  void obStart(const Variant& handler = uninit_null(), int chunk_size = 0);
   String obCopyContents();
   String obDetachContents();
   int obGetContentLength();
@@ -186,23 +190,9 @@ public:
   Array obGetHandlers();
   void obProtect(bool on); // making sure obEnd() never passes current level
   void flush();
-  StringBuffer* swapOutputBuffer(StringBuffer* sb) {
-    // If we are swapping output buffers (currently done by the debugger)
-    // then any current chunking is off the table
-    if (m_out != nullptr) {
-      if (sb != &m_out->oss) {
-        m_remember_chunk =  m_out->chunk_size;
-        m_out->chunk_size = 0;
-      } else if (sb == &m_out->oss) { // pointing to same thing,swapping back in
-        m_out->chunk_size = m_remember_chunk;
-      }
-    }
-    auto current = m_sb;
-    m_sb = sb;
-    return current;
-  }
-  String getRawPostData() const { return m_rawPostData; }
-  void setRawPostData(String& pd) { m_rawPostData = pd; }
+  StringBuffer* swapOutputBuffer(StringBuffer*);
+  String getRawPostData() const;
+  void setRawPostData(const String& pd);
 
   /**
    * Request sequences and program execution hooks.
@@ -236,14 +226,17 @@ public:
   bool callUserErrorHandler(const Exception &e, int errnum,
                             bool swallowExceptions);
   void recordLastError(const Exception &e, int errnum = 0);
+  void clearLastError();
   bool onFatalError(const Exception &e); // returns handled
   bool onUnhandledException(Object e);
-  ErrorState getErrorState() const { return m_errorState; }
-  void setErrorState(ErrorState state) { m_errorState = state; }
-  String getLastError() const { return m_lastError; }
-  int getLastErrorNumber() const { return m_lastErrorNum; }
-  String getErrorPage() const { return m_errorPage; }
-  void setErrorPage(const String& page) { m_errorPage = page; }
+  ErrorState getErrorState() const;
+  void setErrorState(ErrorState);
+  String getLastError() const;
+  int getLastErrorNumber() const;
+  String getErrorPage() const;
+  void setErrorPage(const String&);
+  String getLastErrorPath() const;
+  int getLastErrorLine() const;
 
   /**
    * Misc. settings
@@ -251,32 +244,33 @@ public:
   String getenv(const String& name) const;
   void setenv(const String& name, const String& value);
   void unsetenv(const String& name);
-  Array getEnvs() const { return m_envs; }
+  Array getEnvs() const;
 
-  String getTimeZone() const { return m_timezone; }
-  void setTimeZone(const String& timezone) { m_timezone = timezone; }
-  String getDefaultTimeZone() const { return m_timezoneDefault; }
-  void setDefaultTimeZone(const String& s) { m_timezoneDefault = s; }
-  void setThrowAllErrors(bool f) { m_throwAllErrors = f; }
-  bool getThrowAllErrors() const { return m_throwAllErrors; }
-  void setExitCallback(Variant f) { m_exitCallback = f; }
-  Variant getExitCallback() { return m_exitCallback; }
+  String getTimeZone() const;
+  void setTimeZone(const String&);
 
-  void setStreamContext(Resource &context) { m_streamContext = context; }
-  Resource &getStreamContext() { return m_streamContext; }
+  String getDefaultTimeZone() const;
+  void setDefaultTimeZone(const String&);
 
-  int getPageletTasksStarted() const { return m_pageletTasksStarted; }
-  void incrPageletTasksStarted() { ++m_pageletTasksStarted; }
+  bool getThrowAllErrors() const;
+  void setThrowAllErrors(bool);
 
-  const VirtualHost* getVirtualHost() const { return m_vhost; }
-  void setVirtualHost(const VirtualHost* vhost) { m_vhost = vhost; }
+  Variant getExitCallback();
+  void setExitCallback(Variant);
 
-  const String& getSandboxId() const { return m_sandboxId; }
-  void setSandboxId(const String& sandboxId) { m_sandboxId = sandboxId; }
+  void setStreamContext(const SmartPtr<StreamContext>&);
+  const SmartPtr<StreamContext>& getStreamContext();
 
-  bool hasRequestEventHandlers() const {
-    return !m_requestEventHandlers.empty();
-  }
+  int getPageletTasksStarted() const;
+  void incrPageletTasksStarted();
+
+  const VirtualHost* getVirtualHost() const;
+  void setVirtualHost(const VirtualHost*);
+
+  const String& getSandboxId() const;
+  void setSandboxId(const String&);
+
+  bool hasRequestEventHandlers() const;
 
 private:
   struct OutputBuffer {
@@ -286,6 +280,11 @@ private:
     StringBuffer oss;
     Variant handler;
     int chunk_size;
+    template<class F> void scan(F& mark) {
+      mark(oss);
+      mark(handler);
+      mark(chunk_size);
+    }
   };
 
 private:
@@ -296,77 +295,10 @@ private:
 public:
   void requestInit();
   void requestExit();
-  void pushLocalsAndIterators(const Func* f, int nparams = 0);
   void enqueueAPCHandle(APCHandle* handle, size_t size);
 
   void manageAPCHandle();
-
-  enum class VectorLeaveCode {
-    ConsumeAll,
-    LeaveLast
-  };
   void cleanup();
-
-  template <bool setMember, bool warn, bool define, bool unset, bool reffy,
-            unsigned mdepth, VectorLeaveCode mleave, bool saveResult>
-  bool memberHelperPre(PC& pc, unsigned& ndiscard, TypedValue*& base,
-                       TypedValue& tvScratch,
-                       TypedValue& tvLiteral,
-                       TypedValue& tvRef, TypedValue& tvRef2,
-                       MemberCode& mcode, TypedValue*& curMember);
-  template <bool warn, bool saveResult, VectorLeaveCode mleave>
-  void getHelperPre(PC& pc, unsigned& ndiscard,
-                    TypedValue*& base, TypedValue& tvScratch,
-                    TypedValue& tvLiteral,
-                    TypedValue& tvRef, TypedValue& tvRef2,
-                    MemberCode& mcode, TypedValue*& curMember);
-  template <bool saveResult>
-  void getHelperPost(unsigned ndiscard, TypedValue*& tvRet,
-                     TypedValue& tvScratch, Variant& tvRef,
-                     Variant& tvRef2);
-  void getHelper(PC& pc, unsigned& ndiscard, TypedValue*& tvRet,
-                 TypedValue*& base, TypedValue& tvScratch,
-                 TypedValue& tvLiteral,
-                 Variant& tvRef, Variant& tvRef2,
-                 MemberCode& mcode, TypedValue*& curMember);
-
-  template <bool warn, bool define, bool unset, bool reffy, unsigned mdepth,
-            VectorLeaveCode mleave>
-  bool setHelperPre(PC& pc, unsigned& ndiscard, TypedValue*& base,
-                    TypedValue& tvScratch,
-                    TypedValue& tvLiteral,
-                    TypedValue& tvRef, TypedValue& tvRef2,
-                    MemberCode& mcode, TypedValue*& curMember);
-  template <unsigned mdepth>
-  void setHelperPost(unsigned ndiscard, Variant& tvRef,
-                     Variant& tvRef2);
-  template <bool isEmpty> void isSetEmptyM(IOP_ARGS);
-  template<class Op> void implCellBinOp(IOP_ARGS, Op op);
-  template<class Op> void implCellBinOpBool(IOP_ARGS, Op op);
-  void implVerifyRetType(IOP_ARGS);
-  bool cellInstanceOf(TypedValue* c, const NamedEntity* s);
-  bool iopInstanceOfHelper(const StringData* s1, Cell* c2);
-  bool initIterator(PC& pc, PC& origPc, Iter* it,
-                    Offset offset, Cell* c1);
-  bool initIteratorM(PC& pc, PC& origPc, Iter* it,
-                     Offset offset, Ref* r1, TypedValue* val, TypedValue* key);
-  void jmpSurpriseCheck(Offset o);
-  template<Op op> void jmpOpImpl(IOP_ARGS);
-  template<class Op> void roundOpImpl(Op op);
-#define O(name, imm, pusph, pop, flags)                                       \
-  void iop##name(IOP_ARGS);
-OPCODES
-#undef O
-
-  void contEnterImpl(IOP_ARGS);
-  void yield(IOP_ARGS, const Cell* key, const Cell& value);
-  void asyncSuspendE(IOP_ARGS, int32_t iters);
-  void asyncSuspendR(IOP_ARGS);
-  void ret(IOP_ARGS);
-  void fPushObjMethodImpl(Class* cls, StringData* name, ObjectData* obj,
-                          int numArgs);
-  void fPushNullObjMethod(int numArgs);
-  ActRec* fPushFuncImpl(const Func* func, int numArgs);
 
 public:
   const Func* lookupMethodCtx(const Class* cls,
@@ -394,6 +326,12 @@ public:
   ObjectData* createObject(StringData* clsName,
                            const Variant& params,
                            bool init = true);
+  ObjectData* initObject(const Class* cls,
+                         const Variant& params,
+                         ObjectData* o);
+  ObjectData* initObject(StringData* clsName,
+                         const Variant& params,
+                         ObjectData* o);
   ObjectData* createObjectOnly(StringData* clsName);
 
   /*
@@ -409,13 +347,8 @@ public:
   Cell lookupClsCns(const StringData* cls,
                     const StringData* cns);
 
-  // Get the next outermost VM frame, even accross re-entry
+  // Get the next outermost VM frame, even across re-entry
   ActRec* getOuterVMFrame(const ActRec* ar);
-
-  std::string prettyStack(const std::string& prefix) const;
-  static void DumpStack();
-  static void DumpCurUnit(int skip = 0);
-  static void PrintTCCallerInfo();
 
   ActRec* getStackFrame();
   ObjectData* getThis();
@@ -440,80 +373,56 @@ public:
 
   void enterDebuggerDummyEnv();
   void exitDebuggerDummyEnv();
-  void preventReturnsToTC();
-  void preventReturnToTC(ActRec* ar);
   void destructObjects();
 
   bool isNested() { return m_nesting != 0; }
   void pushVMState(Cell* savedSP);
   void popVMState();
 
-  /**
-   * If you call this, you might break some assumption that the JIT made.
-   * Ask a JIT expert if your use is ok. The most common use is coverted by
-   * getPrevFunc so use that if you only want the Func*. That's safe.
+  /*
+   * Given a pointer to a VM frame, returns the previous VM frame in the call
+   * stack. This function will also pass back by reference the previous PC (if
+   * prevPc is non-null) and the previous SP (if prevSp is non-null).
+   *
+   * If there is no previous VM frame, this function returns NULL and does not
+   * set prevPc and prevSp.
+   *
+   * Inspecting live VM frames other than the current one can be dangerous, so
+   * use this function with care. If all you need is the Func that called a
+   * particular frame, use getPrevFunc() instead.
    */
-  ActRec* getPrevVMStateUNSAFE(const ActRec* fp,
-                               Offset* prevPc = nullptr,
-                               TypedValue** prevSp = nullptr,
-                               bool* fromVMEntry = nullptr);
-  const Func* getPrevFunc(const ActRec* fp) {
-    auto state = getPrevVMStateUNSAFE(fp, nullptr, nullptr, nullptr);
-    if (!state) return nullptr;
-    return state->func();
-  }
+  ActRec* getPrevVMState(const ActRec* fp,
+                         Offset* prevPc = nullptr,
+                         TypedValue** prevSp = nullptr,
+                         bool* fromVMEntry = nullptr);
 
-  VarEnv* getVarEnv(int frame = 0);
+  /*
+   * Returns the caller of the given frame.
+   */
+  const Func* getPrevFunc(const ActRec*);
+
+  ActRec* getFrameAtDepth(int frame = 0);
+  VarEnv* getOrCreateVarEnv(int frame = 0);
+  VarEnv* hasVarEnv(int frame = 0);
   void setVar(StringData* name, const TypedValue* v);
   void bindVar(StringData* name, TypedValue* v);
   Array getLocalDefinedVariables(int frame);
-  bool doFCall(ActRec* ar, PC& pc);
-  bool doFCallArrayTC(PC pc);
   const Variant& getEvaledArg(const StringData* val,
                               const String& namespacedName);
-  String getLastErrorPath() const { return m_lastErrorPath; }
-  int getLastErrorLine() const { return m_lastErrorLine; }
 
 private:
-  enum class CallArrOnInvalidContainer {
-    // task #1756122: warning and returning null is what we /should/ always
-    // do in call_user_func_array, but some code depends on the broken
-    // behavior of casting the list of args to FCallArray to an array.
-    CastToArray,
-    WarnAndReturnNull,
-    WarnAndContinue
-  };
-  bool doFCallArray(PC& pc, int stkSize, CallArrOnInvalidContainer);
-  enum class StackArgsState { // tells prepareFuncEntry how much work to do
-    // the stack may contain more arguments than the function expects
-    Untrimmed,
-    // the stack has already been trimmed of any extra arguments, which
-    // have been teleported away into ExtraArgs and/or a variadic param
-    Trimmed
-  };
-  void enterVMAtAsyncFunc(ActRec* enterFnAr, Resumable* resumable,
-                          ObjectData* exception);
-  void enterVMAtFunc(ActRec* enterFnAr, StackArgsState stk);
-  void enterVMAtCurPC();
-  void enterVM(ActRec* ar, StackArgsState stackTrimmed,
-               Resumable* resumable = nullptr, ObjectData* exception = nullptr);
-  void doFPushCuf(IOP_ARGS, bool forward, bool safe);
   template <bool forwarding>
   void pushClsMethodImpl(Class* cls, StringData* name,
                          ObjectData* obj, int numArgs);
-  void prepareFuncEntry(ActRec* ar, PC& pc, StackArgsState stk);
-  void shuffleMagicArgs(ActRec* ar);
-  void shuffleExtraStackArgs(ActRec* ar);
-  void recordCodeCoverage(PC pc);
-  void switchModeForDebugger();
 public:
-  void resetCoverageCounters();
   void syncGdbState();
+
   enum InvokeFlags {
-    InvokeNormal = 0,
-    InvokeCuf = 1,
-    InvokePseudoMain = 2
+    InvokeNormal,
+    InvokeCuf,
+    InvokePseudoMain
   };
+
   void invokeFunc(TypedValue* retval,
                   const Func* f,
                   const Variant& args_ = init_null_variant,
@@ -522,51 +431,108 @@ public:
                   VarEnv* varEnv = nullptr,
                   StringData* invName = nullptr,
                   InvokeFlags flags = InvokeNormal);
+
   void invokeFunc(TypedValue* retval,
                   const CallCtx& ctx,
                   const Variant& args_,
-                  VarEnv* varEnv = nullptr) {
-    invokeFunc(retval, ctx.func, args_, ctx.this_, ctx.cls, varEnv,
-               ctx.invName);
-  }
+                  VarEnv* varEnv = nullptr);
+
   void invokeFuncFew(TypedValue* retval,
                      const Func* f,
                      void* thisOrCls,
                      StringData* invName,
                      int argc,
                      const TypedValue* argv);
+
   void invokeFuncFew(TypedValue* retval,
                      const Func* f,
                      void* thisOrCls,
-                     StringData* invName = nullptr) {
-    invokeFuncFew(retval, f, thisOrCls, invName, 0, nullptr);
-  }
+                     StringData* invName = nullptr);
+
   void invokeFuncFew(TypedValue* retval,
                      const CallCtx& ctx,
                      int argc,
-                     const TypedValue* argv) {
-    invokeFuncFew(retval, ctx.func,
-                  ctx.this_ ? (void*)ctx.this_ :
-                  ctx.cls ? (char*)ctx.cls + 1 : nullptr,
-                  ctx.invName, argc, argv);
-  }
+                     const TypedValue* argv);
+
+  TypedValue invokeMethod(
+    ObjectData* obj,
+    const Func* meth,
+    InvokeArgs args = InvokeArgs()
+  );
+
+  Variant invokeMethodV(
+    ObjectData* obj,
+    const Func* meth,
+    InvokeArgs args = InvokeArgs()
+  );
+
   void resumeAsyncFunc(Resumable* resumable, ObjectData* freeObj,
-                       const Cell& awaitResult);
+                       Cell awaitResult);
   void resumeAsyncFuncThrow(Resumable* resumable, ObjectData* freeObj,
                             ObjectData* exception);
 
-  template<typename T> using SmartStringIMap =
-    smart::hash_map<String, T, hphp_string_hash, hphp_string_isame>;
+  template<typename T>
+  using SmartStringIMap = smart::hash_map<
+    String,
+    T,
+    hphp_string_hash,
+    hphp_string_isame
+  >;
 
-  // The op*() methods implement individual opcode handlers.
-#define O(name, imm, pusph, pop, flags)                                       \
-  void op##name();
-OPCODES
-#undef O
-  template <bool breakOnCtlFlow> void dispatchImpl();
-  void dispatch();
-  // dispatchBB() exits if a control-flow instruction has been run.
-  void dispatchBB();
+public:
+  template<class F> void scan(F& mark) {
+    //mark(m_transport);
+    mark(m_cwd);
+    //mark(m_sb); // points into m_buffers
+    //mark(m_out); // points into m_buffers
+    mark(m_remember_chunk);
+    for (auto& b : m_buffers) b.scan(mark);
+    mark(m_insideOBHandler);
+    mark(m_implicitFlush);
+    mark(m_protectedLevel);
+    //mark(m_stdout);
+    //mark(m_stdoutData);
+    mark(m_stdoutBytesWritten);
+    mark(m_rawPostData);
+    mark(m_requestEventHandlers);
+    mark(m_shutdowns);
+    mark(m_userErrorHandlers);
+    mark(m_userExceptionHandlers);
+    //mark(m_errorState);
+    mark(m_lastError);
+    mark(m_errorPage);
+    mark(m_envs);
+    mark(m_timezone);
+    mark(m_timezoneDefault);
+    mark(m_throwAllErrors);
+    //mark(m_streamContext);
+    mark(m_shutdownsBackup);
+    mark(m_userErrorHandlersBackup);
+    mark(m_userExceptionHandlersBackup);
+    mark(m_exitCallback);
+    mark(m_sandboxId);
+    //mark(m_vhost); // VirtualHost* not allocated in php request heap
+    //mark(debuggerSettings);
+    mark(m_liveBCObjs);
+    mark(m_apcMemSize);
+    //mark(m_apcHandles);
+    mark(dynPropTable);
+    mark(m_globalVarEnv);
+    mark(m_evaledFiles);
+    mark(m_evaledFilesOrder);
+    mark(m_createdFuncs);
+    //for (auto& f : m_faults) mark(f);
+    mark(m_lambdaCounter);
+    //mark(m_nestedVMs);
+    mark(m_nesting);
+    mark(m_dbgNoBreak);
+    mark(m_evaledArgs);
+    mark(m_lastErrorPath);
+    mark(m_lastErrorLine);
+    mark(m_setprofileCallback);
+    mark(m_executingSetprofileCallback);
+    //mark(m_activeSims);
+  }
 
 ///////////////////////////////////////////////////////////////////////////////
 // only fields past here, please.
@@ -605,7 +571,7 @@ private:
   String m_timezone;
   String m_timezoneDefault;
   bool m_throwAllErrors;
-  Resource m_streamContext;
+  SmartPtr<StreamContext> m_streamContext;
 
   // session backup/restore for RPCRequestHandler
   Array m_shutdownsBackup;
@@ -627,7 +593,7 @@ public:
   // destroying the context, so C++ order of destruction is not an issue.
   smart::hash_map<const ObjectData*,ArrayNoDtor> dynPropTable;
   VarEnv* m_globalVarEnv;
-  smart::hash_map<StringData*,Unit*,string_data_hash,string_data_same>
+  smart::hash_map<const StringData*,Unit*,string_data_hash,string_data_same>
     m_evaledFiles;
   smart::vector<const StringData*> m_evaledFilesOrder;
   smart::vector<Unit*> m_createdFuncs;
@@ -636,9 +602,8 @@ public:
   TinyVector<VMState, 32> m_nestedVMs;
   int m_nesting;
   bool m_dbgNoBreak;
+  bool m_unwindingCppException;
 private:
-  int m_coverPrevLine;
-  Unit* m_coverPrevUnit;
   Array m_evaledArgs;
   String m_lastErrorPath;
   int m_lastErrorLine;
@@ -656,5 +621,7 @@ extern DECLARE_THREAD_LOCAL_NO_CHECK(ExecutionContext, g_context);
 
 ///////////////////////////////////////////////////////////////////////////////
 }
+
+#include "hphp/runtime/base/execution-context-inl.h"
 
 #endif

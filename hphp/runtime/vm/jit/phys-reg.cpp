@@ -17,7 +17,8 @@
 #include "hphp/runtime/vm/jit/phys-reg.h"
 #include "hphp/runtime/vm/jit/abi-x64.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
-#include "hphp/runtime/vm/jit/vasm-x64.h"
+#include "hphp/runtime/vm/jit/vasm-emit.h"
+#include "hphp/runtime/vm/jit/vasm-instr.h"
 
 namespace HPHP { namespace jit {
 using namespace x64;
@@ -28,6 +29,22 @@ int PhysReg::getNumGP() {
 
 int PhysReg::getNumSIMD() {
   return mcg->backEnd().abi().simd().size();
+}
+
+std::string show(RegSet regs) {
+  auto& backEnd = mcg->backEnd();
+  std::ostringstream out;
+  auto sep = "";
+
+  out << '{';
+  regs.forEach([&](PhysReg r) {
+    out << sep;
+    backEnd.streamPhysReg(out, r);
+    sep = ", ";
+  });
+  out << '}';
+
+  return out.str();
 }
 
 PhysRegSaverParity::PhysRegSaverParity(int parity, Vout& v,
@@ -43,7 +60,7 @@ PhysRegSaverParity::PhysRegSaverParity(int parity, Vout& v,
     v << subqi{16 * xmm.size(), reg::rsp, reg::rsp, v.makeReg()};
     int offset = 0;
     xmm.forEach([&](PhysReg pr) {
-      v << storedqu{pr, reg::rsp[offset]};
+      v << storeups{pr, reg::rsp[offset]};
       offset += 16;
     });
   }
@@ -88,7 +105,7 @@ void PhysRegSaverParity::emitPops(Vout& v, RegSet regs) {
   if (!xmm.empty()) {
     int offset = 0;
     xmm.forEach([&](PhysReg pr) {
-      v << loaddqu{reg::rsp[offset], pr};
+      v << loadups{reg::rsp[offset], pr};
       offset += 16;
     });
     auto const sf = v.makeReg();
@@ -104,7 +121,8 @@ int PhysRegSaverParity::rspAdjustment() const {
   return m_adjust;
 }
 
-int PhysRegSaverParity::rspTotalAdjustmentRegs() const {
+int PhysRegSaverParity::dwordsPushed() const {
+  assert((m_adjust % sizeof(int64_t)) == 0);
   return m_regs.size() + m_adjust / sizeof(int64_t);
 }
 

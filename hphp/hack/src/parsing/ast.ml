@@ -8,22 +8,6 @@
  *
  *)
 
-open Utils
-
-(*****************************************************************************)
-(* Parsing modes *)
-(*****************************************************************************)
-
-type file_type =
-  | PhpFile
-  | HhFile
-
-type mode =
-  | Mdecl    (* just declare signatures, don't check anything *)
-  | Mstrict  (* check everthing! *)
-  | Mpartial (* Don't fail if you see a function/class you don't know *)
- (* with tarzan *)
-
 (*****************************************************************************)
 (* Constants *)
 (*****************************************************************************)
@@ -58,24 +42,29 @@ and def =
   | NamespaceUse of (id * id) list
 
 and typedef = {
-    t_id: id;
-    t_tparams: tparam list;
-    t_constraint: tconstraint;
-    t_kind: typedef_kind;
-    t_namespace: Namespace_env.env;
-    t_mode: mode;
+  t_id: id;
+  t_tparams: tparam list;
+  t_constraint: tconstraint;
+  t_kind: typedef_kind;
+  t_user_attributes: user_attribute list;
+  t_namespace: Namespace_env.env;
+  t_mode: FileInfo.mode;
 }
 
 and gconst = {
-    cst_mode: mode;
-    cst_kind: cst_kind;
-    cst_name: id;
-    cst_type: hint option;
-    cst_value: expr;
-    cst_namespace: Namespace_env.env;
-  }
+  cst_mode: FileInfo.mode;
+  cst_kind: cst_kind;
+  cst_name: id;
+  cst_type: hint option;
+  cst_value: expr;
+  cst_namespace: Namespace_env.env;
+}
 
-and tparam = variance * id * hint option
+and constraint_kind =
+  | Constraint_as
+  | Constraint_super
+
+and tparam = variance * id * (constraint_kind * hint) option
 
 and tconstraint = hint option
 
@@ -84,8 +73,8 @@ and typedef_kind =
   | NewType of hint
 
 and class_ = {
-  c_mode: mode;
-  c_user_attributes: user_attribute SMap.t;
+  c_mode: FileInfo.mode;
+  c_user_attributes: user_attribute list;
   c_final: bool;
   c_kind: class_kind;
   c_is_xhp: bool;
@@ -103,8 +92,10 @@ and enum_ = {
   e_constraint : hint option;
 }
 
-and user_attribute =
-  expr list (* user attributes are restricted to scalar values *)
+and user_attribute = {
+  ua_name: id;
+  ua_params: expr list (* user attributes are restricted to scalar values *)
+}
 
 and class_kind =
   | Cabstract
@@ -119,10 +110,15 @@ and trait_req_kind =
 
 and class_elt =
   | Const of hint option * (id * expr) list
+  | AbsConst of hint option * id
   | Attributes of class_attr list
+  | TypeConst of typeconst
   | ClassUse of hint
+  | XhpAttrUse of hint
   | ClassTraitRequire of trait_req_kind * hint
   | ClassVars of kind list * hint option * class_var list
+  | XhpAttr of kind list * hint option * class_var list * bool *
+               ((Pos.t * expr list) option)
   | Method of method_
 
 and class_attr =
@@ -161,10 +157,17 @@ and method_ = {
   m_name: id;
   m_params: fun_param list;
   m_body: block;
-  m_user_attributes : user_attribute SMap.t;
+  m_user_attributes : user_attribute list;
   m_ret: hint option;
   m_ret_by_ref: bool;
   m_fun_kind: fun_kind;
+}
+
+and typeconst = {
+  tconst_abstract: bool;
+  tconst_name: id;
+  tconst_constraint: hint option;
+  tconst_type: hint option;
 }
 
 and is_reference = bool
@@ -181,26 +184,32 @@ and fun_param = {
    * can be only Public or Protected or Private.
    *)
   param_modifier: kind option;
-  param_user_attributes: user_attribute SMap.t;
+  param_user_attributes: user_attribute list;
 }
 
 and fun_ = {
-  f_mode            : mode;
+  f_mode            : FileInfo.mode;
   f_tparams         : tparam list;
   f_ret             : hint option;
   f_ret_by_ref      : bool;
   f_name            : id;
   f_params          : fun_param list;
   f_body            : block;
-  f_user_attributes : user_attribute SMap.t;
+  f_user_attributes : user_attribute list;
   f_mtime           : float;
   f_fun_kind        : fun_kind;
   f_namespace       : Namespace_env.env;
 }
 
+and fun_decl_kind =
+  | FDeclAsync
+  | FDeclSync
+
 and fun_kind =
-  | FAsync
   | FSync
+  | FAsync
+  | FGenerator
+  | FAsyncGenerator
 
 and hint = Pos.t * hint_
 and hint_ =
@@ -209,6 +218,20 @@ and hint_ =
   | Htuple of hint list
   | Happly of id * hint list
   | Hshape of shape_field list
+ (* This represents the use of a type const. Type consts are accessed like
+  * regular consts in Hack, i.e.
+  *
+  * Class::TypeConst
+  *
+  * Type const access can be chained such as
+  *
+  * Class::TC1::TC2::TC3
+  *
+  * This will result in the following representation
+  *
+  * Haccess ("Class", "TC1", ["TC2", "TC3"])
+  *)
+  | Haccess of id * id * id list
 
 and shape_field_name =
   | SFlit of pstring

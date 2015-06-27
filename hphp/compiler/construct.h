@@ -17,6 +17,7 @@
 #ifndef incl_HPHP_CONSTRUCT_H_
 #define incl_HPHP_CONSTRUCT_H_
 
+#include "hphp/parser/location.h"
 #include "hphp/compiler/json.h"
 #include <memory>
 #include "hphp/compiler/code_generator.h"
@@ -29,7 +30,6 @@ namespace HPHP {
 class Variant;
 DECLARE_BOOST_TYPES(StatementList);
 DECLARE_BOOST_TYPES(IParseHandler);
-DECLARE_BOOST_TYPES(Location);
 DECLARE_BOOST_TYPES(AnalysisResult);
 DECLARE_BOOST_TYPES(BlockScope);
 DECLARE_BOOST_TYPES(ClassScope);
@@ -60,20 +60,131 @@ public:
    * (eg) a method, the ClassScope doesnt exist. So we wait until onParse
    * is called for the class, and it calls onParseRecur for its children.
    */
-  virtual void onParseRecur(AnalysisResultConstPtr ar, ClassScopePtr scope) {
+  virtual void onParseRecur(AnalysisResultConstPtr ar, FileScopeRawPtr fs,
+                            ClassScopePtr scope) {
     always_assert(0);
   }
 };
+
+#define DECLARE_STATEMENT_TYPES(x) \
+  x(Statement)              \
+  x(FunctionStatement)      \
+  x(ClassStatement)         \
+  x(InterfaceStatement)     \
+  x(ClassVariable)          \
+  x(ClassConstant)          \
+  x(MethodStatement)        \
+  x(StatementList)          \
+  x(BlockStatement)         \
+  x(IfBranchStatement)      \
+  x(IfStatement)            \
+  x(WhileStatement)         \
+  x(DoStatement)            \
+  x(ForStatement)           \
+  x(SwitchStatement)        \
+  x(CaseStatement)          \
+  x(BreakStatement)         \
+  x(ContinueStatement)      \
+  x(ReturnStatement)        \
+  x(GlobalStatement)        \
+  x(StaticStatement)        \
+  x(EchoStatement)          \
+  x(UnsetStatement)         \
+  x(ExpStatement)           \
+  x(ForEachStatement)       \
+  x(FinallyStatement)       \
+  x(CatchStatement)         \
+  x(TryStatement)           \
+  x(ThrowStatement)         \
+  x(GotoStatement)          \
+  x(LabelStatement)         \
+  x(UseTraitStatement)      \
+  x(ClassRequireStatement)  \
+  x(TraitPrecStatement)     \
+  x(TraitAliasStatement)    \
+  x(TypedefStatement)
+
+#define DECLARE_EXPRESSION_TYPES(x)     \
+  x(Expression,                  None) \
+  x(ExpressionList,              None) \
+  x(AssignmentExpression,       Store) \
+  x(SimpleVariable,              Load) \
+  x(DynamicVariable,             Load) \
+  x(StaticMemberExpression,      Load) \
+  x(ArrayElementExpression,      Load) \
+  x(DynamicFunctionCall,         Call) \
+  x(SimpleFunctionCall,          Call) \
+  x(ScalarExpression,            None) \
+  x(ObjectPropertyExpression,    Load) \
+  x(ObjectMethodExpression,      Call) \
+  x(ListAssignment,             Store) \
+  x(NewObjectExpression,         Call) \
+  x(UnaryOpExpression,         Update) \
+  x(IncludeExpression,           Call) \
+  x(BinaryOpExpression,        Update) \
+  x(QOpExpression,               None) \
+  x(ArrayPairExpression,         None) \
+  x(ClassConstantExpression,    Const) \
+  x(ParameterExpression,         None) \
+  x(ModifierExpression,          None) \
+  x(ConstantExpression,         Const) \
+  x(EncapsListExpression,        None) \
+  x(ClosureExpression,           None) \
+  x(YieldExpression,             None) \
+  x(AwaitExpression,             None) \
+  x(UserAttribute,               None) \
+  x(QueryExpression,             None) \
+  x(FromClause,                  None) \
+  x(LetClause,                   None) \
+  x(WhereClause,                 None) \
+  x(SelectClause,                None) \
+  x(IntoClause,                  None) \
+  x(JoinClause,                  None) \
+  x(GroupClause,                 None) \
+  x(OrderbyClause,               None) \
+  x(Ordering,                    None)
 
 /**
  * Base class of Expression and Statement.
  */
 class Construct : public std::enable_shared_from_this<Construct>,
                   public JSON::CodeError::ISerializable {
-protected:
-  Construct(BlockScopePtr scope, LocationPtr loc);
 public:
   virtual ~Construct() {}
+
+#define DEC_STATEMENT_ENUM(x) KindOf##x,
+#define DEC_EXPRESSION_ENUM(x,t) KindOf##x,
+  enum KindOf {
+    DECLARE_STATEMENT_TYPES(DEC_STATEMENT_ENUM)
+    DECLARE_EXPRESSION_TYPES(DEC_EXPRESSION_ENUM)
+  };
+#undef DEC_EXPRESSION_ENUM
+#undef DEC_STATEMENT_ENUM
+
+protected:
+  Construct(BlockScopePtr scope, const Location::Range& loc, KindOf);
+
+public:
+  /**
+   * Type checking without RTTI.
+   */
+  bool is(KindOf type) const {
+    assert(m_kindOf != KindOfStatement);
+    assert(m_kindOf != KindOfExpression);
+    return m_kindOf == type;
+  }
+  KindOf getKindOf() const {
+    assert(m_kindOf != KindOfStatement);
+    assert(m_kindOf != KindOfExpression);
+    return m_kindOf;
+  }
+
+  bool isStatement() const {
+    return !isExpression();
+  }
+  bool isExpression() const {
+    return m_kindOf > KindOfExpression;
+  }
 
   enum Effect {
     NoEffect = 0,
@@ -98,8 +209,11 @@ public:
     UnknownEffect = 0xfff        // any of the above
   };
 
-  LocationPtr getLocation() const { return m_loc;}
-  void setLocation(LocationPtr loc) { m_loc = loc;}
+  void copyLocationTo(ConstructPtr other);
+  const Location::Range& getRange() const { return m_r; }
+  int line0() const { return m_r.line0; }
+  int line1() const { return m_r.line1; }
+  void setFirst(int line0, int char0) { m_r.line0 = line0; m_r.char0 = char0; }
   void setFileLevel() { m_flags.topLevel = m_flags.fileLevel = true;}
   void setTopLevel() { m_flags.topLevel = true;}
   void setVisited() { m_flags.visited = true;}
@@ -123,9 +237,6 @@ public:
   void setLocalExprAltered() { m_flags.localExprNotAltered = false; }
   void clearLocalExprAltered() { m_flags.localExprNotAltered = true; }
   bool isLocalExprAltered() const { return !m_flags.localExprNotAltered; }
-  void setChainRoot() { m_flags.chainRoot = true; }
-  void clearChainRoot() { m_flags.chainRoot = false; }
-  bool isChainRoot() const { return m_flags.chainRoot; }
 
   void setReferencedValid() { m_flags.referenced_valid = true; }
   void clearReferencedValid() { m_flags.referenced_valid = false; }
@@ -134,10 +245,6 @@ public:
   void setReferenced() { m_flags.referenced = true; }
   void clearReferenced() { m_flags.referenced = false; }
   bool isReferenced() const { return m_flags.referenced; }
-
-  void setNeededValid() { m_flags.needed_valid = true; }
-  void clearNeededValid() { m_flags.needed_valid = false; }
-  bool isNeededValid() const { return m_flags.needed_valid; }
 
   void setNeeded() { m_flags.needed = true; }
   void clearNeeded() { m_flags.needed = false; }
@@ -162,6 +269,9 @@ public:
   bool maybeInited() const {
     return !(m_flags.inited & 2) || (m_flags.inited & 1);
   }
+  void setIsUnpack() { m_flags.unpack = 1; }
+  bool isUnpack() const { return m_flags.unpack; }
+  void clearIsUnpack() { m_flags.unpack = 0; }
 
   void setKilled() { m_flags.killed = true; }
   void clearKilled() { m_flags.killed = false; }
@@ -179,8 +289,8 @@ public:
     return m_blockScope->getContainingClass();
   }
   void resetScope(BlockScopeRawPtr scope, bool resetOrigScope=false);
-  void parseTimeFatal(Compiler::ErrorType error, const char *fmt, ...)
-    ATTRIBUTE_PRINTF(3,4);
+  void parseTimeFatal(FileScopeRawPtr fs, Compiler::ErrorType error,
+                      const char *fmt, ...) ATTRIBUTE_PRINTF(4,5);
   void analysisTimeFatal(Compiler::ErrorType error, const char *fmt, ...)
     ATTRIBUTE_PRINTF(3,4);
   virtual int getLocalEffects() const { return UnknownEffect;}
@@ -296,27 +406,19 @@ private:
       unsigned referenced          : 1;
       unsigned referenced_valid    : 1; // is the above flag is valid
       unsigned needed              : 1;
-      unsigned needed_valid        : 1; // is the above flag is valid
-      unsigned chainRoot           : 1; // is this the begining of a
-                                        // CSE chain
       unsigned noRemove            : 1; // DCE should NOT remove this node
       unsigned guarded             : 1; // previously used
       unsigned killed              : 1;
       unsigned refCounted          : 2; // high bit indicates whether its valid
       unsigned inited              : 2; // high bit indicates whether its valid
+      unsigned unpack              : 1; // is this an unpack (only on params)
     } m_flags;
   };
+  Location::Range m_r;
 protected:
-  LocationPtr m_loc;
+  KindOf m_kindOf;
   mutable int m_containedEffects;
   mutable int m_effectsTag;
-
-  /**
-   * Called by analyzeProgram() to add a reference to a user class or
-   * function.
-   */
-  void addUserFunction(AnalysisResultPtr ar, const std::string &name);
-  void addUserClass(AnalysisResultPtr ar, const std::string &name);
 };
 
 class LocalEffectsContainer {
@@ -336,10 +438,10 @@ protected:
 };
 
 #define DECL_AND_IMPL_LOCAL_EFFECTS_METHODS \
-  virtual int getLocalEffects() const { \
+  int getLocalEffects() const override { \
     return LocalEffectsContainer::getLocalEffects(); \
   } \
-  virtual void effectsCallback() { recomputeEffects(); }
+  void effectsCallback() override { recomputeEffects(); }
 
 ///////////////////////////////////////////////////////////////////////////////
 }

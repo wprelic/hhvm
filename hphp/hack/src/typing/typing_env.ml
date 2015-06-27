@@ -24,46 +24,10 @@ module Dep = Typing_deps.Dep
  * very well isolated.
 *)
 
-(* Module used to represent serialized classes *)
-module Class = struct
-  type t = Typing_defs.class_type
-  let prefix = Prefix.make()
-end
-
-(* a function type *)
-module Fun = struct
-  type t = Typing_defs.fun_type
-  let prefix = Prefix.make()
-end
-
-module Typedef = struct
-
-  type visibility =
-    | Public
-    | Private
-
-  type tdef = visibility * Typing_defs.tparam list * ty option * ty * Pos.t
-
-  type tdef_or_error =
-    | Error
-    | Ok of tdef
-
-  type t = tdef_or_error
-  let prefix = Prefix.make()
-end
-
-module GConst = struct
-  type t = ty
-  let prefix = Prefix.make()
-end
-
-module Funs = SharedMem.WithCache (String) (Fun)
-module Classes = SharedMem.WithCache (String) (Class)
-module Typedefs = SharedMem.WithCache (String) (Typedef)
-module GConsts = SharedMem.WithCache (String) (GConst)
-
-type funs    = Funs.t
-type classes = Classes.t
+module Funs = Typing_heap.Funs
+module Classes = Typing_heap.Classes
+module Typedefs = Typing_heap.Typedefs
+module GConsts = Typing_heap.GConsts
 
 type fake_members = {
   last_call : Pos.t option;
@@ -71,36 +35,42 @@ type fake_members = {
   valid     : SSet.t;
 }
 
-type local = ty list * ty
+type local = locl ty list * locl ty
 type local_env = fake_members * local IMap.t
 
 type env = {
   pos     : Pos.t      ;
-  tenv    : ty  IMap.t ;
+  tenv    : locl ty  IMap.t ;
   subst   : int IMap.t ;
-  lenv    : local_env ;
+  lenv    : local_env  ;
   genv    : genv       ;
   todo    : tfun list  ;
+  in_loop : bool       ;
+  (* when encountering Tunresolved in the supertype, do we allow it to grow?
+   * if false, this allows the opposite, i.e. Tunresolved can grow in the
+   * subtype. *)
+  grow_super : bool      ;
 }
 
 and genv = {
-  mode    : Ast.mode;
-  return  : ty         ;
-  parent  : ty         ;
-  self_id : string     ;
-  self    : ty         ;
-  static  : bool       ;
-  allow_null_as_void : bool;
-  fun_kind : Nast.fun_kind;
+  tcopt   : TypecheckerOptions.t;
+  mode    : FileInfo.mode;
+  return  : locl ty;
+  parent  : decl ty;
+  self_id : string;
+  self    : locl ty;
+  static  : bool;
+  is_constructor : bool;
+  fun_kind : Ast.fun_kind;
   anons   : anon IMap.t;
-  droot   : Typing_deps.Dep.variant option  ;
+  droot   : Typing_deps.Dep.variant option;
   file    : Relative_path.t;
 }
 
 (* An anonymous function
  * the environment + the fun parameters + the captured identifiers
 *)
-and anon = env -> fun_params -> env * ty
+and anon = env -> locl fun_params -> env * locl ty
 and tfun = env -> env
 
 let fresh () =
@@ -141,7 +111,6 @@ let get_type env x =
   | None -> env, (Reason.none, Tany)
   | Some ty -> env, ty
 
-
 let get_type_unsafe env x =
   let ty = IMap.get x env.tenv in
   match ty with
@@ -154,15 +123,21 @@ let expand_type env x =
   | _, Tvar x -> get_type env x
   | x -> env, x
 
-let has_type env x =
-  let env, x = get_var env x in
-  IMap.mem x env.tenv
+let expand_type_recorded env set ty =
+  match ty with
+  | r, Tvar x -> begin
+    let env, ty =
+      if ISet.mem x set then env, (r, Tany) else expand_type env ty in
+    let set = ISet.add x set in
+    env, set, ty
+  end
+  | x -> env, set, x
 
-let make_ft env p params ret_ty =
+let make_ft p params ret_ty =
   let arity = List.length params in
   {
     ft_pos      = p;
-    ft_unsafe   = false;
+    ft_deprecated = None;
     ft_abstract = false;
     ft_arity    = Fstandard (arity, arity);
     ft_tparams  = [];
@@ -173,6 +148,23 @@ let make_ft env p params ret_ty =
 let get_shape_field_name = function
   | SFlit (_, s) -> s
   | SFclass_const ((_, s1), (_, s2)) -> s1^"::"^s2
+
+(* When printing out types (by hh_show()), TVars are printed with an
+ * associated identifier. We reindex them (in the order of appearance) to be
+ * consecutive integers starting from zero, because the internal identifier
+ * can change due to unrelated reasons, which breaks tests. *)
+let printable_tvar_ids = ref IMap.empty
+
+let get_printable_tvar_id x =
+  match IMap.get x !printable_tvar_ids with
+    | None ->
+        let res = (IMap.cardinal !printable_tvar_ids) + 1 in
+        printable_tvar_ids := IMap.add
+          x
+          res
+          !printable_tvar_ids;
+       res
+    | Some v -> v
 
 let rec debug stack env (r, ty) =
   let o = print_string in
@@ -187,10 +179,13 @@ let rec debug stack env (r, ty) =
   | Tarray _ -> assert false
   | Tmixed -> o "mixed"
   | Tabstract (x, argl, _)
-  | Tapply (x, argl) ->
+  | Tclass (x, argl) ->
       Printf.printf "App %s" (snd x);
       o "<"; List.iter (fun x -> debug stack env x; o ", ") argl;
       o ">"
+  | Taccess (root_ty, ids) ->
+      debug stack env root_ty;
+      o (List.fold_left (fun acc (_, sid) -> acc ^ "::" ^ sid) "" ids)
   | Tany -> o "X"
   | Tanon _ -> o "anonymous"
   | Tfun ft ->
@@ -209,13 +204,16 @@ let rec debug stack env (r, ty) =
       | Tnum -> o "Tnum"
       | Tresource -> o "Tresource"
       | Tarraykey -> o "Tarraykey"
+      | Tnoreturn -> o "Tnoreturn"
       )
   | Tgeneric (s, x) ->
+      o "generic ";
       o s;
       (match x with
       | None -> ()
-      | Some x -> o "<"; debug stack env x; o ">"
-      )
+      | Some (Ast.Constraint_as, x) -> o " as <"; debug stack env x; o ">"
+      | Some (Ast.Constraint_super, x) ->
+          o " super <"; debug stack env x; o ">")
   | Tvar x ->
       let env, x = get_var env x in
       if ISet.mem x stack
@@ -223,12 +221,15 @@ let rec debug stack env (r, ty) =
       else
         let stack = ISet.add x stack in
         let _, y = get_var env x in
-        o "["; o (string_of_int y); o "]";
+        o "["; o (string_of_int (get_printable_tvar_id y)); o "]";
         (match get_type env x with
         | _, (_, Tany) -> o (Ident.debug x)
         | _, ty -> debug stack env ty)
   | Tobject -> o "object"
-  | Tshape fdm -> o "shape(";
+  | Tshape (fields_known, fdm) ->
+      o "shape<fields ";
+      o (if fields_known then "fully" else "partially");
+      o " known>(";
       ShapeMap.iter begin fun k v ->
         o (get_shape_field_name k); o " => "; debug stack env v
       end fdm;
@@ -251,21 +252,24 @@ let empty_fake_members = {
 
 let empty_local = empty_fake_members, IMap.empty
 
-let empty file = {
+let empty tcopt file = {
   pos     = Pos.none;
   tenv    = IMap.empty;
   subst   = IMap.empty;
   lenv    = empty_local;
   todo    = [];
+  in_loop = false;
+  grow_super = true;
   genv    = {
-    mode    = Ast.Mstrict;
+    tcopt   = tcopt;
+    mode    = FileInfo.Mstrict;
     return  = fresh_type();
     self_id = "";
     self    = Reason.none, Tany;
     static  = false;
+    is_constructor = false;
     parent  = Reason.none, Tany;
-    allow_null_as_void = false;
-    fun_kind = FSync;
+    fun_kind = Ast.FSync;
     anons   = IMap.empty;
     droot   = None;
     file    = file;
@@ -276,21 +280,21 @@ let add_class x y =
   Classes.add x y
 
 let add_typedef x y =
-  Typedefs.add x (Typedef.Ok y)
+  Typedefs.add x (Typing_heap.Typedef.Ok y)
 
-let is_typedef env x =
+let is_typedef x =
   match Typedefs.get x with
   | None -> false
   | Some _ -> true
 
-let get_enum env x =
+let get_enum x =
   match Classes.get x with
-    | Some tc when tc.tc_enum_type <> None -> Some tc
-    | _ -> None
+  | Some tc when tc.tc_enum_type <> None -> Some tc
+  | _ -> None
 
-let is_enum env x = get_enum env x <> None
+let is_enum x = get_enum x <> None
 
-let get_enum_constraint env x =
+let get_enum_constraint x =
   match Classes.get x with
   | None -> None
   | Some tc ->
@@ -299,34 +303,29 @@ let get_enum_constraint env x =
       | Some e -> e.te_constraint
 
 let add_typedef_error x =
-  Typedefs.add x Typedef.Error
+  Typedefs.add x Typing_heap.Typedef.Error
 
 (* Adds a new function (global) *)
 let add_fun x ft =
   Funs.add x ft
 
-(* Manipulating the environment *)
 let add_wclass env x =
   let dep = Dep.Class x in
   Typing_deps.add_idep env.genv.droot dep;
-  env
+  ()
 
 (* When we want to type something with a fresh typing environment *)
 let fresh_tenv env f =
   let genv = env.genv in
-  let genv = { genv with allow_null_as_void = false } in
-  f { env with todo = []; tenv = IMap.empty; genv = genv }
+  f { env with todo = []; tenv = IMap.empty; genv = genv; in_loop = false }
 
 let get_class env x =
-  let env = add_wclass env x in
-  env, Classes.get x
+  add_wclass env x;
+  Classes.get x
 
 let get_typedef env x =
-  let env = add_wclass env x in
-  env, Typedefs.get x
-
-let class_exists x =
-  Classes.mem x
+  add_wclass env x;
+  Typedefs.get x
 
 let add_extends_dependency env x =
   let dep = Dep.Class x in
@@ -335,20 +334,16 @@ let add_extends_dependency env x =
   ()
 
 let get_class_dep env x =
-  let env = add_wclass env x in
+  add_wclass env x;
   add_extends_dependency env x;
-  let class_ = Classes.get x in
-  match class_ with
-  | None -> env, None
-  | Some class_ ->
-      env, Some class_
+  Classes.get x
 
 (* Used to access class constants. *)
 let get_const env class_ mid =
-  let env = add_wclass env class_.tc_name in
+  add_wclass env class_.tc_name;
   let dep = Dep.Const (class_.tc_name, mid) in
   Typing_deps.add_idep env.genv.droot dep;
-  env, SMap.get mid class_.tc_consts
+  SMap.get mid class_.tc_consts
 
 (* Used to access "global constants". That is constants that were
  * introduced with "const X = ...;" at topelevel, or "define('X', ...);"
@@ -358,12 +353,12 @@ let get_gconst env cst_name =
   GConsts.get cst_name
 
 let get_static_member is_method env class_ mid =
-  let env = add_wclass env class_.tc_name in
+  add_wclass env class_.tc_name;
   let dep = if is_method then Dep.SMethod (class_.tc_name, mid)
-  else Dep.SCVar (class_.tc_name, mid) in
+  else Dep.SProp (class_.tc_name, mid) in
   Typing_deps.add_idep env.genv.droot dep;
-  env, if is_method then SMap.get mid class_.tc_smethods
-  else SMap.get mid class_.tc_scvars
+  if is_method then SMap.get mid class_.tc_smethods
+  else SMap.get mid class_.tc_sprops
 
 let suggest_member members mid =
   let members = SMap.fold begin fun x ce acc ->
@@ -375,33 +370,40 @@ let suggest_member members mid =
 
 let suggest_static_member is_method class_ mid =
   let mid = String.lowercase mid in
-  let members = if is_method then class_.tc_smethods else class_.tc_scvars in
+  let members = if is_method then class_.tc_smethods else class_.tc_sprops in
   suggest_member members mid
 
-let method_exists class_ mid =
-  SMap.mem mid class_.tc_methods
-
 let get_member is_method env class_ mid =
-  let env = add_wclass env class_.tc_name in
+  add_wclass env class_.tc_name;
   let dep = if is_method then Dep.Method (class_.tc_name, mid)
-  else Dep.CVar (class_.tc_name, mid) in
+  else Dep.Prop (class_.tc_name, mid) in
   Typing_deps.add_idep env.genv.droot dep;
-  env, if is_method then (SMap.get mid class_.tc_methods)
-  else SMap.get mid class_.tc_cvars
+  if is_method then (SMap.get mid class_.tc_methods)
+  else SMap.get mid class_.tc_props
 
 let suggest_member is_method class_ mid =
   let mid = String.lowercase mid in
-  let members = if is_method then class_.tc_methods else class_.tc_cvars in
+  let members = if is_method then class_.tc_methods else class_.tc_props in
   suggest_member members mid
 
 let get_construct env class_ =
-  let env = add_wclass env class_.tc_name in
+  add_wclass env class_.tc_name;
   let dep = Dep.Cstr (class_.tc_name) in
   Typing_deps.add_idep env.genv.droot dep;
-  env, class_.tc_construct
+  class_.tc_construct
 
 let get_todo env =
   env.todo
+
+let grow_super env =
+  env.grow_super
+
+let invert_grow_super env f =
+  let old = env.grow_super in
+  let env = { env with grow_super = not old } in
+  let env = f env in
+  let env = { env with grow_super = old } in
+  env
 
 let get_return env =
   env.genv.return
@@ -416,7 +418,7 @@ let with_return env f =
   let env = f env in
   set_return env ret
 
-let allow_null_as_void env = env.genv.allow_null_as_void
+let is_constructor env = env.genv.is_constructor
 let is_static env = env.genv.static
 let get_self env = env.genv.self
 let get_self_id env = env.genv.self_id
@@ -424,15 +426,12 @@ let get_parent env = env.genv.parent
 
 let get_fn_kind env = env.genv.fun_kind
 
+let get_file env = env.genv.file
+
 let get_fun env x =
   let dep = Dep.Fun x in
   Typing_deps.add_idep env.genv.droot dep;
-  env, Funs.get x
-
-let set_allow_null_as_void ?(allow=true) env =
-  let genv = env.genv in
-  let genv = { genv with allow_null_as_void = allow } in
-  { env with genv = genv }
+  Funs.get x
 
 let set_fn_kind env fn_type =
   let genv = env.genv in
@@ -447,6 +446,11 @@ let add_anonymous env x =
   let anon_id = Ident.tmp() in
   let genv = { genv with anons = IMap.add anon_id x genv.anons } in
   { env with genv = genv }, anon_id
+
+let set_anonymous env anon_id x =
+  let genv = env.genv in
+  let genv = { genv with anons = IMap.add anon_id x genv.anons } in
+  { env with genv = genv }
 
 let get_anonymous env x =
   IMap.get x env.genv.anons
@@ -481,10 +485,17 @@ let set_root env root =
   let genv = { genv with droot = Some root } in
   { env with genv = genv }
 
+let set_is_constructor env =
+  let genv = env.genv in
+  let genv = { genv with is_constructor = true } in
+  { env with genv = genv }
+
 let get_mode env = env.genv.mode
 
-let is_strict env = get_mode env = Ast.Mstrict
-let is_decl env = get_mode env = Ast.Mdecl
+let is_strict env = get_mode env = FileInfo.Mstrict
+let is_decl env = get_mode env = FileInfo.Mdecl
+
+let get_options env = env.genv.tcopt
 
 (*
 let debug_env env =
@@ -561,16 +572,7 @@ module FakeMembers = struct
     string_of_int obj_name^"->"^member_name
 
   let make_static_id cid member_name =
-    let class_name =
-      match cid with
-      | CIparent -> SN.Classes.cParent
-      | CIself -> SN.Classes.cSelf
-      | CIstatic -> SN.Classes.cStatic
-      | CIvar (_, This) -> "$this"
-      | CIvar (_, Lvar (_, x)) -> "$"^string_of_int(x)
-      | CIvar _ -> assert false
-      | CI (_, x) -> x
-    in
+    let class_name = class_id_to_str cid in
     class_name^"::"^member_name
 
   let get env obj member_name =
@@ -605,15 +607,15 @@ module FakeMembers = struct
     let fake_members = { fake_members with valid = valid } in
     { env with lenv = fake_members, locals }
 
-  let make p env obj_name member_name =
+  let make _ env obj_name member_name =
     let my_fake_local_id = make_id obj_name member_name in
     let env = add_member env my_fake_local_id in
     env, Hashtbl.hash my_fake_local_id
 
- let make_static p env class_name member_name =
+ let make_static _ env class_name member_name =
    let my_fake_local_id = make_static_id class_name member_name in
    let env = add_member env my_fake_local_id in
-    env, Hashtbl.hash my_fake_local_id
+   env, Hashtbl.hash my_fake_local_id
 
 end
 
@@ -722,3 +724,9 @@ let anon anon_lenv env f =
   let env = set_return env old_return in
   let env = set_fn_kind env outer_fun_kind in
   env, result
+
+let in_loop env f =
+  let old_in_loop = env.in_loop in
+  let env = { env with in_loop = true } in
+  let env = f env in
+  { env with in_loop = old_in_loop }

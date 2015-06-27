@@ -78,15 +78,14 @@ void ObjectMethodExpression::analyzeProgram(AnalysisResultPtr ar) {
             !(func->isVirtual() &&
               (func->isAbstract() ||
                (func->hasOverride() &&
-                cls->getAttribute(ClassScope::NotFinal))) &&
-              !func->isPerfectVirtual())) {
+                cls->getAttribute(ClassScope::NotFinal))))) {
           m_funcScope = func;
           func->addCaller(getScope());
         }
       }
     }
 
-    markRefParams(func, m_name, canInvokeFewArgs());
+    markRefParams(func, m_name);
   }
 
   // This is OK because AnalyzeFinal is guaranteed to run for a CPP
@@ -96,17 +95,7 @@ void ObjectMethodExpression::analyzeProgram(AnalysisResultPtr ar) {
     // necessary because we set the expected type of m_object to
     // Type::Some during type inference.
     TypePtr at(m_object->getActualType());
-    TypePtr it(m_object->getImplementedType());
     if (!m_object->isThis() && at && at->is(Type::KindOfObject)) {
-      if (at->isSpecificObject() && it && Type::IsMappedToVariant(it)) {
-        // fast-cast inference
-        ClassScopePtr scope(ar->findClass(at->getName()));
-        if (scope) {
-          // add a dependency to m_object's class type
-          // to allow the fast cast to succeed
-          addUserClass(ar, at->getName());
-        }
-      }
       m_object->setExpectedType(at);
     }
   }
@@ -126,25 +115,6 @@ void ObjectMethodExpression::setNthKid(int n, ConstructPtr cp) {
 }
 
 ExpressionPtr ObjectMethodExpression::preOptimize(AnalysisResultConstPtr ar) {
-  if (ar->getPhase() < AnalysisResult::FirstPreOptimize) {
-    return ExpressionPtr();
-  }
-
-  if (m_classScope && m_funcScope &&
-      (!m_funcScope->isVirtual() ||
-       (Option::WholeProgram && !m_funcScope->hasOverride()))) {
-
-    if (Option::DynamicInvokeFunctions.size()) {
-      if (Option::DynamicInvokeFunctions.find(
-            m_classScope->getName() + "::" + m_funcScope->getName()) !=
-          Option::DynamicInvokeFunctions.end()) {
-        setNoInline();
-      }
-    }
-
-    return inliner(ar, m_object, "");
-  }
-
   return ExpressionPtr();
 }
 
@@ -166,7 +136,7 @@ void ObjectMethodExpression::outputCodeModel(CodeGenerator &cg) {
     cg.printExpressionVector(m_params);
   }
   cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
+  cg.printLocation(this);
   cg.printObjectFooter();
 }
 

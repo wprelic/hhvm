@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_ICU_TIMEZONE_H
 #define incl_HPHP_ICU_TIMEZONE_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/timezone.h>
@@ -43,7 +43,7 @@ class IntlTimeZone : public IntlError {
       c_IntlTimeZone = Unit::lookupClass(s_IntlTimeZone.get());
       assert(c_IntlTimeZone);
     }
-    auto obj = ObjectData::newInstance(c_IntlTimeZone);
+    Object obj{c_IntlTimeZone};
     if (tz) {
       Native::data<IntlTimeZone>(obj)->setTimeZone(tz, owned);
     }

@@ -42,7 +42,6 @@
 #include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/attr.h"
 #include "hphp/runtime/base/autoload-handler.h"
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/runtime-error.h"
@@ -63,6 +62,7 @@
 #include "hphp/runtime/vm/debugger-hook.h"
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/func-inline.h"
+#include "hphp/runtime/vm/hh-utils.h"
 #include "hphp/runtime/vm/hhbc.h"
 #include "hphp/runtime/vm/instance-bits.h"
 #include "hphp/runtime/vm/named-entity.h"
@@ -402,8 +402,8 @@ bool Unit::getOffsetRange(Offset pc, OffsetRange& range) const {
   if (it != lineTable.end()) {
     assert(pc < it->pastOffset());
     Offset base = it == lineTable.begin() ? 0 : (it-1)->pastOffset();
-    range.m_base = base;
-    range.m_past = it->pastOffset();
+    range.base = base;
+    range.past = it->pastOffset();
     return true;
   }
   return false;
@@ -513,8 +513,8 @@ void Unit::loadFunc(const Func *func) {
     (RuntimeOption::RepoAuthoritative || !SystemLib::s_inited) &&
     (func->attrs() & AttrPersistent);
   ne->m_cachedFunc.bind(
-    isPersistent ? RDS::Mode::Persistent
-                 : RDS::Mode::Normal
+    isPersistent ? rds::Mode::Persistent
+                 : rds::Mode::Normal
   );
   const_cast<Func*>(func)->setFuncHandle(ne->m_cachedFunc);
   if (RuntimeOption::EvalPerfDataMap) {
@@ -531,7 +531,6 @@ void Unit::loadFunc(const Func *func) {
 class FrameRestore {
  public:
   explicit FrameRestore(const PreClass* preClass) {
-    auto const ec = g_context.getNoCheck();
     ActRec* fp = vmfp();
     PC pc = vmpc();
 
@@ -560,7 +559,7 @@ class FrameRestore {
       tmp.initNumArgs(0);
       vmfp() = &tmp;
       vmpc() = preClass->unit()->at(preClass->getOffset());
-      ec->pushLocalsAndIterators(tmp.m_func);
+      pushLocalsAndIterators(tmp.m_func);
     } else {
       m_top = nullptr;
       m_fp = nullptr;
@@ -579,7 +578,6 @@ class FrameRestore {
   ActRec* m_fp;
   PC      m_pc;
 };
-
 
 ///////////////////////////////////////////////////////////////////////////////
 // Class lookup.
@@ -670,29 +668,18 @@ Class* Unit::defClass(const PreClass* preClass,
       (!SystemLib::s_inited || RuntimeOption::RepoAuthoritative) &&
       newClass->verifyPersistent();
     nameList->m_cachedClass.bind(
-      isPersistent ? RDS::Mode::Persistent
-                   : RDS::Mode::Normal
+      isPersistent ? rds::Mode::Persistent
+                   : rds::Mode::Normal
     );
     newClass->setClassHandle(nameList->m_cachedClass);
     newClass.get()->incAtomicCount();
 
-    if (InstanceBits::initFlag.load(std::memory_order_acquire)) {
-      // If the instance bitmap has already been set up, we can just
-      // initialize our new class's bits and add ourselves to the class
-      // list normally.
-      newClass->setInstanceBits();
-      nameList->pushClass(newClass.get());
-    } else {
-      // Otherwise, we have to grab the read lock. If the map has been
-      // initialized since we checked, initialize the bits normally. If not,
-      // we must add the new class to the class list before dropping the lock
-      // to ensure its bits are initialized when the time comes.
-      ReadLock l(InstanceBits::lock);
-      if (InstanceBits::initFlag.load(std::memory_order_acquire)) {
-        newClass->setInstanceBits();
-      }
-      nameList->pushClass(newClass.get());
-    }
+    InstanceBits::ifInitElse(
+      [&] { newClass->setInstanceBits();
+            nameList->pushClass(newClass.get()); },
+      [&] { nameList->pushClass(newClass.get()); }
+    );
+
     if (RuntimeOption::EvalPerfDataMap) {
       Debug::DebugInfo::recordDataMap(
         newClass.get(), newClass.get() + 1,
@@ -767,32 +754,31 @@ bool Unit::classExists(const StringData* name, bool autoload, ClassKind kind) {
 const Cell* Unit::lookupCns(const StringData* cnsName) {
   auto const handle = lookupCnsHandle(cnsName);
   if (LIKELY(handle != 0)) {
-    TypedValue& tv = RDS::handleToRef<TypedValue>(handle);
+    TypedValue& tv = rds::handleToRef<TypedValue>(handle);
     if (LIKELY(tv.m_type != KindOfUninit)) {
       assert(cellIsPlausible(tv));
       return &tv;
     }
     if (UNLIKELY(tv.m_data.pref != nullptr)) {
-      ClassInfo::ConstantInfo* ci =
-        (ClassInfo::ConstantInfo*)(void*)tv.m_data.pref;
-      auto const tvRet = const_cast<Variant&>(
-        ci->getDeferredValue()).asTypedValue();
+      auto callback =
+        reinterpret_cast<SystemConstantCallback>(tv.m_data.pref);
+      const Cell* tvRet = callback().asTypedValue();
       assert(cellIsPlausible(*tvRet));
       if (LIKELY(tvRet->m_type != KindOfUninit)) {
         return tvRet;
       }
     }
   }
-  if (UNLIKELY(RDS::s_constants().get() != nullptr)) {
-    return RDS::s_constants()->nvGet(cnsName);
+  if (UNLIKELY(rds::s_constants().get() != nullptr)) {
+    return rds::s_constants()->nvGet(cnsName);
   }
   return nullptr;
 }
 
 const Cell* Unit::lookupPersistentCns(const StringData* cnsName) {
   auto const handle = lookupCnsHandle(cnsName);
-  if (!RDS::isPersistentHandle(handle)) return nullptr;
-  auto const ret = &RDS::handleToRef<TypedValue>(handle);
+  if (!rds::isPersistentHandle(handle)) return nullptr;
+  auto const ret = &rds::handleToRef<TypedValue>(handle);
   assert(cellIsPlausible(*ret));
   return ret;
 }
@@ -815,7 +801,7 @@ const TypedValue* Unit::loadCns(const StringData* cnsName) {
 static uint64_t defCnsHelper(uint64_t ch,
                              const TypedValue *value,
                              const StringData *cnsName) {
-  TypedValue* cns = &RDS::handleToRef<TypedValue>(ch);
+  TypedValue* cns = &rds::handleToRef<TypedValue>(ch);
   if (UNLIKELY(cns->m_type != KindOfUninit) ||
       UNLIKELY(cns->m_data.pref != nullptr)) {
     raise_notice(Strings::CONSTANT_ALREADY_DEFINED, cnsName->data());
@@ -836,18 +822,18 @@ bool Unit::defCns(const StringData* cnsName, const TypedValue* value,
   auto const handle = makeCnsHandle(cnsName, persistent);
 
   if (UNLIKELY(handle == 0)) {
-    if (UNLIKELY(!RDS::s_constants().get())) {
+    if (UNLIKELY(!rds::s_constants().get())) {
       /*
        * This only happens when we call define on a non
        * static string. Not worth presizing or otherwise
        * optimizing for.
        */
-      RDS::s_constants() =
+      rds::s_constants() =
         Array::attach(MixedArray::MakeReserve(1));
     }
-    auto const existed = !!RDS::s_constants()->nvGet(cnsName);
+    auto const existed = !!rds::s_constants()->nvGet(cnsName);
     if (!existed) {
-      RDS::s_constants().set(StrNR(cnsName),
+      rds::s_constants().set(StrNR(cnsName),
         tvAsCVarRef(value), true /* isKey */);
       return true;
     }
@@ -857,21 +843,22 @@ bool Unit::defCns(const StringData* cnsName, const TypedValue* value,
   return defCnsHelper(handle, value, cnsName);
 }
 
-void Unit::defDynamicSystemConstant(const StringData* cnsName,
-                                    const void* data) {
+bool Unit::defSystemConstantCallback(const StringData* cnsName,
+                                     SystemConstantCallback callback) {
   static const bool kServer = RuntimeOption::ServerExecutionMode();
   // Zend doesn't define the STD* streams in server mode so we don't either
   if (UNLIKELY(kServer &&
        (s_stdin.equal(cnsName) ||
         s_stdout.equal(cnsName) ||
         s_stderr.equal(cnsName)))) {
-    return;
+    return false;
   }
   auto const handle = makeCnsHandle(cnsName, true);
   assert(handle);
-  TypedValue* cns = &RDS::handleToRef<TypedValue>(handle);
+  TypedValue* cns = &rds::handleToRef<TypedValue>(handle);
   assert(cns->m_type == KindOfUninit);
-  cns->m_data.pref = (RefData*)data;
+  cns->m_data.pref = reinterpret_cast<RefData*>(callback);
+  return true;
 }
 
 
@@ -882,22 +869,18 @@ namespace {
 
 TypeAliasReq typeAliasFromClass(const TypeAlias* thisType, Class *klass) {
   TypeAliasReq req;
-
+  req.name = thisType->name;
+  req.nullable = thisType->nullable;
   if (isEnum(klass)) {
     // If the class is an enum, pull out the actual base type.
     if (auto const enumType = klass->enumBaseTy()) {
-      req.kind     = *enumType;
-      req.nullable = thisType->nullable;
-      req.name     = thisType->name;
+      req.type = dataTypeToAnnotType(*enumType);
     } else {
-      req.any  = true;
-      req.name = thisType->name;
+      req.type = AnnotType::Mixed;
     }
   } else {
-    req.kind     = KindOfObject;
-    req.nullable = thisType->nullable;
-    req.klass    = klass;
-    req.name     = thisType->name;
+    req.type = AnnotType::Object;
+    req.klass = klass;
   }
   return req;
 }
@@ -914,8 +897,9 @@ TypeAliasReq resolveTypeAlias(const TypeAlias* thisType) {
    * If the right hand side was a class, we need to autoload and
    * ensure it exists at this point.
    */
-
-  if (thisType->kind != KindOfObject) {
+  if (thisType->type != AnnotType::Object &&
+      thisType->type != AnnotType::Self &&
+      thisType->type != AnnotType::Parent) {
     return TypeAliasReq::From(*thisType);
   }
 
@@ -998,9 +982,9 @@ void Unit::defTypeAlias(Id id) {
 
   if (!nameList->m_cachedTypeAlias.bound()) {
     auto rdsMode = (thisType->attrs & AttrPersistent)
-      ? RDS::Mode::Persistent : RDS::Mode::Normal;
+      ? rds::Mode::Persistent : rds::Mode::Normal;
     nameList->m_cachedTypeAlias.bind(rdsMode);
-    RDS::recordRds(nameList->m_cachedTypeAlias.handle(),
+    rds::recordRds(nameList->m_cachedTypeAlias.handle(),
                    sizeof(TypeAliasReq),
                    "TypeAlias", typeName->data());
   }
@@ -1056,7 +1040,7 @@ void Unit::initialMerge() {
       allFuncsUnique = (f->attrs() & AttrUnique);
     }
     loadFunc(f);
-    if (RDS::isPersistentHandle(f->funcHandle())) {
+    if (rds::isPersistentHandle(f->funcHandle())) {
       needsCompact = true;
     }
   }
@@ -1148,7 +1132,7 @@ void Unit::initialMerge() {
             v->rdsHandle() = makeCnsHandle(
               s, k == MergeKind::PersistentDefine);
             if (k == MergeKind::PersistentDefine) {
-              mergeCns(RDS::handleToRef<TypedValue>(v->rdsHandle()),
+              mergeCns(rds::handleToRef<TypedValue>(v->rdsHandle()),
                        v, s);
             }
             break;
@@ -1174,9 +1158,9 @@ void Unit::merge() {
   }
 
   if (UNLIKELY(isDebuggerAttached())) {
-    mergeImpl<true>(RDS::tl_base, m_mergeInfo);
+    mergeImpl<true>(rds::tl_base, m_mergeInfo);
   } else {
-    mergeImpl<false>(RDS::tl_base, m_mergeInfo);
+    mergeImpl<false>(rds::tl_base, m_mergeInfo);
   }
 }
 
@@ -1216,7 +1200,7 @@ static size_t compactMergeInfo(Unit::MergeInfo* in, Unit::MergeInfo* out) {
   size_t delta = 0;
   while (it != fend) {
     Func* func = *it++;
-    if (RDS::isPersistentHandle(func->funcHandle())) {
+    if (rds::isPersistentHandle(func->funcHandle())) {
       delta++;
     } else if (iout) {
       *iout++ = func;
@@ -1237,7 +1221,7 @@ static size_t compactMergeInfo(Unit::MergeInfo* in, Unit::MergeInfo* out) {
       Class* cls = pre->namedEntity()->clsList();
       assert(cls && !cls->m_nextClass);
       assert(cls->preClass() == pre);
-      if (RDS::isPersistentHandle(cls->classHandle())) {
+      if (rds::isPersistentHandle(cls->classHandle())) {
         delta++;
       } else if (out) {
         out->mergeableObj(oix++) = (void*)(uintptr_t(cls) | 1);
@@ -1262,7 +1246,7 @@ static size_t compactMergeInfo(Unit::MergeInfo* in, Unit::MergeInfo* out) {
           Class* cls = pre->namedEntity()->clsList();
           assert(cls && !cls->m_nextClass);
           assert(cls->preClass() == pre);
-          if (RDS::isPersistentHandle(cls->classHandle())) {
+          if (rds::isPersistentHandle(cls->classHandle())) {
             delta++;
           } else if (out) {
             out->mergeableObj(oix++) = (void*)
@@ -1322,6 +1306,8 @@ template <bool debugger>
 void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
   assert(m_mergeState & MergeState::Merged);
 
+  autoTypecheck(this);
+
   Func** it = mi->funcHoistableBegin();
   Func** fend = mi->funcEnd();
   if (it != fend) {
@@ -1359,7 +1345,7 @@ void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
           Stats::inc(Stats::UnitMerge_hoistable_persistent);
         }
         if (Stats::enabled() &&
-            RDS::isPersistentHandle(cls->classHandle())) {
+            rds::isPersistentHandle(cls->classHandle())) {
           Stats::inc(Stats::UnitMerge_hoistable_persistent_cache);
         }
         if (Class* parent = cls->parent()) {
@@ -1367,7 +1353,7 @@ void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
             Stats::inc(Stats::UnitMerge_hoistable_persistent_parent);
           }
           if (Stats::enabled() &&
-              RDS::isPersistentHandle(parent->classHandle())) {
+              rds::isPersistentHandle(parent->classHandle())) {
             Stats::inc(Stats::UnitMerge_hoistable_persistent_parent_cache);
           }
           if (UNLIKELY(!getDataRef<Class*>(tcbase, parent->classHandle()))) {
@@ -1445,7 +1431,7 @@ void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
             Stats::inc(Stats::UnitMerge_mergeable_unique_persistent);
           }
           if (Stats::enabled() &&
-              RDS::isPersistentHandle(cls->classHandle())) {
+              rds::isPersistentHandle(cls->classHandle())) {
             Stats::inc(Stats::UnitMerge_mergeable_unique_persistent_cache);
           }
           Class::Avail avail = cls->avail(other, true);
@@ -1513,7 +1499,7 @@ void Unit::mergeImpl(void* tcbase, MergeInfo* mi) {
             if (!fp) {
               ve = g_context->m_globalVarEnv;
             } else {
-              if (fp->hasVarEnv()) {
+              if ((fp->func()->attrs() & AttrMayUseVV) && fp->hasVarEnv()) {
                 ve = fp->m_varEnv;
               } else {
                 // Nothing to do. If there is no varEnv, the enclosing
@@ -1753,50 +1739,6 @@ bool Unit::parseFatal(const StringData*& msg, int& line) const {
 
   auto kind_char = *pc;
   return kind_char == static_cast<uint8_t>(FatalOp::Parse);
-}
-
-
-///////////////////////////////////////////////////////////////////////////////
-
-AllClasses::AllClasses()
-  : m_next(NamedEntity::table()->begin())
-  , m_end(NamedEntity::table()->end())
-  , m_current(m_next != m_end ? m_next->second.clsList() : nullptr) {
-  if (!empty()) skip();
-}
-
-void AllClasses::skip() {
-  if (!m_current) {
-    assert(!empty());
-    ++m_next;
-    while (!empty()) {
-      m_current = m_next->second.clsList();
-      if (m_current) break;
-      ++m_next;
-    }
-  }
-  assert(empty() || front());
-}
-
-void AllClasses::next() {
-  m_current = m_current->m_nextClass;
-  skip();
-}
-
-bool AllClasses::empty() const {
-  return m_next == m_end;
-}
-
-Class* AllClasses::front() const {
-  assert(!empty());
-  assert(m_current);
-  return m_current;
-}
-
-Class* AllClasses::popFront() {
-  Class* cls = front();
-  next();
-  return cls;
 }
 
 ///////////////////////////////////////////////////////////////////////////////

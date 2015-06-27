@@ -22,16 +22,8 @@ namespace HPHP { namespace jit {
 ///////////////////////////////////////////////////////////////////////////////
 // Translator accessors.
 
-inline jit::IRTranslator* Translator::irTrans() const {
-  return m_irTrans.get();
-}
-
 inline ProfData* Translator::profData() const {
   return m_profData.get();
-}
-
-inline const RegionDesc* Translator::region() const {
-  return m_region;
 }
 
 inline const SrcDB& Translator::getSrcDB() const {
@@ -41,8 +33,14 @@ inline const SrcDB& Translator::getSrcDB() const {
 inline SrcRec* Translator::getSrcRec(SrcKey sk) {
   // XXX: Add a insert-or-find primitive to THM.
   if (SrcRec* r = m_srcDB.find(sk)) return r;
-  assert(s_writeLease.amOwner());
-  return m_srcDB.insert(sk);
+  assertx(s_writeLease.amOwner());
+
+  auto rec = m_srcDB.insert(sk);
+  if (RuntimeOption::EvalEnableReusableTC) {
+    recordFuncSrcRec(sk.func(), rec);
+  }
+
+  return rec;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -68,7 +66,9 @@ inline void Translator::setUseAHot(bool val) {
 // TransDB.
 
 inline bool Translator::isTransDBEnabled() {
-  return debug || RuntimeOption::EvalDumpTC;
+  return debug ||
+         RuntimeOption::EvalDumpTC ||
+         RuntimeOption::EvalDumpIR;
 }
 
 inline const TransRec* Translator::getTransRec(TCA tca) const {
@@ -104,7 +104,20 @@ inline Lease& Translator::WriteLease() {
 ///////////////////////////////////////////////////////////////////////////////
 // TransContext.
 
+inline TransContext::TransContext(TransID id, SrcKey sk, FPInvOffset spOff)
+  : transID(id)
+  , initSpOffset(spOff)
+  , func(sk.valid() ? sk.func() : nullptr)
+  , initBcOffset(sk.offset())
+  , prologue(sk.prologue())
+  , resumed(sk.resumed())
+{}
+
 inline SrcKey TransContext::srcKey() const {
+  if (prologue) {
+    assertx(!resumed);
+    return SrcKey { func, initBcOffset, SrcKey::PrologueTag{} };
+  }
   return SrcKey { func, initBcOffset, resumed };
 }
 

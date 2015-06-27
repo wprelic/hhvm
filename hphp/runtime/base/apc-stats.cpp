@@ -21,6 +21,9 @@
 #include "hphp/runtime/base/packed-array.h"
 #include "hphp/runtime/base/packed-array-defs.h"
 #include "hphp/runtime/base/mixed-array-defs.h"
+#include "hphp/runtime/base/shape.h"
+#include "hphp/runtime/base/struct-array.h"
+#include "hphp/runtime/base/struct-array-defs.h"
 #include "hphp/runtime/base/apc-handle.h"
 #include "hphp/runtime/base/apc-array.h"
 #include "hphp/runtime/base/apc-object.h"
@@ -117,11 +120,9 @@ size_t getMemSize(const APCObject* obj) {
 
 size_t getMemSize(const ArrayData* arr) {
   switch (arr->kind()) {
-  case ArrayData::ArrayKind::kVPackedKind:
   case ArrayData::ArrayKind::kPackedKind: {
     auto size = sizeof(ArrayData) +
-      (packedCodeToCap(arr->m_packedCapCode) - arr->m_size) *
-      sizeof(TypedValue);
+                sizeof(TypedValue) * (arr->cap() - arr->m_size);
     auto const values = reinterpret_cast<const TypedValue*>(arr + 1);
     auto const last = values + arr->m_size;
     for (auto ptr = values; ptr != last; ++ptr) {
@@ -129,12 +130,22 @@ size_t getMemSize(const ArrayData* arr) {
     }
     return size;
   }
-  case ArrayData::ArrayKind::kIntMapKind:
-  case ArrayData::ArrayKind::kStrMapKind:
+  case ArrayData::ArrayKind::kStructKind: {
+    auto structArray = StructArray::asStructArray(arr);
+    auto size = sizeof(StructArray) +
+      (structArray->shape()->capacity() - structArray->size()) *
+      sizeof(TypedValue);
+    auto const values = structArray->data();
+    auto const last = values + structArray->size();
+    for (auto ptr = values; ptr != last; ++ptr) {
+      size += getMemSize(ptr);
+    }
+    return size;
+  }
   case ArrayData::ArrayKind::kMixedKind: {
     auto const mixed = MixedArray::asMixed(arr);
     auto size = sizeof(MixedArray) +
-                sizeof(MixedArray::Elm) * (mixed->m_cap - mixed->m_used);
+                sizeof(MixedArray::Elm) * (mixed->capacity() - mixed->m_used);
     auto elms = mixed->data();
     auto last = elms + mixed->m_used;
     for (auto ptr = elms; ptr != last; ++ptr) {

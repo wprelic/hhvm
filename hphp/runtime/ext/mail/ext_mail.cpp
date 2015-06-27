@@ -15,7 +15,7 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/zend-string.h"
@@ -133,10 +133,10 @@ int64_t HHVM_FUNCTION(ezmlm_hash, const String& addr) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class MailExtension : public Extension {
+class MailExtension final : public Extension {
  public:
   MailExtension() : Extension("mail") { }
-  void moduleInit() {
+  void moduleInit() override {
     HHVM_FE(mail);
     HHVM_FE(ezmlm_hash);
     loadSystemlib();

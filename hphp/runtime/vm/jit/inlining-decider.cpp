@@ -17,17 +17,15 @@
 #include "hphp/runtime/vm/jit/inlining-decider.h"
 
 #include "hphp/runtime/base/arch.h"
-#include "hphp/runtime/base/datatype.h"
 #include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/ext/ext_generator.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/hhbc.h"
 #include "hphp/runtime/vm/srckey.h"
-#include "hphp/runtime/vm/jit/hhbc-translator.h"
 #include "hphp/runtime/vm/jit/normalized-instruction.h"
 #include "hphp/runtime/vm/jit/region-selection.h"
-
-#include "hphp/runtime/ext/ext_generator.h"
+#include "hphp/runtime/vm/jit/irgen.h"
 
 #include "hphp/util/trace.h"
 
@@ -45,7 +43,7 @@ bool traceRefusal(const Func* caller, const Func* callee, const char* why) {
   if (Trace::enabled) {
     UNUSED auto calleeName = callee ? callee->fullName()->data()
                                     : "(unknown)";
-    assert(caller);
+    assertx(caller);
 
     FTRACE(1, "InliningDecider: refusing {}() <- {}{}\t<reason: {}>\n",
            caller->fullName()->data(), calleeName, callee ? "()" : "", why);
@@ -87,13 +85,22 @@ bool isCalleeInlinable(SrcKey callSK, const Func* callee) {
     return refuse("call is recursive");
   }
   if (callee->hasVariadicCaptureParam()) {
-    return refuse("callee has variadic capture");
+    if (callee->attrs() & AttrMayUseVV) {
+      return refuse("callee has variadic capture and MayUseVV");
+    }
+    // Refuse if the variadic parameter actually captures something.
+    auto pc = reinterpret_cast<const Op*>(callSK.pc());
+    auto const numArgs = getImm(pc, 0).u_IVA;
+    auto const numParams = callee->numParams();
+    if (numArgs >= numParams) {
+      return refuse("callee has variadic capture with non-empty value");
+    }
   }
   if (callee->numIterators() != 0) {
     return refuse("callee has iterators");
   }
-  if (callee->isMagic() || Func::isSpecial(callee->name())) {
-    return refuse("special or magic callee");
+  if (callee->isMagic()) {
+    return refuse("magic callee");
   }
   if (callee->isResumable()) {
     return refuse("callee is resumable");
@@ -111,7 +118,7 @@ bool isCalleeInlinable(SrcKey callSK, const Func* callee) {
  * Check that we don't have any missing or extra arguments.
  */
 bool checkNumArgs(SrcKey callSK, const Func* callee) {
-  assert(callee);
+  assertx(callee);
 
   auto refuse = [&] (const char* why) {
     return traceRefusal(callSK.func(), callee, why);
@@ -129,7 +136,8 @@ bool checkNumArgs(SrcKey callSK, const Func* callee) {
   // as the gap can be filled in by DV funclets.
   for (auto i = numArgs; i < numParams; ++i) {
     auto const& param = callee->params()[i];
-    if (!param.hasDefaultValue()) {
+    if (!param.hasDefaultValue() &&
+        (i < numParams - 1 || !callee->hasVariadicCaptureParam())) {
       return refuse("callee called with too few arguments");
     }
   }
@@ -145,7 +153,7 @@ bool checkNumArgs(SrcKey callSK, const Func* callee) {
  */
 bool checkFPIRegion(SrcKey callSK, const Func* callee,
                     const RegionDesc& region) {
-  assert(callee);
+  assertx(callee);
 
   auto refuse = [&] (const char* why) {
     return traceRefusal(callSK.func(), callee, why);
@@ -165,9 +173,6 @@ bool checkFPIRegion(SrcKey callSK, const Func* callee,
   for (unsigned i = 0; i < blocks.size(); ++i) {
     if (blocks[i]->contains(pushSK)) {
       pushBlock = i;
-      break;
-    }
-    if (blocks[i]->contains(callSK)) {
       break;
     }
   }
@@ -269,12 +274,13 @@ namespace {
  * Check if a builtin is inlinable.
  */
 bool isInlinableCPPBuiltin(const Func* f) {
-  assert(f->isCPPBuiltin());
+  assertx(f->isCPPBuiltin());
 
   // The callee needs to be callable with FCallBuiltin, because NativeImpl
   // requires a frame.
-  if (f->attrs() & AttrNoFCallBuiltin ||
-      f->numParams() > Native::maxFCallBuiltinArgs() ||
+  if (!RuntimeOption::EvalEnableCallBuiltin ||
+      (f->attrs() & AttrNoFCallBuiltin) ||
+      (f->numParams() > Native::maxFCallBuiltinArgs()) ||
       !f->nativeFuncPtr()) {
     return false;
   }
@@ -298,12 +304,6 @@ bool isInlinableCPPBuiltin(const Func* f) {
 
   // For now, don't inline when we'd need to adjust ObjectData pointers.
   if (f->cls() && f->cls()->preClass()->builtinODOffset() != 0) {
-    return false;
-  }
-
-  // TODO: Static methods need to be passed their class, which we don't
-  // support yet. (t5360661)
-  if (f->isMethod() && (f->attrs() & AttrStatic)) {
     return false;
   }
 
@@ -346,8 +346,8 @@ bool isInliningVVSafe(Op op) {
 bool InliningDecider::shouldInline(const Func* callee,
                                    const RegionDesc& region) {
   auto sk = region.empty() ? SrcKey() : region.start();
-  assert(callee);
-  assert(sk.func() == callee);
+  assertx(callee);
+  assertx(sk.func() == callee);
 
   int cost = 0;
 
@@ -434,7 +434,7 @@ bool InliningDecider::shouldInline(const Func* callee,
       }
 
       // Count the returns.
-      if (isReturnish(op)) {
+      if (isRet(op) || op == Op::NativeImpl) {
         if (++numRets > 1) {
           return refuse("region has too many returns");
         }
@@ -481,42 +481,6 @@ void InliningDecider::registerEndInlining(const Func* callee) {
   m_cost -= cost;
   m_callDepth -= 1;
   m_stackDepth -= callee->maxStackCells();
-}
-
-RegionDescPtr selectCalleeRegion(const SrcKey& sk,
-                                 const Func* callee,
-                                 const HhbcTranslator& ht,
-                                 bool profiling) {
-  auto const op = reinterpret_cast<const Op*>(sk.pc());
-
-  auto const numArgs = getImm(op, 0).u_IVA;
-  auto const numParams = callee->numParams();
-
-  // Set up the RegionContext for the tracelet selector.
-  RegionContext ctx;
-  ctx.func = callee;
-  ctx.bcOffset = callee->getEntryForNumArgs(numArgs);
-  ctx.spOffset = callee->numSlotsInFrame();
-  ctx.resumed = nullptr;
-
-  for (unsigned i = 0; i < numArgs; ++i) {
-    // DataTypeGeneric is used because we're just passing the locals into the
-    // callee.  It's up to the callee to constrain further if needed.
-    auto type = ht.topType(i, DataTypeGeneric);
-    uint32_t paramIdx = numArgs - 1 - i;
-    ctx.liveTypes.push_back(
-        {RegionDesc::Location::Local{paramIdx}, type});
-  }
-
-  for (unsigned i = numArgs; i < numParams; ++i) {
-    // These locals will be populated by DV init funclets but they'll start out
-    // as Uninit.
-    ctx.liveTypes.push_back(
-        {RegionDesc::Location::Local{i}, Type::Uninit});
-  }
-
-  // Produce a tracelet for the callee.
-  return selectTracelet(ctx, profiling, true /* inlining */);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

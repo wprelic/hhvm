@@ -57,6 +57,8 @@ public:
     if (m_arrayIds) delete m_arrayIds;
   }
 
+  static __thread int64_t serializationSizeLimit;
+
   /**
    * Top level entry function called by f_ functions.
    */
@@ -90,7 +92,7 @@ public:
   void writeRefCount(); // for DebugDump only
 
   void writeArrayHeader(int size, bool isVectorData);
-  void writeArrayKey(Variant key);
+  void writeArrayKey(const Variant& key);
   void writeArrayValue(const Variant& value);
   void writeCollectionKey(const Variant& key);
   void writeCollectionKeylessPrefix();
@@ -158,6 +160,18 @@ private:
   void preventOverflow(const Object& v, const std::function<void()>& func);
   void writePropertyKey(const String& prop);
 };
+
+/*
+ * Serialize a Variant recursively.
+ * The last param noQuotes indicates to serializer to not put the output in
+ * double quotes (used when printing the output of a __toDebugDisplay() of
+ * an object when it is a string.
+ */
+void serializeVariant(const Variant&,
+                      VariableSerializer *serializer,
+                      bool isArrayKey = false,
+                      bool skipNestCheck = false,
+                      bool noQuotes = false);
 
 ///////////////////////////////////////////////////////////////////////////////
 }

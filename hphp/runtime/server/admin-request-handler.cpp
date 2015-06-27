@@ -28,12 +28,14 @@
 #include "hphp/runtime/base/thread-hooks.h"
 #include "hphp/runtime/base/unit-cache.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/recycle-tc.h"
+#include "hphp/runtime/vm/jit/relocation.h"
 #include "hphp/runtime/vm/repo.h"
 
 #include "hphp/runtime/ext/apc/ext_apc.h"
-#include "hphp/runtime/ext/array-tracer/ext_array_tracer.h"
-#include "hphp/runtime/ext/ext_fb.h"
+#include "hphp/runtime/ext/json/ext_json.h"
 #include "hphp/runtime/ext/mysql/mysql_stats.h"
+#include "hphp/runtime/server/http-request-handler.h"
 #include "hphp/runtime/server/http-server.h"
 #include "hphp/runtime/server/memory-stats.h"
 #include "hphp/runtime/server/pagelet-server.h"
@@ -51,6 +53,7 @@
 
 #include <boost/lexical_cast.hpp>
 
+#include <fstream>
 #include <string>
 #include <sstream>
 #include <iomanip>
@@ -187,7 +190,6 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
 
         "/stats-web:       turn on/off server page stats (CPU and gen time)\n"
         "/stats-mem:       turn on/off memory statistics\n"
-        "/stats-mcc:       turn on/off memcache statistics\n"
         "/stats-sql:       turn on/off SQL statistics\n"
         "/stats-mutex:     turn on/off mutex statistics\n"
         "    sampling      optional, default 1000\n"
@@ -211,21 +213,24 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
 
         "/const-ss:        get const_map_size\n"
         "/static-strings:  get number of static strings\n"
+        "/dump-static-strings: dump static strings to /tmp/static_strings\n"
         "/dump-apc:        dump all current value in APC to /tmp/apc_dump\n"
         "/dump-apc-info:   show basic APC stats\n"
         "/dump-apc-meta:   dump meta information for all objects in APC to\n"
         "                  /tmp/apc_dump_meta\n"
         "/advise-out-apc:  forcibly madvise out APC prime data\n"
-        "/dump-const:      dump all constant value in constant map to\n"
-        "                  /tmp/const_map_dump\n"
         "/random-apc:      dump the key and size of a random APC entry\n"
-        "                  optionally set count for number of entries returned"
+        "    count         number of entries to return\n"
 
         "/pcre-cache-size: get pcre cache map size\n"
         "/dump-pcre-cache: dump cached pcre's to /tmp/pcre_cache\n"
         "/dump-array-info: dump array tracer info to /tmp/array_tracer_dump\n"
 
         "/start-stacktrace-profiler: set enable_stacktrace_profiler to true\n"
+        "/relocate:        relocate translations\n"
+        "    random        optional, default false, relocate random subset\n"
+        "       all        optional, default false, relocate all translations\n"
+        "      time        optional, default 20 (seconds)\n"
 
 #ifdef GOOGLE_CPU_PROFILER
         "/prof-cpu-on:     turn on CPU profiler\n"
@@ -240,6 +245,9 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
         "                  /tmp/tc_dump_astub\n"
         "/vm-namedentities:show size of the NamedEntityTable\n"
         "/thread-mem-usage:show memory usage per thread\n"
+        "/proxy:           set up request proxy\n"
+        "    origin        URL to proxy requests to\n"
+        "    percentage    percentage of requests to proxy\n"
         ;
 #ifdef USE_TCMALLOC
         if (MallocExtensionInstance) {
@@ -277,7 +285,10 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
       break;
     }
 
-    if (!RuntimeOption::AdminPasswords.empty()) {
+    bool needs_password = (cmd != "build-id") && (cmd != "compiler-id") &&
+                          (cmd != "instance-id");
+
+    if (needs_password && !RuntimeOption::AdminPasswords.empty()) {
       std::set<std::string>::const_iterator iter =
         RuntimeOption::AdminPasswords.find(transport->getParam("auth"));
       if (iter == RuntimeOption::AdminPasswords.end()) {
@@ -285,7 +296,7 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
         break;
       }
     } else {
-      if (!RuntimeOption::AdminPassword.empty() &&
+      if (needs_password && !RuntimeOption::AdminPassword.empty() &&
           RuntimeOption::AdminPassword != transport->getParam("auth")) {
         transport->sendString("Unauthorized", 401);
         break;
@@ -385,8 +396,19 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
         handleStaticStringsRequest(cmd, transport)) {
       break;
     }
+    if (strncmp(cmd.c_str(), "dump-static-strings", 19) == 0) {
+      auto filename = transport->getParam("file");
+      if (filename == "") filename = "/tmp/static_strings";
+      handleDumpStaticStrings(cmd, transport, filename);
+      transport->sendString("OK\n");
+      break;
+    }
     if (strncmp(cmd.c_str(), "vm-", 3) == 0 &&
         handleVMRequest(cmd, transport)) {
+      break;
+    }
+    if (cmd == "proxy") {
+      handleProxyRequest(cmd, transport);
       break;
     }
     if (!strcmp(cmd.c_str(), "thread-mem")) {
@@ -409,20 +431,24 @@ void AdminRequestHandler::handleRequest(Transport *transport) {
       break;
     }
 
-    if (cmd == "dump-array-info") {
-      if (!RuntimeOption::EvalTraceArrays) {
-        transport->sendString("Eval.TraceArrays not enabled.\n");
-        break;
-      }
-      auto filename = transport->getParam("file");
-      if (filename == "") filename = "/tmp/array_tracer_dump";
-      array_tracer_dump(filename);
+    if (cmd == "start-stacktrace-profiler") {
+      enable_stacktrace_profiler = true;
       transport->sendString("OK\n");
       break;
     }
 
-    if (cmd == "start-stacktrace-profiler") {
-      enable_stacktrace_profiler = true;
+    if (cmd == "relocate") {
+      auto randomParam = transport->getParam("random");
+      auto allParam = transport->getParam("all");
+      auto time = transport->getIntParam("time");
+      bool random = randomParam == "true" || randomParam == "1";
+      if (allParam == "true" || allParam == "1") {
+        jit::liveRelocate(-2);
+      } else if (random || time == 0) {
+        jit::liveRelocate(random);
+      } else {
+        jit::liveRelocate(time);
+      }
       transport->sendString("OK\n");
       break;
     }
@@ -728,10 +754,25 @@ bool AdminRequestHandler::handleCheckRequest(const std::string &cmd,
                                isMain ? "" : name).str(),
                  a.used());
     });
-    appendStat("targetcache", RDS::usedBytes());
-    appendStat("rds", RDS::usedBytes()); // TODO(#2966387): temp double logging
+    appendStat("rds", rds::usedBytes());
+    appendStat("rds-local", rds::usedLocalBytes());
+    appendStat("rds-persistent", rds::usedPersistentBytes());
     appendStat("units", numLoadedUnits());
     appendStat("funcs", Func::nextFuncId());
+
+    if (RuntimeOption::EvalEnableReusableTC) {
+      mCGenerator->code.forEachBlock([&](const char* name, const CodeBlock& a) {
+        appendStat(folly::format("tc-{}-allocs", name).str(), a.numAllocs());
+        appendStat(folly::format("tc-{}-frees", name).str(), a.numFrees());
+        appendStat(folly::format("tc-{}-free-size", name).str(), a.bytesFree());
+        appendStat(folly::format("tc-{}-free-blocks", name).str(),
+                   a.blocksFree());
+      });
+      appendStat("tc-recorded-funcs", jit::recordedFuncs());
+      appendStat("tc-smashed-calls", jit::smashedCalls());
+      appendStat("tc-smashed-branches", jit::smashedBranches());
+    }
+
     out << "}" << endl;
     transport->sendString(out.str());
     return true;
@@ -837,9 +878,6 @@ bool AdminRequestHandler::handleStatsRequest(const std::string &cmd,
   if (cmd == "stats-mem") {
     toggle_switch(transport, RuntimeOption::EnableMemoryStats);
     return true;
-  }
-  if (cmd == "stats-mcc") {
-    return toggle_switch(transport, RuntimeOption::EnableMemcacheStats);
   }
   if (cmd == "stats-sql") {
     return toggle_switch(transport, RuntimeOption::EnableSQLStats);
@@ -972,6 +1010,20 @@ bool AdminRequestHandler::handleStaticStringsRequest(const std::string& cmd,
   return true;
 }
 
+bool AdminRequestHandler::handleDumpStaticStrings(const std::string& cmd,
+                                                  Transport* transporti,
+                                                  const std::string &filename) {
+  std::vector<StringData*> list = lookupDefinedStaticStrings();
+  std::ofstream out(filename.c_str());
+  SCOPE_EXIT { out.close(); };
+  for (auto item : list) {
+    out << "----\n";
+    out << item->size() << " bytes\n";
+    out << item->toCppString() << "\n";
+  }
+  return true;
+}
+
 namespace {
 struct PCInfo {
   PCInfo() : count(0), unique(0) {}
@@ -1006,6 +1058,22 @@ bool AdminRequestHandler::handleVMRequest(const std::string &cmd,
     return true;
   }
   return false;
+}
+
+void AdminRequestHandler::handleProxyRequest(const std::string& cmd,
+                                             Transport* transport) {
+  try {
+    auto const percentStr = transport->getParam("percentage");
+    auto const percent    = percentStr.empty() ? 0 : folly::to<int>(percentStr);
+    if (percent < 0 || percent > 100) {
+      throw std::range_error("must be in [0, 100]");
+    }
+
+    setProxyOriginPercentage(transport->getParam("origin"), percent);
+    transport->sendString("Origin and percentage updated");
+  } catch (const std::range_error& re) {
+    transport->sendString(folly::sformat("Invalid percentage: {}", re.what()));
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////

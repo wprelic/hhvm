@@ -34,6 +34,7 @@ type 'a mapper_in = {
   k_class_elt: (class_elt -> class_elt) * 'a mapper_out -> class_kind -> class_elt -> class_elt;
   k_fun_: (fun_ -> fun_) * 'a mapper_out -> fun_ -> fun_;
   k_method_: (method_ -> method_) * 'a mapper_out -> class_kind -> method_ -> method_;
+  k_typeconst: (typeconst -> typeconst) * 'a mapper_out -> class_kind -> typeconst -> typeconst;
   k_def: (def -> def) * 'a mapper_out -> def -> def;
   k_expr: (expr -> expr) * 'a mapper_out -> expr -> expr;
   k_expr_: (expr_ -> expr_) * 'a mapper_out -> expr_ -> expr_;
@@ -52,6 +53,7 @@ let default_mapper =
     k_class_elt = (fun (k, _) _ x -> k x);
     k_fun_ = simple_map;
     k_method_ = (fun (k, _) _ x -> k x);
+    k_typeconst = (fun (k, _) _ x -> k x);
     k_def = simple_map;
     k_expr = simple_map;
     k_expr_ = simple_map;
@@ -100,6 +102,7 @@ let mk_mapper = fun m_in ->
                   t_tparams = v_t_tparams;
                   t_constraint = v_t_constraint;
                   t_kind = v_t_kind;
+                  t_user_attributes = v_t_user_attributes;
                   t_namespace = v_t_namespace;
                   t_mode = v_t_mode
                 } =
@@ -107,6 +110,7 @@ let mk_mapper = fun m_in ->
     let v_t_tparams = map_of_list map_tparam v_t_tparams in
     let v_t_constraint = map_tconstraint v_t_constraint in
     let v_t_kind = map_typedef_kind v_t_kind in
+    let v_t_user_attributes = map_smap map_user_attribute v_t_user_attributes in
     let v_t_namespace = map_namespace_env v_t_namespace in
     let v_t_mode = map_mode v_t_mode
     in
@@ -115,6 +119,7 @@ let mk_mapper = fun m_in ->
         t_tparams = v_t_tparams;
         t_constraint = v_t_constraint;
         t_kind = v_t_kind;
+        t_user_attributes = v_t_user_attributes;
         t_namespace = v_t_namespace;
         t_mode = v_t_mode;
       }
@@ -150,7 +155,7 @@ let mk_mapper = fun m_in ->
   and map_tparam (v1, v2, v3) =
     let v1 = map_variance v1
     and v2 = map_id v2
-    and v3 = map_hint_option v3
+    and v3 = map_of_option (fun (ck, h) -> ck, map_hint h) v3
     in (v1, v2, v3)
   and map_tconstraint v = map_hint_option v
   and map_typedef_kind =
@@ -230,9 +235,14 @@ let mk_mapper = fun m_in ->
                  let v1 = map_id v1 and v2 = map_expr v2 in (v1, v2))
               v2
           in Const ((v1, v2))
+      | AbsConst ((v1, v2)) ->
+          let v1 = map_hint_option v1
+          and v2 = map_id v2
+          in AbsConst ((v1, v2))
       | Attributes v1 ->
           let v1 = map_of_list map_class_attr v1 in Attributes ((v1))
       | ClassUse v1 -> let v1 = map_hint v1 in ClassUse ((v1))
+      | XhpAttrUse v1 -> let v1 = map_hint v1 in XhpAttrUse ((v1))
       | ClassTraitRequire ((v1, v2)) ->
           let v1 = map_trait_req_kind v1
           and v2 = map_hint v2
@@ -242,7 +252,18 @@ let mk_mapper = fun m_in ->
           and v2 = map_hint_option v2
           and v3 = map_of_list map_class_var v3
           in ClassVars ((v1, v2, v3))
+      | XhpAttr ((v1, v2, v3, v4, v5)) ->
+          let v1 = map_of_list map_kind v1
+          and v2 = map_hint_option v2
+          and v3 = map_of_list map_class_var v3
+          and v4 = map_of_bool v4
+          and v5 = (match v5 with
+            | Some (pos, items) ->
+                Some (map_pos_t pos, (map_of_list map_expr items))
+            | None -> None)
+          in XhpAttr ((v1, v2, v3, v4, v5))
       | Method v1 -> let v1 = map_method_ c_kind v1 in Method ((v1))
+      | TypeConst v1 -> let v1 = map_typeconst c_kind v1 in TypeConst v1
     in m_in.k_class_elt (k, all_mappers) c_kind elt
   and map_class_attr =
     function
@@ -284,6 +305,26 @@ let mk_mapper = fun m_in ->
     | OG_nullsafe -> OG_nullsafe
   and map_class_var (v1, v2) =
     let v1 = map_id v1 and v2 = map_of_option map_expr v2 in (v1, v2)
+  and
+    map_typeconst c_kind typeconst =
+      let k {
+          tconst_abstract = v_tconst_abstract;
+          tconst_name = v_tconst_name;
+          tconst_constraint = v_tconst_constraint;
+          tconst_type = v_tconst_type;
+        } =
+      let v_tconst_abstract = map_of_bool v_tconst_abstract in
+      let v_tconst_name = map_id v_tconst_name in
+      let v_tconst_constraint = map_hint_option v_tconst_constraint in
+      let v_tconst_type = map_hint_option v_tconst_type
+      in
+        {
+          tconst_abstract = v_tconst_abstract;
+          tconst_name = v_tconst_name;
+          tconst_constraint = v_tconst_constraint;
+          tconst_type = v_tconst_type;
+        }
+    in m_in.k_typeconst (k, all_mappers) c_kind typeconst
   and
     map_method_ c_kind method_ =
       let k {
@@ -397,7 +438,11 @@ let mk_mapper = fun m_in ->
           f_namespace = v_f_namespace;
         }
     in m_in.k_fun_ (k, all_mappers) fun_
-  and map_fun_kind = function | FAsync -> FAsync | FSync -> FSync
+  and map_fun_kind = function
+    | FAsync -> FAsync
+    | FAsyncGenerator -> FAsyncGenerator
+    | FSync -> FSync
+    | FGenerator -> FGenerator
   and map_hint (v1, v2) =
     let v1 = map_pos_t v1 and v2 = map_hint_ v2 in (v1, v2)
   and map_hint_ =
@@ -414,6 +459,10 @@ let mk_mapper = fun m_in ->
         and v2 = map_of_list map_hint v2
         in Happly ((v1, v2))
     | Hshape v1 -> let v1 = map_of_list map_shape_field v1 in Hshape ((v1))
+    | Haccess (v1, v2, v3) ->
+        let v1 = map_id v1
+        and v2 = map_id v2
+        and v3 = map_of_list map_id v3 in Haccess (v1, v2, v3)
   and map_shape_field_name =
     function
     | SFlit v1 -> let v1 = map_pstring v1 in SFlit ((v1))

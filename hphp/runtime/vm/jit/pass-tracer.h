@@ -16,56 +16,72 @@
 #ifndef incl_HPHP_PASS_TRACER_H_
 #define incl_HPHP_PASS_TRACER_H_
 
+#include <string>
+
 #include <folly/Format.h>
 
 #include "hphp/util/trace.h"
-#include "hphp/runtime/vm/jit/ir-unit.h"
 #include "hphp/runtime/vm/jit/print.h"
 
 namespace HPHP { namespace jit {
 
+struct IRUnit;
+struct Vunit;
+
 //////////////////////////////////////////////////////////////////////
 
 /*
- * Utility class for tracing IR before and after a pass that has its own trace
- * module.  The PassTracer bumps the trace level by 1, so that all
+ * Utility class for tracing HHIR or Vasm before and after a pass that has its
+ * own trace module.  The PassTracer bumps the trace level by 1, so that all
  * pass-internal traces starting at level 1 will actually show up at level 2:
  * this is so we have regularity that level 1 always just prints before and
- * after IR with no pass-internal traces.
+ * after with no pass-internal traces. If `changed' is provided to the
+ * constructor, the "after" unit trace will be skipped if !*changed.
  */
-struct PassTracer {
-  explicit PassTracer(const IRUnit* unit, Trace::Module mod, const char* name)
+template<class Unit>
+struct PassTracerImpl {
+  explicit PassTracerImpl(const Unit* unit,
+                          Trace::Module mod,
+                          const char* name,
+                          const bool* changed = nullptr)
     : m_unit(*unit)
     , m_mod(mod)
     , m_name(name)
     , m_bumper{m_mod, 1}
+    , m_changed{changed}
   {
     traceUnit("before");
   }
 
-  ~PassTracer() {
-    traceUnit("after");
+  ~PassTracerImpl() {
+    if (!m_changed || *m_changed) traceUnit("after");
   }
 
 private:
-  PassTracer(const PassTracer&) = delete;
-  PassTracer& operator=(const PassTracer&) = delete;
+  PassTracerImpl(const PassTracerImpl&) = delete;
+  PassTracerImpl& operator=(const PassTracerImpl&) = delete;
 
 private:
   void traceUnit(const char* when) const {
     FTRACE_MOD(m_mod, 0, "{}{}\n{}",
       banner(folly::sformat("{} {}", when, m_name).c_str()),
-      m_unit.toString(),
+      show(m_unit),
       banner("")
     );
   }
 
 private:
-  const IRUnit& m_unit;
+  DEBUG_ONLY const Unit& m_unit;
   Trace::Module const m_mod;
-  const char* const m_name;
+  DEBUG_ONLY const char* const m_name;
   Trace::Bump m_bumper;
+  const bool* m_changed;
 };
+
+//////////////////////////////////////////////////////////////////////
+
+using PassTracer = PassTracerImpl<IRUnit>;
+using VpassTracer = PassTracerImpl<Vunit>;
 
 //////////////////////////////////////////////////////////////////////
 

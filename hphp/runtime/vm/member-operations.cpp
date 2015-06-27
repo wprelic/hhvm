@@ -102,12 +102,14 @@ bool objOffsetIsset(TypedValue& tvRef, ObjectData* base, const Variant& offset,
   // We can't call the offsetGet method on `base` because users aren't
   // expecting offsetGet to be called for `isset(...)` expressions, so call
   // the method on the base ArrayObject class.
-  const Func* method =
+  auto const method =
     SystemLib::s_ArrayObjectClass->lookupMethod(s_offsetGet.get());
   assert(method != nullptr);
   g_context->invokeFuncFew(&tvResult, method, base, nullptr, 1,
                            offset.asCell());
-  return !(tvAsVariant(&tvResult).isNull());
+  auto const result = !IS_NULL_TYPE(tvResult.m_type);
+  tvRefcountedDecRef(&tvResult);
+  return result;
 }
 
 bool objOffsetEmpty(TypedValue& tvRef, ObjectData* base, const Variant& offset,
@@ -160,9 +162,8 @@ void objOffsetUnset(ObjectData* base, const Variant& offset) {
 // without a key to implicitly create a new element without supplying assigning
 // an initial value (ex "$vector[]['a'] = 73;").
 void throw_cannot_use_newelem_for_lval_read() {
-  Object e(SystemLib::AllocInvalidOperationExceptionObject(
-    "Cannot use [] with collections for reading in an lvalue context"));
-  throw e;
+  SystemLib::throwInvalidOperationExceptionObject(
+    "Cannot use [] with collections for reading in an lvalue context");
 }
 
 ///////////////////////////////////////////////////////////////////////////////

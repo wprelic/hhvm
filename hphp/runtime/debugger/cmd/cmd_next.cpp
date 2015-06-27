@@ -16,11 +16,12 @@
 
 #include "hphp/runtime/debugger/cmd/cmd_next.h"
 
-#include "hphp/runtime/vm/vm-regs.h"
+#include "hphp/runtime/debugger/debugger_client.h"
+#include "hphp/runtime/ext/asio/async-function-wait-handle.h"
+#include "hphp/runtime/ext/ext_generator.h"
 #include "hphp/runtime/vm/debugger-hook.h"
 #include "hphp/runtime/vm/runtime.h"
-#include "hphp/runtime/ext/ext_generator.h"
-#include "hphp/runtime/ext/asio/async_function_wait_handle.h"
+#include "hphp/runtime/vm/vm-regs.h"
 
 namespace HPHP { namespace Eval {
 ///////////////////////////////////////////////////////////////////////////////
@@ -135,6 +136,10 @@ void CmdNext::onBeginInterrupt(DebuggerProxy& proxy, CmdInterrupt& interrupt) {
       // These just help propagate exceptions so ignore those.
       if (fp->m_func->line1() == 0) {
         TRACE(2, "CmdNext: exception handler, ignoring func with no source\n");
+        return;
+      }
+      if (fp->m_func->isBuiltin()) {
+        TRACE(2, "CmdNext: exception handler, ignoring builtin functions\n");
         return;
       }
       TRACE(2, "CmdNext: exception handler altering expected flow\n");

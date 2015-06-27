@@ -21,15 +21,29 @@
 open Utils
 
 (*****************************************************************************)
+(* Parsing modes *)
+(*****************************************************************************)
+
+type file_type =
+  | PhpFile
+  | HhFile
+
+type mode =
+  | Mdecl    (* just declare signatures, don't check anything *)
+  | Mstrict  (* check everthing! *)
+  | Mpartial (* Don't fail if you see a function/class you don't know *)
+
+(*****************************************************************************)
 (* The record produced by the parsing phase. *)
 (*****************************************************************************)
 
 type id = Pos.t * string
 
 type t = {
+  file_mode : mode option;
   funs : id list;
   classes : id list;
-  types : id list;
+  typedefs : id list;
   consts : id list;
   comments : (Pos.t * string) list;
   consider_names_just_for_autoload: bool;

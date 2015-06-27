@@ -144,11 +144,7 @@ void ScalarExpression::analyzeProgram(AnalysisResultPtr ar) {
 
     switch (m_type) {
       case T_LINE:
-        if (getLocation()) {
-          m_translated = folly::to<string>(getLocation()->line1);
-        } else {
-          m_translated = "0";
-        }
+        m_translated = folly::to<string>(line1());
         break;
       case T_NS_C:
         m_translated = m_value;
@@ -201,7 +197,7 @@ void ScalarExpression::analyzeProgram(AnalysisResultPtr ar) {
 unsigned ScalarExpression::getCanonHash() const {
   int64_t val = getHash();
   if (val == -1) {
-    val = hash_string(m_value.c_str(), m_value.size());
+    val = hash_string_unsafe(m_value.c_str(), m_value.size());
   }
   return unsigned(val) ^ unsigned(val >> 32);
 }
@@ -256,7 +252,7 @@ TypePtr ScalarExpression::inferenceImpl(AnalysisResultConstPtr ar,
     break;
   }
 
-  return checkTypesImpl(ar, type, actualType, coerce);
+  return checkTypesImpl(ar, type, actualType);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -387,7 +383,7 @@ void ScalarExpression::outputCodeModel(CodeGenerator &cg) {
         cg.printPropertyHeader("constantName");
         cg.printValue(constName);
         cg.printPropertyHeader("sourceLocation");
-        cg.printLocation(this->getLocation());
+        cg.printLocation(this);
         cg.printObjectFooter();
       }
       return;
@@ -430,7 +426,7 @@ void ScalarExpression::outputCodeModel(CodeGenerator &cg) {
       break;
   }
   cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
+  cg.printLocation(this);
   cg.printObjectFooter();
 }
 
@@ -489,7 +485,7 @@ int64_t ScalarExpression::getHash() const {
     if (is_strictly_integer(scs.c_str(), scs.size(), res)) {
       hash = hash_int64(res);
     } else {
-      hash = hash_string(scs.c_str(), scs.size());
+      hash = hash_string_unsafe(scs.c_str(), scs.size());
     }
   }
   return hash;
@@ -571,7 +567,7 @@ bool ScalarExpression::getInt(int64_t& i) const {
     i = getIntValue();
     return true;
   } else if (m_type == T_LINE) {
-    i = getLocation() ? getLocation()->line1 : 0;
+    i = line1();
     return true;
   }
   return false;

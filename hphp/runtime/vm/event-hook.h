@@ -21,16 +21,11 @@
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/rds-header.h"
+#include "hphp/runtime/base/surprise-flags.h"
 
 #include <atomic>
 
 namespace HPHP {
-
-//////////////////////////////////////////////////////////////////////
-
-inline bool checkConditionFlags() {
-  return RDS::header()->conditionFlags.load(std::memory_order_acquire);
-}
 
 //////////////////////////////////////////////////////////////////////
 
@@ -59,44 +54,51 @@ class EventHook {
   static void DisableDebug();
   static void EnableIntercept();
   static void DisableIntercept();
-  static ssize_t CheckSurprise();
-  static ssize_t GetConditionFlags();
 
   /**
    * Event hooks -- interpreter entry points.
    */
   static inline bool FunctionCall(const ActRec* ar, int funcType) {
     ringbufferEnter(ar);
-    return UNLIKELY(checkConditionFlags())
+    return UNLIKELY(checkSurpriseFlags())
       ? onFunctionCall(ar, funcType) : true;
   }
-  static inline void FunctionResume(const ActRec* ar) {
+  static inline void FunctionResumeAwait(const ActRec* ar) {
     ringbufferEnter(ar);
-    if (UNLIKELY(checkConditionFlags())) { onFunctionResume(ar); }
+    if (UNLIKELY(checkSurpriseFlags())) { onFunctionResumeAwait(ar); }
   }
-  static inline void FunctionSuspend(const ActRec* ar, bool suspendingResumed) {
-    ringbufferExit(ar);
-    if (UNLIKELY(checkConditionFlags())) {
-      onFunctionSuspend(ar, suspendingResumed);
+  static inline void FunctionResumeYield(const ActRec* ar) {
+    ringbufferEnter(ar);
+    if (UNLIKELY(checkSurpriseFlags())) { onFunctionResumeYield(ar); }
+  }
+  static void FunctionSuspendE(ActRec* suspending, const ActRec* resumableAR) {
+    ringbufferExit(resumableAR);
+    if (UNLIKELY(checkSurpriseFlags())) {
+      onFunctionSuspendE(suspending, resumableAR);
     }
   }
-  static inline void FunctionReturn(ActRec* ar, const TypedValue& retval) {
-    ringbufferExit(ar);
-    if (UNLIKELY(checkConditionFlags())) { onFunctionReturn(ar, retval); }
+  static void FunctionSuspendR(ActRec* suspending, ObjectData* child) {
+    ringbufferExit(suspending);
+    if (UNLIKELY(checkSurpriseFlags())) {
+      onFunctionSuspendR(suspending, child);
+    }
   }
-  static inline void FunctionUnwind(const ActRec* ar, const Fault& fault) {
+  static inline void FunctionReturn(ActRec* ar, TypedValue retval) {
     ringbufferExit(ar);
-    if (UNLIKELY(checkConditionFlags())) { onFunctionUnwind(ar, fault); }
+    if (UNLIKELY(checkSurpriseFlags())) { onFunctionReturn(ar, retval); }
+  }
+  static inline void FunctionUnwind(ActRec* ar, ObjectData* phpException) {
+    ringbufferExit(ar);
+    if (UNLIKELY(checkSurpriseFlags())) { onFunctionUnwind(ar, phpException); }
   }
 
   /**
    * Event hooks -- JIT entry points.
    */
   static bool onFunctionCall(const ActRec* ar, int funcType);
-  static void onFunctionSuspend(const ActRec* ar, bool suspendingResumed);
-  static void onFunctionReturnJit(ActRec* ar, const TypedValue retval) {
-    onFunctionReturn(ar, retval);
-  }
+  static void onFunctionSuspendE(ActRec*, const ActRec*);
+  static void onFunctionSuspendR(ActRec*, ObjectData*);
+  static void onFunctionReturn(ActRec* ar, TypedValue retval);
 
 private:
   enum {
@@ -104,13 +106,14 @@ private:
     ProfileExit,
   };
 
-  static void onFunctionResume(const ActRec* ar);
-  static void onFunctionReturn(ActRec* ar, const TypedValue& retval);
-  static void onFunctionUnwind(const ActRec* ar, const Fault& fault);
+  static void onFunctionResumeAwait(const ActRec* ar);
+  static void onFunctionResumeYield(const ActRec* ar);
+  static void onFunctionUnwind(ActRec* ar, ObjectData* phpException);
 
   static void onFunctionEnter(const ActRec* ar, int funcType, ssize_t flags);
   static void onFunctionExit(const ActRec* ar, const TypedValue* retval,
-                             const Fault* fault, ssize_t flags);
+                             bool unwind, ObjectData* phpException,
+                             size_t flags);
 
   static bool RunInterceptHandler(ActRec* ar);
   static const char* GetFunctionNameForProfiler(const Func* func,

@@ -187,7 +187,7 @@ bool CacheData::loadFromMmap(MmapFile* mmap_file, string* name) {
 }
 
 bool CacheData::save(CacheSaver* cs) const {
-  CacheSaver::DirEntry de = { 0 };
+  CacheSaver::DirEntry de;
 
   de.id = id_;
   de.flags = flags_;
@@ -263,6 +263,19 @@ uint64_t CacheData::createChecksum() const {
 bool CacheData::sufficientlyCompressed(uint64_t orig_size,
                                        uint64_t new_size) const {
   return new_size < (orig_size * .75);
+}
+
+void CacheData::dump() const {
+  printf(
+    "  Name: %s\n"
+    "  Flags: 0x%08lx\n"
+    "  Size: %ld\n"
+    "  ID: %ld\n",
+    name_.c_str(),
+    flags_,
+    fileSize(),
+    id_
+  );
 }
 
 }  // namespace HPHP

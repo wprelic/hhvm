@@ -31,13 +31,12 @@ TRACE_SET_MOD(trans);
 namespace {
 
 const StaticString s_empty("");
-
 const Func* lookupDirectFunc(SrcKey const sk,
                              const StringData* fname,
                              const StringData* clsName,
                              bool staticCall) {
-  if (clsName && !clsName->isame(s_empty.get())) {
-    auto const cls = Unit::lookupUniqueClass(clsName);
+  if (clsName && !clsName->empty()) {
+    auto const cls = Unit::lookupClassOrUniqueClass(clsName);
     bool magic = false;
     auto const ctx = sk.func()->cls();
     return lookupImmutableMethod(cls, fname, magic, staticCall, ctx);
@@ -46,6 +45,16 @@ const Func* lookupDirectFunc(SrcKey const sk,
   if (func && func->isNameBindingImmutable(sk.unit())) {
     return func;
   }
+  return nullptr;
+}
+
+const Func* lookupDirectCtor(SrcKey const sk, const StringData* clsName) {
+  if (clsName && !clsName->isame(s_empty.get())) {
+    auto const cls = Unit::lookupClassOrUniqueClass(clsName);
+    auto const ctx = sk.func()->cls();
+    return lookupImmutableCtor(cls, ctx);
+  }
+
   return nullptr;
 }
 
@@ -73,7 +82,9 @@ void annotate(NormalizedInstruction* i) {
       auto const func =
         pushOp == Op::FPushClsMethod
           ? nullptr
-          : lookupDirectFunc(i->source, funcName, clsName, isStatic);
+          : pushOp == Op::FPushCtorD
+            ? lookupDirectCtor(i->source, clsName)
+            : lookupDirectFunc(i->source, funcName, clsName, isStatic);
 
       if (func) {
         FTRACE(1, "found direct func ({}) for FCallD\n",

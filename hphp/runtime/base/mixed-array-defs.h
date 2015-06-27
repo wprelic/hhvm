@@ -22,6 +22,8 @@
 #include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/array-iterator-defs.h"
 #include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/struct-array.h"
+#include "hphp/runtime/base/struct-array-defs.h"
 
 #include "hphp/util/stacktrace-profiler.h"
 #include "hphp/util/word-mem.h"
@@ -40,9 +42,26 @@ MixedArray::Elm* mixedData(const MixedArray* arr) {
   );
 }
 
+ALWAYS_INLINE int32_t* mixedHash(MixedArray::Elm* data, uint32_t scale) {
+  return reinterpret_cast<int32_t*>(data + static_cast<size_t>(scale) * 3);
+}
+
+template<class F> void MixedArray::scan(F& mark) const {
+  if (isZombie()) return;
+  auto data = this->data();
+  for (unsigned i = 0, n = m_used; i < n; i++) {
+    auto& e = data[i];
+    if (MixedArray::isTombstone(e.data.m_type)) continue;
+    if (e.hasStrKey()) mark(e.skey);
+    mark(e.data);
+  }
+}
+
 ALWAYS_INLINE
 MixedArray* getArrayFromMixedData(const MixedArray::Elm* elms) {
-  auto* a = const_cast<MixedArray*>(
+  // Note: changes to this scheme will require changes in the JIT for
+  // LdColArray.
+  auto a = const_cast<MixedArray*>(
     reinterpret_cast<const MixedArray*>(elms) - 1
   );
   assert(mixedData(a) == elms);
@@ -66,22 +85,75 @@ inline bool validPos(int32_t pos) {
 ALWAYS_INLINE
 bool MixedArray::isFull() const {
   assert(!isPacked());
-  assert(m_used <= m_cap);
-  return m_used == m_cap;
+  assert(m_used <= capacity());
+  return m_used == capacity();
 }
 
-inline void MixedArray::initHash(int32_t* hash, size_t tableSize) {
-  wordfill(hash, Empty, tableSize);
+ALWAYS_INLINE
+void MixedArray::InitSmall(MixedArray* a, RefCount count, uint32_t size,
+                           int64_t nextIntKey) {
+  // Intentionally initialize hash table before header.
+#ifdef __x86_64__
+  static_assert(MixedArray::Empty == -1, "");
+  static_assert(MixedArray::SmallSize == 3, "");
+  static_assert(sizeof(MixedArray) +
+                MixedArray::SmallSize * sizeof(MixedArray::Elm) == 104, "");
+  __asm__ __volatile__(
+    "pcmpeqd    %%xmm0, %%xmm0\n"          // xmm0 <- 11111....
+    "movdqu     %%xmm0, 104(%0)\n"
+    : : "r"(a) : "xmm0"
+  );
+#else
+  auto const hash = a->hashTab();
+  auto const emptyVal = int64_t{MixedArray::Empty};
+  reinterpret_cast<int64_t*>(hash)[0] = emptyVal;
+  reinterpret_cast<int64_t*>(hash)[1] = emptyVal;
+#endif
+  a->m_sizeAndPos = size; // pos=0
+  a->m_hdr.init(HeaderKind::Mixed, count);
+  a->m_scale_used = MixedArray::SmallScale | uint64_t(size) << 32;
+  a->m_nextKI = nextIntKey;
 }
 
-inline int32_t*
-MixedArray::copyHash(int32_t* to, const int32_t* from, size_t count) {
-  return wordcpy(to, from, count);
+inline void MixedArray::initHash(int32_t* hash, uint32_t scale) {
+#if defined(__x86_64__)
+  static_assert(Empty == -1, "The following fills with all 1's.");
+  assertx(HashSize(scale) == scale * 4);
+
+  uint64_t offset = scale * 16;
+  __asm__ __volatile__(
+    "pcmpeqd    %%xmm0, %%xmm0\n"          // xmm0 <- 11111....
+    ".l%=:\n"
+    "sub        $0x10, %0\n"
+    "movdqu     %%xmm0, (%1, %0)\n"
+    "ja         .l%=\n"
+    : "+r"(offset) : "r"(hash) : "xmm0"
+  );
+#else
+  wordfill(hash, Empty, HashSize(scale));
+#endif
 }
 
-inline MixedArray::Elm*
-MixedArray::copyElms(Elm* to, const Elm* from, size_t count) {
-  return wordcpy(to, from, count);
+inline void
+MixedArray::copyHash(int32_t* to, const int32_t* from, uint32_t scale) {
+  assertx(HashSize(scale) == scale * 4);
+  uint64_t nBytes = scale * 16;
+  memcpy16_inline(to, from, nBytes);
+}
+
+inline void
+MixedArray::copyElmsNextUnsafe(MixedArray* to, const MixedArray* from,
+                               uint32_t nElems) {
+  static_assert(offsetof(MixedArray, m_nextKI) + 8 == sizeof(MixedArray),
+                "Revisit this if MixedArray layout changes");
+  static_assert(sizeof(Elm) == 24, "");
+  // Copy `m_nextKI' (8 bytes), data (oldUsed * 24), and optionally 24 more
+  // bytes to make sure we can use bcopy32(), which rounds the length down to
+  // 32-byte chunks. The additional bytes are guaranteed not to exceed the
+  // space allocated for the array, because the hash table has at least 16
+  // bytes, and when it is only 16 bytes (capacity = 3), we overrun the buffer
+  // by only 16 bytes instead of 24.
+  bcopy32_inline(&(to->m_nextKI), &(from->m_nextKI), sizeof(Elm) * nElems + 32);
 }
 
 extern int32_t* warnUnbalanced(size_t n, int32_t* ei);
@@ -90,31 +162,33 @@ ALWAYS_INLINE int32_t*
 MixedArray::findForNewInsertCheckUnbalanced(int32_t* table, size_t mask,
                                             size_t h0) const {
   assert(!isPacked());
-  size_t balanceLimit = size_t(RuntimeOption::MaxArrayChain);
-  for (size_t i = 1, probe = h0;; ++i) {
+  uint32_t balanceLimit = RuntimeOption::MaxArrayChain;
+  for (uint32_t i = 1, probe = h0;; ++i) {
     auto ei = &table[probe & mask];
     if (!validPos(*ei)) {
       return LIKELY(i <= balanceLimit) ? ei : warnUnbalanced(i, ei);
     }
     probe += i;
-    assert(i <= mask && probe == h0 + ((i + i * i) / 2));
+    assertx(i <= mask);
+    assertx(probe == static_cast<uint32_t>(h0) + (i + i * i) / 2);
   }
 }
 
 ALWAYS_INLINE int32_t*
 MixedArray::findForNewInsert(int32_t* table, size_t mask, size_t h0) const {
   assert(!isPacked());
-  for (size_t i = 1, probe = h0;; ++i) {
+  for (uint32_t i = 1, probe = h0;; ++i) {
     auto ei = &table[probe & mask];
     if (!validPos(*ei)) return ei;
     probe += i;
-    assert(i <= mask && probe == h0 + ((i + i * i) / 2));
+    assertx(i <= mask);
+    assertx(probe == static_cast<uint32_t>(h0) + (i + i * i) / 2);
   }
 }
 
 ALWAYS_INLINE
 int32_t* MixedArray::findForNewInsert(size_t h0) const {
-  return findForNewInsert(hashTab(), m_tableMask, h0);
+  return findForNewInsert(hashTab(), mask(), h0);
 }
 
 inline bool MixedArray::isTombstone(ssize_t pos) const {
@@ -190,16 +264,7 @@ inline const MixedArray* MixedArray::asMixed(const ArrayData* ad) {
 }
 
 inline size_t MixedArray::hashSize() const {
-  return m_tableMask + 1;
-}
-
-inline size_t MixedArray::computeMaxElms(uint32_t tableMask) {
-  return size_t(tableMask) - size_t(tableMask) / LoadScale;
-}
-
-inline size_t MixedArray::computeDataSize(uint32_t tableMask) {
-  return (tableMask + 1) * sizeof(int32_t) +
-         computeMaxElms(tableMask) * sizeof(Elm);
+  return HashSize(m_scale);
 }
 
 inline ArrayData* MixedArray::addVal(int64_t ki, Cell data) {
@@ -222,16 +287,28 @@ inline ArrayData* MixedArray::addVal(StringData* key, Cell data) {
   assert(!exists(key));
   assert(!isPacked());
   assert(!isFull());
+  return addValNoAsserts(key, data);
+}
+
+inline ArrayData* MixedArray::addValNoAsserts(StringData* key, Cell data) {
   strhash_t h = key->hash();
   auto ei = findForNewInsert(h);
   auto& e = allocElm(ei);
   e.setStrKey(key, h);
   cellDup(data, e.data);
- // TODO(#3888164): should refactor to avoid making KindOfUninit checks.
- if (UNLIKELY(e.data.m_type == KindOfUninit)) {
+  // TODO(#3888164): should refactor to avoid making KindOfUninit checks.
+  if (UNLIKELY(e.data.m_type == KindOfUninit)) {
     e.data.m_type = KindOfNull;
   }
   return this;
+}
+
+inline MixedArray::Elm& MixedArray::addKeyAndGetElem(StringData* key) {
+  strhash_t h = key->hash();
+  auto ei = findForNewInsert(h);
+  auto& e = allocElm(ei);
+  e.setStrKey(key, h);
+  return e;
 }
 
 template <class K>
@@ -263,40 +340,47 @@ struct MixedArray::ValIter {
 
   ALWAYS_INLINE
   static bool isMixed(const ArrayData::ArrayKind& kind) {
-    return kind == ArrayData::kMixedKind ||
-      kind == ArrayData::kIntMapKind ||
-      kind == ArrayData::kStrMapKind;
+    return kind == ArrayData::kMixedKind;
   }
 
   explicit ValIter(ArrayData* arr)
     : m_arr(arr)
-    , m_kind(arr->m_kind)
+    , m_kind(arr->kind())
   {
-    assert(isMixed(m_kind) || m_kind == kPackedKind);
+    assert(isMixed(m_kind) || m_kind == kPackedKind || m_kind == kStructKind);
     if (isMixed(m_kind)) {
       m_iterMixed = asMixed(arr)->data();
       m_stopMixed = m_iterMixed + asMixed(arr)->m_used;
-     } else {
-       m_iterPacked = reinterpret_cast<TypedValue*>(arr + 1);
-       m_stopPacked = m_iterPacked + arr->m_size;
-     }
-   }
+    } else if (m_kind == kStructKind) {
+      auto structArray = StructArray::asStructArray(arr);
+      m_iterStruct = structArray->data();
+      m_stopStruct = m_iterStruct + structArray->size();
+    } else {
+      m_iterPacked = reinterpret_cast<TypedValue*>(arr + 1);
+      m_stopPacked = m_iterPacked + arr->m_size;
+    }
+  }
 
-   explicit ValIter(ArrayData* arr, ssize_t start_pos)
-     : m_arr(arr)
-     , m_kind(arr->m_kind)
-   {
-     assert(isMixed(m_kind) || m_kind == kPackedKind);
-     if (isMixed(m_kind)) {
-       m_iterMixed = asMixed(arr)->data() + start_pos;
-       m_stopMixed = asMixed(arr)->data() + asMixed(arr)->m_used;
-       assert(m_iterMixed <= m_stopMixed);
-     } else {
-       m_iterPacked = reinterpret_cast<TypedValue*>(arr + 1) + start_pos;
-       m_stopPacked = reinterpret_cast<TypedValue*>(arr + 1) + arr->m_size;
-       assert(m_iterPacked <= m_stopPacked);
-     }
-   }
+  explicit ValIter(ArrayData* arr, ssize_t start_pos)
+    : m_arr(arr)
+    , m_kind(arr->kind())
+  {
+    assert(isMixed(m_kind) || m_kind == kPackedKind || m_kind == kStructKind);
+    if (isMixed(m_kind)) {
+      m_iterMixed = asMixed(arr)->data() + start_pos;
+      m_stopMixed = asMixed(arr)->data() + asMixed(arr)->m_used;
+      assert(m_iterMixed <= m_stopMixed);
+     } else if (m_kind == kStructKind) {
+      auto structArray = StructArray::asStructArray(arr);
+      m_iterStruct = structArray->data() + start_pos;
+      m_stopStruct = structArray->data() + arr->size();
+      assert(m_iterStruct <= m_stopStruct);
+    } else {
+      m_iterPacked = reinterpret_cast<TypedValue*>(arr + 1) + start_pos;
+      m_stopPacked = reinterpret_cast<TypedValue*>(arr + 1) + arr->m_size;
+      assert(m_iterPacked <= m_stopPacked);
+    }
+  }
 
    TypedValue* current() const {
      return UNLIKELY(isMixed(m_kind)) ? &currentElm()->data
@@ -325,78 +409,54 @@ struct MixedArray::ValIter {
 
   ssize_t currentPos() const {
     if (isMixed(m_kind)) return m_iterMixed - asMixed(m_arr)->data();
+    if (m_kind == kStructKind) {
+      return m_iterStruct - StructArray::asStructArray(m_arr)->data();
+    }
     return m_iterPacked - reinterpret_cast<TypedValue*>(m_arr + 1);
   }
 
 private:
   ArrayData* const m_arr;
   ArrayData::ArrayKind const m_kind;
-  union { Elm* m_iterMixed; TypedValue* m_iterPacked; };
-  union { Elm* m_stopMixed; TypedValue* m_stopPacked; };
+  union {
+    Elm* m_iterMixed;
+    TypedValue* m_iterPacked;
+    TypedValue* m_iterStruct;
+  };
+  union {
+    Elm* m_stopMixed;
+    TypedValue* m_stopPacked;
+    TypedValue* m_stopStruct;
+  };
 };
 
 //////////////////////////////////////////////////////////////////////
 
 ALWAYS_INLINE
-uint32_t computeMaskFromNumElms(uint32_t n) {
+uint32_t computeScaleFromSize(uint32_t n) {
   assert(n <= 0x7fffffffU);
-  auto lgSize = MixedArray::MinLgTableSize;
-  auto maxElms = MixedArray::SmallSize;
-  assert(lgSize >= 2);
-
-  // Note: it's tempting to convert this loop into something involving
-  // x64 bsr and a shift.  Naive attempts currently actually add more
-  // branches, because we need to initially check whether `n' is less
-  // than SmallSize, and after finding the next power of two we need a
-  // branch to see if it was big enough for the desired load factor.
-  // This is probably still worth revisiting (e.g., MakeReserve could
-  // have a precondition that n is at least SmallSize).
-  while (maxElms < n) {
-    ++lgSize;
-    maxElms <<= 1;
-  }
-  assert(lgSize <= 32);
-
-  // return 2^lgSize - 1
-  return ((size_t(1U)) << lgSize) - 1;
-  static_assert(MixedArray::MinLgTableSize >= 2,
+  auto scale = MixedArray::SmallScale;
+  while (MixedArray::Capacity(scale) < n) scale *= 2;
+  return scale;
+  static_assert(MixedArray::SmallHashSize >= 4,
                 "lower limit for 0.75 load factor");
 }
 
 ALWAYS_INLINE
-std::pair<uint32_t,uint32_t> computeCapAndMask(uint32_t minimumMaxElms) {
-  auto const mask = computeMaskFromNumElms(minimumMaxElms);
-  auto const cap  = MixedArray::computeMaxElms(mask);
-  return std::make_pair(cap, mask);
+MixedArray* smartAllocArray(uint32_t scale) {
+  auto const allocBytes = computeAllocBytes(scale);
+  return static_cast<MixedArray*>(MM().objMalloc(allocBytes));
 }
 
 ALWAYS_INLINE
-size_t computeAllocBytes(uint32_t cap, uint32_t mask) {
-  auto const tabSize    = mask + 1;
-  auto const tabBytes   = tabSize * sizeof(int32_t);
-  auto const dataBytes  = cap * sizeof(MixedArray::Elm);
-  return sizeof(MixedArray) + tabBytes + dataBytes;
-}
-
-ALWAYS_INLINE
-MixedArray* smartAllocArray(uint32_t cap, uint32_t mask) {
-  /*
-   * Note: we're currently still allocating the memory for the hash
-   * for a packed array even if we aren't going to use it yet.
-   */
-  auto const allocBytes = computeAllocBytes(cap, mask);
-  return static_cast<MixedArray*>(MM().objMallocLogged(allocBytes));
-}
-
-ALWAYS_INLINE
-MixedArray* mallocArray(uint32_t cap, uint32_t mask) {
-  auto const allocBytes = computeAllocBytes(cap, mask);
+MixedArray* mallocArray(uint32_t scale) {
+  auto const allocBytes = computeAllocBytes(scale);
   return static_cast<MixedArray*>(std::malloc(allocBytes));
 }
 
 ALWAYS_INLINE
 size_t MixedArray::heapSize() const {
-  return computeAllocBytes(m_cap, m_tableMask);
+  return computeAllocBytes(m_scale);
 }
 
 //////////////////////////////////////////////////////////////////////

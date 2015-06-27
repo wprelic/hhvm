@@ -14,28 +14,38 @@
    +----------------------------------------------------------------------+
 */
 
-#include "hphp/runtime/vm/jit/vasm-x64.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
-#include "hphp/runtime/vm/jit/timer.h"
-#include "hphp/runtime/vm/jit/back-end-arm.h"
-#include "hphp/runtime/vm/jit/ir-instruction.h"
-#include "hphp/runtime/vm/jit/print.h"
+#include "hphp/runtime/vm/jit/vasm-emit.h"
+
 #include "hphp/runtime/vm/jit/abi-arm.h"
+#include "hphp/runtime/vm/jit/back-end-arm.h"
 #include "hphp/runtime/vm/jit/code-gen-helpers-arm.h"
+#include "hphp/runtime/vm/jit/ir-instruction.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/print.h"
 #include "hphp/runtime/vm/jit/reg-algorithms.h"
 #include "hphp/runtime/vm/jit/service-requests-arm.h"
 #include "hphp/runtime/vm/jit/service-requests-inline.h"
+#include "hphp/runtime/vm/jit/timer.h"
+#include "hphp/runtime/vm/jit/vasm.h"
+#include "hphp/runtime/vm/jit/vasm-instr.h"
+#include "hphp/runtime/vm/jit/vasm-print.h"
+#include "hphp/runtime/vm/jit/vasm-reg.h"
+#include "hphp/runtime/vm/jit/vasm-unit.h"
+
 #include "hphp/vixl/a64/macro-assembler-a64.h"
 
 TRACE_SET_MOD(vasm);
 
 namespace HPHP { namespace jit {
+///////////////////////////////////////////////////////////////////////////////
+
 using namespace arm;
 using namespace vixl;
 
 namespace arm { struct ImmFolder; }
 
 namespace {
+///////////////////////////////////////////////////////////////////////////////
 
 vixl::Register W(Vreg32 r) {
   PhysReg pr(r.asReg());
@@ -58,7 +68,7 @@ vixl::FPRegister D(Vreg r) {
 
 // convert Vptr to MemOperand
 vixl::MemOperand M(Vptr p) {
-  assert(p.base.isValid() && !p.index.isValid());
+  assertx(p.base.isValid() && !p.index.isValid());
   return X(p.base)[p.disp];
 }
 
@@ -85,20 +95,22 @@ private:
 
   // intrinsics
   void emit(bindcall& i);
-  void emit(bindexit& i);
+  void emit(bindjcc& i);
   void emit(bindjmp& i);
   void emit(copy& i);
   void emit(copy2& i);
   void emit(debugtrap& i) { a->Brk(0); }
   void emit(fallbackcc i);
+  void emit(fallback& i);
   void emit(hcsync& i);
   void emit(hcnocatch& i);
   void emit(hcunwind& i);
   void emit(hostcall& i);
-  void emit(ldimm& i);
-  void emit(ldpoint& i);
+  void emit(ldimmq& i);
+  void emit(ldimml& i);
+  void emit(ldimmb& i);
+  void emit(ldimmqs& i) { not_implemented(); }
   void emit(load& i);
-  void emit(point& i) { points[i.p] = a->frontier(); }
   void emit(store& i);
   void emit(syncpoint& i);
 
@@ -116,6 +128,7 @@ private:
   void emit(cmpli& i) { a->Cmp(W(i.s1), i.s0.l()); }
   void emit(cmpq& i) { a->Cmp(X(i.s1), X(i.s0)); }
   void emit(cmpqi& i) { a->Cmp(X(i.s1), i.s0.l()); }
+  void emit(cmpqims& i) { not_implemented(); }
   void emit(decq& i) { a->Sub(X(i.d), X(i.s), 1LL, vixl::SetFlags); }
   void emit(incq& i) { a->Add(X(i.d), X(i.s), 1LL, vixl::SetFlags); }
   void emit(jcc& i);
@@ -125,6 +138,7 @@ private:
   void emit(loadzbl& i) { a->Ldrb(W(i.d), M(i.s)); }
   void emit(lslv& i) { a->lslv(X(i.d), X(i.sl), X(i.sr)); }
   void emit(movzbl& i) { a->Uxtb(W(i.d), W(i.s)); }
+  void emit(movzbq& i) { a->Uxtb(W(Vreg32(size_t(i.d))), W(i.s)); }
   void emit(mul& i) { a->Mul(X(i.d), X(i.s0), X(i.s1)); }
   void emit(neg& i) { a->Neg(X(i.d), X(i.s), vixl::SetFlags); }
   void emit(not& i) { a->Mvn(X(i.d), X(i.s)); }
@@ -154,7 +168,7 @@ private:
 
 private:
   Vasm::Area& area(AreaIndex i) {
-    assert((unsigned)i < areas.size());
+    assertx((unsigned)i < areas.size());
     return areas[(unsigned)i];
   }
 
@@ -203,7 +217,7 @@ void Vgen::emit(jit::vector<Vlabel>& labels) {
   }
 
   for (int i = 0, n = labels.size(); i < n; ++i) {
-    assert(checkBlockEnd(unit, labels[i]));
+    assertx(checkBlockEnd(unit, labels[i]));
 
     auto b = labels[i];
     auto& block = unit.blocks[b];
@@ -273,16 +287,16 @@ void Vgen::emit(jit::vector<Vlabel>& labels) {
   }
 
   for (auto& p : jccs) {
-    assert(addrs[p.target]);
+    assertx(addrs[p.target]);
     backend.smashJcc(p.instr, addrs[p.target]);
   }
   for (auto& p : bccs) {
-    assert(addrs[p.target]);
+    assertx(addrs[p.target]);
     auto link = (Instruction*) p.instr;
     link->SetImmPCOffsetTarget(Instruction::Cast(addrs[p.target]));
   }
   for (auto& p : jmps) {
-    assert(addrs[p.target]);
+    assertx(addrs[p.target]);
     backend.smashJmp(p.instr, addrs[p.target]);
   }
   for (auto& p : catches) {
@@ -324,13 +338,13 @@ void Vgen::emit(bindcall& i) {
   mcg->backEnd().emitSmashableCall(*codeBlock, i.stub);
 }
 
-void Vgen::emit(bindexit& i) {
-  emitBindSideExit(*codeBlock, frozen(), i.target, i.cc);
+void Vgen::emit(bindjcc& i) {
+  emitBindJ(*codeBlock, frozen(), i.cc, i.target);
 }
 
 void Vgen::emit(bindjmp& i) {
   // XXX what about trflags
-  emitBindJmp(*codeBlock, frozen(), i.target);
+  emitBindJ(*codeBlock, frozen(), CC_None, i.target);
 }
 
 void Vgen::emit(copy& i) {
@@ -341,7 +355,7 @@ void Vgen::emit(copy& i) {
   } else if (i.s.isGP() && i.d.isSIMD()) {
     a->Fmov(D(i.d), X(i.s));
   } else {
-    assert(i.s.isSIMD() && i.d.isSIMD());
+    assertx(i.s.isSIMD() && i.d.isSIMD());
     a->Fmov(D(i.d), D(i.s));
   }
 }
@@ -370,9 +384,13 @@ void Vgen::emit(fallbackcc i) {
   }
 }
 
+void Vgen::emit(fallback& i) {
+  emit(fallbackcc{CC_None, InvalidReg, i.dest, i.trflags, i.args});
+}
+
 void Vgen::emit(hcsync& i) {
-  assert(points[i.call]);
-  mcg->recordSyncPoint(points[i.call], i.fix.pcOffset, i.fix.spOffset);
+  assertx(points[i.call]);
+  mcg->recordSyncPoint(points[i.call], i.fix);
 }
 
 void Vgen::emit(hcnocatch& i) {
@@ -390,7 +408,7 @@ void Vgen::emit(hostcall& i) {
   a->HostCall(i.argc);
 }
 
-void Vgen::emit(ldimm& i) {
+void Vgen::emit(ldimmq& i) {
   union { double dval; int64_t ival; };
   ival = i.s.q();
   if (i.d.isSIMD()) {
@@ -413,9 +431,31 @@ void Vgen::emit(ldimm& i) {
   }
 }
 
-void Vgen::emit(ldpoint& i) {
-  ldpoints.push_back({a->frontier(), i.s, i.d});
-  a->Mov(X(i.d), a->frontier()); // write a placeholder address
+static void emitSimdImmInt(vixl::MacroAssembler* a, int64_t val, Vreg d) {
+  if (val == 0) {
+    a->Fmov(D(d), vixl::xzr);
+  } else {
+    a->Mov(rAsm, val); // XXX avoid scratch register somehow.
+    a->Fmov(D(d), rAsm);
+  }
+}
+
+void Vgen::emit(ldimml& i) {
+  if (i.d.isSIMD()) {
+    emitSimdImmInt(a, i.s.q(), i.d);
+  } else {
+    Vreg32 d = i.d;
+    a->Mov(W(d), i.s.l());
+  }
+}
+
+void Vgen::emit(ldimmb& i) {
+  if (i.d.isSIMD()) {
+    emitSimdImmInt(a, i.s.q(), i.d);
+  } else {
+    Vreg8 d = i.d;
+    a->Mov(W(d), i.s.b());
+  }
 }
 
 void Vgen::emit(load& i) {
@@ -437,8 +477,7 @@ void Vgen::emit(store& i) {
 void Vgen::emit(syncpoint& i) {
   FTRACE(5, "IR recordSyncPoint: {} {} {}\n", a->frontier(),
          i.fix.pcOffset, i.fix.spOffset);
-  mcg->recordSyncPoint(a->frontier(), i.fix.pcOffset,
-                       i.fix.spOffset);
+  mcg->recordSyncPoint(a->frontier(), i.fix);
 }
 
 void Vgen::emit(jmp i) {
@@ -449,7 +488,7 @@ void Vgen::emit(jmp i) {
 }
 
 void Vgen::emit(jcc& i) {
-  assert(i.cc != CC_None);
+  assertx(i.cc != CC_None);
   if (i.targets[1] != i.targets[0]) {
     if (next == i.targets[1]) {
       // the taken branch is the fall-through block, invert the branch.
@@ -463,7 +502,7 @@ void Vgen::emit(jcc& i) {
 }
 
 void Vgen::emit(cbcc& i) {
-  assert(i.cc == vixl::ne || i.cc == vixl::eq);
+  assertx(i.cc == vixl::ne || i.cc == vixl::eq);
   if (i.targets[1] != i.targets[0]) {
     if (next == i.targets[1]) {
       // the taken branch is the fall-through block, invert the branch.
@@ -482,7 +521,7 @@ void Vgen::emit(cbcc& i) {
 }
 
 void Vgen::emit(tbcc& i) {
-  assert(i.cc == vixl::ne || i.cc == vixl::eq);
+  assertx(i.cc == vixl::ne || i.cc == vixl::eq);
   if (i.targets[1] != i.targets[0]) {
     if (next == i.targets[1]) {
       // the taken branch is the fall-through block, invert the branch.
@@ -503,10 +542,10 @@ void Vgen::emit(tbcc& i) {
 // Lower svcreq{} by making copies to abi registers explicit, saving
 // vm regs, and returning to the VM. svcreq{} is guaranteed to be
 // at the end of a block, so we can just keep appending to the same block.
-static void lower_svcreq(Vunit& unit, Vlabel b, Vinstr& inst) {
+void lower_svcreq(Vunit& unit, Vlabel b, Vinstr& inst) {
   auto svcreq = inst.svcreq_; // copy it
   auto origin = inst.origin;
-  auto& argv = unit.tuples[svcreq.args];
+  auto& argv = unit.tuples[svcreq.extraArgs];
   unit.blocks[b].code.pop_back(); // delete the svcreq instruction
   Vout v(unit, b, origin);
 
@@ -517,17 +556,17 @@ static void lower_svcreq(Vunit& unit, Vlabel b, Vinstr& inst) {
     arg_dests.push_back(d);
     arg_regs |= d;
   }
-  v << copyargs{svcreq.args, v.makeTuple(arg_dests)};
+  v << copyargs{svcreq.extraArgs, v.makeTuple(arg_dests)};
   // Save VM regs
-  PhysReg vmfp{rVmFp}, vmsp{rVmSp}, sp{vixl::sp}, rds{rVmTl};
-  v << store{vmfp, rds[RDS::kVmfpOff]};
-  v << store{vmsp, rds[RDS::kVmspOff]};
+  PhysReg vmfp{rVmFp}, vmsp{rVmSp}, sp{vixl::sp}, rdsp{rVmTl};
+  v << store{vmfp, rdsp[rds::kVmfpOff]};
+  v << store{vmsp, rdsp[rds::kVmspOff]};
   if (svcreq.stub_block) {
     always_assert(false && "use rip-rel addr to get ephemeral stub addr");
   } else {
-    v << ldimm{0, PhysReg{arm::rAsm}}; // because persist flag
+    v << ldimmq{0, PhysReg{arm::rAsm}}; // because persist flag
   }
-  v << ldimm{svcreq.req, PhysReg{argReg(0)}};
+  v << ldimmq{svcreq.req, PhysReg{argReg(0)}};
   arg_regs |= arm::rAsm | argReg(0);
 
   // Weird hand-shaking with enterTC: reverse-call a service routine.
@@ -559,9 +598,6 @@ void lower(Vunit& unit) {
         case Vinstr::syncvmsp:
           inst = copy{inst.syncvmsp_.s, PhysReg{arm::rVmSp}};
           break;
-        case Vinstr::syncvmfp:
-          inst = copy{inst.syncvmfp_.s, PhysReg{arm::rVmFp}};
-          break;
         default:
           break;
       }
@@ -569,27 +605,95 @@ void lower(Vunit& unit) {
   }
 }
 
+/*
+ * Some vasm opcodes don't have equivalent single instructions on ARM, and the
+ * equivalent instruction sequences require scratch registers.  We have to
+ * lower these to ARM-suitable vasm opcodes before register allocation.
+ */
+template<typename Inst>
+void lower(Inst& i, Vout& v) {
+  v << i;
 }
 
-void Vasm::finishARM(const Abi& abi, AsmInfo* asmInfo) {
-  lower(m_unit);
-  if (!m_unit.cpool.empty()) {
-    foldImms<arm::ImmFolder>(m_unit);
+void lower(cmpbim& i, Vout& v) {
+  auto scratch = v.makeReg();
+  v << loadzbl{i.s1, scratch};
+  v << cmpli{i.s0, scratch, i.sf};
+}
+
+void lower(cmplim& i, Vout& v) {
+  auto scratch = v.makeReg();
+  v << loadl{i.s1, scratch};
+  v << cmpli{i.s0, scratch, i.sf};
+}
+
+void lower(cmpqm& i, Vout& v) {
+  auto scratch = v.makeReg();
+  v << load{i.s1, scratch};
+  v << cmpq{i.s0, scratch, i.sf};
+}
+
+void lower(testbim& i, Vout& v) {
+  auto scratch = v.makeReg();
+  v << loadzbl{i.s1, scratch};
+  v << testli{i.s0, scratch, i.sf};
+}
+
+void lowerForARM(Vunit& unit) {
+  assertx(check(unit));
+
+  // block order doesn't matter, but only visit reachable blocks.
+  auto blocks = sortBlocks(unit);
+
+  for (auto b : blocks) {
+    auto oldCode = std::move(unit.blocks[b].code);
+    Vout v{unit, b};
+
+    for (auto& inst : oldCode) {
+      v.setOrigin(inst.origin);
+
+      switch (inst.op) {
+#define O(nm, imm, use, def) \
+        case Vinstr::nm: \
+          lower(inst.nm##_, v); \
+          break;
+
+        VASM_OPCODES
+#undef O
+      }
+    }
   }
-  lowerForARM(m_unit);
-  if (m_unit.needsRegAlloc()) {
+
+  assertx(check(unit));
+  printUnit(kVasmARMFoldLevel, "after lowerForARM", unit);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+}
+
+void finishARM(Vunit& unit, Vasm::AreaList& areas,
+               const Abi& abi, AsmInfo* asmInfo) {
+  optimizeExits(unit);
+  lower(unit);
+  simplify(unit);
+  if (!unit.constToReg.empty()) {
+    foldImms<arm::ImmFolder>(unit);
+  }
+  lowerForARM(unit);
+  if (unit.needsRegAlloc()) {
     Timer _t(Timer::vasm_xls);
-    removeDeadCode(m_unit);
-    allocateRegisters(m_unit, abi);
+    removeDeadCode(unit);
+    allocateRegisters(unit, abi);
   }
-  if (m_unit.blocks.size() > 1) {
+  if (unit.blocks.size() > 1) {
     Timer _t(Timer::vasm_jumps);
-    optimizeJmps(m_unit);
+    optimizeJmps(unit);
   }
 
   Timer _t(Timer::vasm_gen);
-  auto blocks = layoutBlocks(m_unit);
-  Vgen(m_unit, m_areas, asmInfo).emit(blocks);
+  auto blocks = layoutBlocks(unit);
+  Vgen(unit, areas, asmInfo).emit(blocks);
 }
 
+///////////////////////////////////////////////////////////////////////////////
 }}

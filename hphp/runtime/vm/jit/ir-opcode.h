@@ -54,7 +54,6 @@ struct FrameStateMgr;
  *     ND           instruction has no destination
  *     D(type)      single dst has a specific type
  *     DofS(N)      single dst has the type of src N
- *     DBox(N)      single dst has boxed type of src N
  *     DRefineS(N)  single dst's type is intersection of src N and paramType
  *     DParam       single dst has type of the instruction's type parameter
  *     DParamMayRelax like DParam, except type may relax
@@ -68,15 +67,13 @@ struct FrameStateMgr;
  *                    intersected with an optional type parameter
  *     DThis        single dst has type Obj<ctx>, where ctx is the
  *                    current context class
+ *     DCtx         single dst has type Cctx|Obj<=ctx, where ctx is the
+ *                    current context class
  *     DMulti       multiple dests. type and number depend on instruction
  *     DSetElem     single dst is a subset of CountedStr|Nullptr depending on
  *                    sources
- *     DStk(x)      up to two dests. x should be another D* macro and indicates
- *                    the type of the first dest, if any. the second (or first,
- *                    depending on the presence of a primary destination), will
- *                    be of type Type::StkPtr. implies ModifiesStack.
  *     DBuiltin     single dst for CallBuiltin. This can return complex data
- *                    types such as (Type::Str | Type::Null)
+ *                    types such as (TStr | TNull)
  *     DSubtract(N,t) single dest has type of src N with t removed
  *     DCns         single dst's type is the union of legal types for PHP
  *                    constants
@@ -104,8 +101,6 @@ struct FrameStateMgr;
  *   The following abbreviations are used in this table:
  *
  *      NF    no flags
- *      C     canCSE
- *      E     isEssential
  *      Er    mayRaiseError
  *      PRc   producesRC
  *      CRc   consumesRC
@@ -116,10 +111,6 @@ struct FrameStateMgr;
  *      MProp MInstrProp
  *      MElem MInstrElem
  */
-
-#define O_STK(name, dst, src, flags)            \
-  O(name, dst, src, StkFlags(flags))            \
-  O(name ## Stk, DStk(dst), src S(StkPtr), flags)
 
 // The IR opcode table is generated from lines that start with | in
 // hphp/doc/ir.specification.
@@ -139,13 +130,18 @@ size_t constexpr kNumOpcodes = IR_OPCODES;
 #undef O
 
 /*
+ * Returns true for instructions that perform calls.
+ */
+bool isCallOp(Opcode opc);
+
+/*
  * Returns true for instructions that refine the types of values with
  * a runtime check.
  */
 bool isGuardOp(Opcode opc);
 
 /*
- * A "query op" is any instruction returning Type::Bool that is
+ * A "query op" is any instruction returning TBool that is
  * negateable.
  */
 bool isQueryOp(Opcode opc);
@@ -171,46 +167,6 @@ bool isDblQueryOp(Opcode opc);
 Opcode queryToDblQueryOp(Opcode opc);
 
 /*
- * A "fusable query op" is any instruction returning Type::Bool that
- * has a corresponding "query jump op" for branch fusion.
- */
-bool isFusableQueryOp(Opcode opc);
-
-/*
- * A "query jump op" is a conditional jump instruction that
- * corresponds to one of the fusable query op instructions.
- */
-bool isQueryJmpOp(Opcode opc);
-
-/*
- * Translate a query op into a conditional jump that does the same
- * test (a "query jump op").
- *
- * Pre: isFusableQueryOp(opc)
- */
-Opcode queryToJmpOp(Opcode opc);
-
-/*
- * Translate a "query jump op" to a query op.
- *
- * Pre: isQueryJmpOp(opc);
- */
-Opcode queryJmpToQueryOp(Opcode opc);
-
-/*
- * Convert a jump to its corresponding side exit.
- */
-Opcode jmpToSideExitJmp(Opcode opc);
-
-/*
- * Convert a jump operation to its corresponding conditional
- * ReqBindJmp.
- *
- * Pre: opc is a conditional jump.
- */
-Opcode jmpToReqBindJmp(Opcode opc);
-
-/*
  * Return the opcode that corresponds to negation of opc.
  */
 Opcode negateQueryOp(Opcode opc);
@@ -230,29 +186,20 @@ bool opHasExtraData(Opcode op);
 enum OpcodeFlag : uint64_t {
   NoFlags          = 0,
   HasDest          = 1ULL <<  0,
-  CanCSE           = 1ULL <<  1,
-  Essential        = 1ULL <<  2,
-  Branch           = 1ULL <<  3,
-  HasStackVersion  = 1ULL <<  4,
-  ConsumesRC       = 1ULL <<  5,
-  ProducesRC       = 1ULL <<  6,
-  MInstrProp       = 1ULL <<  7,
-  MInstrElem       = 1ULL <<  8,
-  MayRaiseError    = 1ULL <<  9,
-  Terminal         = 1ULL << 10, // has no next instruction
-  NaryDest         = 1ULL << 11, // has 0 or more destinations
-  HasExtra         = 1ULL << 12,
-  Passthrough      = 1ULL << 13,
-  KillsSources     = 1ULL << 14,
-  ModifiesStack    = 1ULL << 15,
+  Branch           = 1ULL <<  1,
+  ConsumesRC       = 1ULL <<  2,
+  ProducesRC       = 1ULL <<  3,
+  MInstrProp       = 1ULL <<  4,
+  MInstrElem       = 1ULL <<  5,
+  MayRaiseError    = 1ULL <<  6,
+  Terminal         = 1ULL <<  7, // has no next instruction
+  NaryDest         = 1ULL <<  8, // has 0 or more destinations
+  HasExtra         = 1ULL <<  9,
+  Passthrough      = 1ULL << 10,
 };
 
 bool hasEdges(Opcode opc);
 bool opcodeHasFlags(Opcode opc, uint64_t flags);
-Opcode getStackModifyingOpcode(Opcode opc);
-
-using SrcRange = folly::Range<SSATmp**>;
-using DstRange = folly::Range<SSATmp*>;
 
 /*
  * Given an SSATmp of type Cls, try to find the name of the class.
@@ -260,49 +207,7 @@ using DstRange = folly::Range<SSATmp*>;
  */
 const StringData* findClassName(SSATmp* cls);
 
-/*
- * Return the output type from a given IRInstruction.
- *
- * The destination type is always predictable from the types of the inputs, any
- * type parameters to the instruction, and the id of the dest.
- */
-Type outputType(const IRInstruction*, int dstId = 0);
-
-/*
- * Check that an instruction has operands of allowed types.
- */
-bool checkOperandTypes(const IRInstruction*, const IRUnit* unit = nullptr);
-
-
-int minstrBaseIdx(Opcode opc);
-int minstrBaseIdx(const IRInstruction* inst);
-
-struct MInstrEffects {
-  MInstrEffects(Opcode op, Type base);
-
-  static bool supported(Opcode op);
-  static bool supported(const IRInstruction* inst);
-
-  /*
-   * MInstrEffects::get is used to allow multiple different consumers to deal
-   * with the side effects of vector instructions. It takes an instruction and
-   * a LocalStateHook, and a FrameStateMgr, which are defined in frame-state.h.
-   */
-  static void get(const IRInstruction*, const FrameStateMgr&, LocalStateHook&);
-
-  Type baseType;
-  bool baseTypeChanged;
-  bool baseValChanged;
-};
-
 using TcaRange = folly::Range<TCA>;
-
-/*
- * Counts the number of cells a SpillStack will logically push.  (Not
- * including the number it pops.)  That is, for each SSATmp in the
- * spill sources, this totals up whether it is an ActRec or a cell.
- */
-int32_t spillValueCells(const IRInstruction* spillStack);
 
 } // namespace jit
 } // namespace HPHP

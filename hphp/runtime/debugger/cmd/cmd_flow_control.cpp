@@ -18,6 +18,7 @@
 
 #include <algorithm>
 
+#include "hphp/runtime/debugger/debugger_client.h"
 #include "hphp/runtime/vm/debugger-hook.h"
 #include "hphp/runtime/vm/vm-regs.h"
 
@@ -148,7 +149,7 @@ void CmdFlowControl::setupStepOuts() {
   Offset returnOffset;
   bool fromVMEntry;
   while (!hasStepOuts()) {
-    fp = g_context->getPrevVMStateUNSAFE(fp, &returnOffset, nullptr, &fromVMEntry);
+    fp = g_context->getPrevVMState(fp, &returnOffset, nullptr, &fromVMEntry);
     // If we've run off the top of the stack, just return having setup no
     // step outs. This will cause cmds like Next and Out to just let the program
     // run, which is appropriate.
@@ -158,8 +159,9 @@ void CmdFlowControl::setupStepOuts() {
     TRACE(2, "CmdFlowControl::setupStepOuts: at '%s' offset %d opcode %s\n",
           fp->m_func->fullName()->data(), returnOffset,
           opcodeToName(*reinterpret_cast<const Op*>(returnPC)));
-    // Don't step out to generated functions, keep looking.
+    // Don't step out to generated or builtin functions, keep looking.
     if (fp->m_func->line1() == 0) continue;
+    if (fp->m_func->isBuiltin()) continue;
     if (fromVMEntry) {
       TRACE(2, "CmdFlowControl::setupStepOuts: VM entry\n");
       // We only execute this for opcodes which invoke more PHP, and that does
@@ -213,7 +215,7 @@ void CmdFlowControl::cleanupStepOuts() {
 // a StepDestination is constructed then it will not remove the
 // breakpoint when it is destructed. The move assignment operator
 // handles the transfer of ownership, and we delete the copy
-// constructor/assignment operators explictly to ensure no two
+// constructor/assignment operators explicitly to ensure no two
 // StepDestinations believe they can remove the same internal
 // breakpoint.
 //

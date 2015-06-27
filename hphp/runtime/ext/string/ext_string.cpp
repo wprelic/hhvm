@@ -16,23 +16,28 @@
 */
 
 #include "hphp/runtime/ext/string/ext_string.h"
+#include "hphp/runtime/base/bstring.h"
+#include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/base/container-functions.h"
+#include "hphp/runtime/base/actrec-args.h"
+#include "hphp/runtime/base/plain-file.h"
+#include "hphp/runtime/base/request-event-handler.h"
+#include "hphp/runtime/base/request-local.h"
 #include "hphp/runtime/base/string-buffer.h"
+#include "hphp/runtime/base/string-util.h"
+#include "hphp/runtime/base/zend-scanf.h"
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/base/zend-url.h"
-#include "hphp/runtime/base/zend-scanf.h"
-#include "hphp/runtime/base/bstring.h"
-#include "hphp/runtime/base/request-local.h"
-#include "hphp/util/lock.h"
-#include <locale.h>
-#include "hphp/runtime/server/http-request-handler.h"
-#include "hphp/runtime/server/http-protocol.h"
-#include "hphp/runtime/ext/ext_math.h"
 #include "hphp/runtime/ext/std/ext_std_classobj.h"
+#include "hphp/runtime/ext/std/ext_std_math.h"
 #include "hphp/runtime/ext/std/ext_std_variable.h"
-#include <folly/Unicode.h>
-#include "hphp/runtime/base/request-event-handler.h"
+#include "hphp/runtime/server/http-protocol.h"
+#include "hphp/runtime/server/http-request-handler.h"
+#include "hphp/util/lock.h"
 #include "hphp/zend/html-table.h"
-#include "hphp/runtime/base/container-functions.h"
+
+#include <folly/Unicode.h>
+#include <locale.h>
 
 namespace HPHP {
 
@@ -58,12 +63,11 @@ String stringForEach(uint32_t len, const String& str, Op action) {
   String ret = mutate ? str : String(len, ReserveString);
 
   StringSlice srcSlice = str.slice();
-  auto const dstSlice = ret.bufferSlice();
 
   const char* src = srcSlice.begin();
   const char* end = srcSlice.end();
 
-  char* dst = dstSlice.begin();
+  char* dst = ret.mutableData();
 
   for (; src != end; ++src, ++dst) {
     *dst = action(*src);
@@ -79,11 +83,7 @@ String stringForEachFast(const String& str, Op action) {
     return str;
   }
 
-  if (str.get()->hasExactlyOneRef()) {
-    return stringForEach<true>(str.size(), str.get(), action);
-  }
-
-  return stringForEach<false>(str.size(), str.get(), action);
+  return stringForEach<false>(str.size(), str, action);
 }
 
 String HHVM_FUNCTION(addcslashes,
@@ -355,12 +355,12 @@ String HHVM_FUNCTION(str_shuffle,
     return str;
   }
 
-  String ret = str.get()->hasExactlyOneRef() ? str : String(str, CopyString);
+  String ret(str, CopyString);
   char* buf  = ret.get()->mutableData();
   int left   = ret.size();
 
   while (--left) {
-    int idx = f_rand(0, left);
+    int idx = HHVM_FN(rand)(0, left);
     if (idx != left) {
       char temp = buf[left];
       buf[left] = buf[idx];
@@ -373,16 +373,6 @@ String HHVM_FUNCTION(str_shuffle,
 String HHVM_FUNCTION(strrev,
                      const String& str) {
   auto len = str.size();
-
-  if (str.get()->hasExactlyOneRef()) {
-    char* sdata = str.get()->mutableData();
-    for (int i = 0; i < len / 2; ++i) {
-      char temp = sdata[i];
-      sdata[i] = sdata[len - i - 1];
-      sdata[len - i - 1] = temp;
-    }
-    return str;
-  }
 
   String ret(len, ReserveString);
 
@@ -398,24 +388,18 @@ String HHVM_FUNCTION(strrev,
 }
 
 String HHVM_FUNCTION(strtolower,
-                     String str) {
+                     const String& str) {
   return stringForEachFast(str, tolower);
 }
 
 String HHVM_FUNCTION(strtoupper,
-                     String str) {
+                     const String& str) {
   return stringForEachFast(str, toupper);
 }
 
 template <class OpTo, class OpIs> ALWAYS_INLINE
 String stringToCaseFirst(const String& str, OpTo tocase, OpIs iscase) {
   if (str.empty() || iscase(str[0])) {
-    return str;
-  }
-
-  if (str.get()->hasExactlyOneRef()) {
-    char* sdata = str.get()->mutableData();
-    sdata[0] = tocase(sdata[0]);
     return str;
   }
 
@@ -427,17 +411,17 @@ String stringToCaseFirst(const String& str, OpTo tocase, OpIs iscase) {
 }
 
 String HHVM_FUNCTION(ucfirst,
-                     String str) {
+                     const String& str) {
   return stringToCaseFirst(str, toupper, isupper);
 }
 
 String HHVM_FUNCTION(lcfirst,
-                     String str) {
+                     const String& str) {
   return stringToCaseFirst(str, tolower, islower);
 }
 
 String HHVM_FUNCTION(ucwords,
-                     String str) {
+                     const String& str) {
   char last = ' ';
   return stringForEachFast(str, [&] (char c) {
     char ret = isspace(last) ? toupper(c) : c;
@@ -453,7 +437,7 @@ String HHVM_FUNCTION(strip_tags,
 }
 
 template <bool left, bool right> ALWAYS_INLINE
-String stringTrim(String& str, const String& charlist) {
+String stringTrim(const String& str, const String& charlist) {
   char flags[256];
   string_charmask(charlist.c_str(), charlist.size(), flags);
 
@@ -469,38 +453,29 @@ String stringTrim(String& str, const String& charlist) {
     for (; end >= start && flags[(unsigned char)str[end]]; --end) {}
   }
 
-  if (str.get()->hasExactlyOneRef()) {
-    int slen = end - start + 1;
-    if (start) {
-      char* sdata = str.bufferSlice().ptr;
-      for (int idx = 0; start < len;) sdata[idx++] = sdata[start++];
-    }
-    return String(str.get()->shrink(slen));
-  }
-
   return str.substr(start, end - start + 1);
 }
 
 String HHVM_FUNCTION(trim,
-                     String str,
+                     const String& str,
                      const String& charlist /* = k_HPHP_TRIM_CHARLIST */) {
   return stringTrim<true,true>(str, charlist);
 }
 
 String HHVM_FUNCTION(ltrim,
-                     String str,
+                     const String& str,
                      const String& charlist /* = k_HPHP_TRIM_CHARLIST */) {
   return stringTrim<true,false>(str, charlist);
 }
 
 String HHVM_FUNCTION(rtrim,
-                     String str,
+                     const String& str,
                      const String& charlist /* = k_HPHP_TRIM_CHARLIST */) {
   return stringTrim<false,true>(str, charlist);
 }
 
 String HHVM_FUNCTION(chop,
-                      String str,
+                      const String& str,
                       const String& charlist /* = k_HPHP_TRIM_CHARLIST */) {
   return stringTrim<false,true>(str, charlist);
 }
@@ -528,7 +503,7 @@ String HHVM_FUNCTION(implode,
                              "one of the arguments");
     return String();
   }
-  return StringUtil::Implode(items, delim);
+  return StringUtil::Implode(items, delim, false);
 }
 
 String HHVM_FUNCTION(join,
@@ -693,7 +668,16 @@ Variant HHVM_FUNCTION(str_replace,
                       const Variant& subject,
                       VRefParam count /* = null */) {
   int nCount = 0;
-  Variant ret = str_replace(search, replace, subject, nCount, true);
+  Variant ret;
+  if (LIKELY(search.isString() && replace.isString() && subject.isString())) {
+    // Short-cut for the most common (and simplest) case
+    ret = string_replace(subject.asCStrRef(), search.asCStrRef(),
+                         replace.asCStrRef(), nCount, true);
+  } else {
+    // search, replace, and subject can all be arrays. str_replace() reduces all
+    // the valid combinations to multiple string_replace() calls.
+    ret = str_replace(search, replace, subject, nCount, true);
+  }
   count = nCount;
   return ret;
 }
@@ -846,7 +830,7 @@ String HHVM_FUNCTION(str_repeat,
   if (input.size() == 1) {
     String ret(multiplier, ReserveString);
 
-    memset(ret.bufferSlice().ptr, *input.data(), multiplier);
+    memset(ret.mutableData(), *input.data(), multiplier);
     ret.setSize(multiplier);
     return ret;
   }
@@ -897,9 +881,16 @@ TypedValue* HHVM_FN(sscanf)(ActRec* ar) {
   return arReturn(ar, sscanfImpl(str, format, args));
 }
 
-String HHVM_FUNCTION(chr,
-                     Variant ascii) {
-  return String(makeStaticString((char)ascii.toInt64()));
+String HHVM_FUNCTION(chr, const Variant& ascii) {
+  // This is the only known occurance of ParamCoerceModeNullByte,
+  // so we treat it specially using an explicit tvCoerce call
+  Variant v(ascii);
+  auto tv = v.asTypedValue();
+  char c = 0;
+  if (tvCoerceParamToInt64InPlace(tv)) {
+    c = tv->m_data.num & 0xFF;
+  }
+  return String::FromChar(c);
 }
 
 int64_t HHVM_FUNCTION(ord,
@@ -1432,8 +1423,7 @@ Array HHVM_FUNCTION(str_getcsv,
   char enclosure_char = check_arg(enclosure, '"');
   char escape_char = check_arg(escape, '\\');
 
-  auto dummy = newres<PlainFile>();
-  auto wrapper = Resource(dummy);
+  auto dummy = makeSmartPtr<PlainFile>();
   return dummy->readCSV(0, delimiter_char, enclosure_char, escape_char, &str);
 }
 
@@ -1447,7 +1437,7 @@ Variant HHVM_FUNCTION(count_chars,
     chars[*buf++]++;
   }
 
-  Array retarr;
+  Array retarr = Array::Create();
   char retstr[256];
   int retlen = 0;
   switch (mode) {
@@ -1657,7 +1647,7 @@ String HHVM_FUNCTION(fb_htmlspecialchars,
                      const String& charset /* = "ISO-8859-1" */,
                      const Variant& extra /* = empty_array_ref */) {
   if (!extra.isNull() && !extra.isArray()) {
-    throw_expected_array_exception();
+    throw_expected_array_exception("fb_htmlspecialchars");
   }
   const Array& arr_extra = extra.isNull() ? empty_array_ref : extra.toArray();
   return StringUtil::HtmlEncodeExtra(str, StringUtil::toQuoteStyle(flags),
@@ -1723,7 +1713,7 @@ String HHVM_FUNCTION(sha1,
 bool strtr_slow(const Array& arr, StringBuffer& result, String& key,
                 const char*s, int& pos, int minlen, int maxlen) {
 
-  memcpy(key.bufferSlice().ptr, s + pos, maxlen);
+  memcpy(key.mutableData(), s + pos, maxlen);
   for (int len = maxlen; len >= minlen; len--) {
     key.setSize(len);
     auto const& var = arr->get(key.toKey());
@@ -2110,7 +2100,7 @@ String HHVM_FUNCTION(hebrevc,
 
 ///////////////////////////////////////////////////////////////////////////////
 
-class StringExtension : public Extension {
+class StringExtension final : public Extension {
 public:
   StringExtension() : Extension("string") {}
   void moduleInit() override {

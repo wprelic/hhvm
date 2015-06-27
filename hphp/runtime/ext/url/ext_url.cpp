@@ -17,6 +17,8 @@
 
 #include "hphp/runtime/ext/url/ext_url.h"
 #include <set>
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/string-util.h"
 #include "hphp/runtime/base/zend-url.h"
 #include "hphp/runtime/base/string-buffer.h"
@@ -115,8 +117,8 @@ Array HHVM_FUNCTION(get_meta_tags, const String& filename,
   String f = HHVM_FN(file_get_contents)(filename);
 
   Variant matches;
-  HHVM_FN(preg_match_all)("/<meta\\s+name=\"(.*?)\"\\s+content=\"(.*?)\".*?>/s",
-                          f, ref(matches), PREG_SET_ORDER);
+  preg_match_all("/<meta\\s+name=\"(.*?)\"\\s+content=\"(.*?)\".*?>/s",
+                 f, &matches, PREG_SET_ORDER);
 
   Array ret = Array::Create();
   for (ArrayIter iter(matches.toArray()); iter; ++iter) {
@@ -320,10 +322,10 @@ const StaticString s_PHP_URL_FRAGMENT("PHP_URL_FRAGMENT");
 const StaticString s_PHP_QUERY_RFC1738("PHP_QUERY_RFC1738");
 const StaticString s_PHP_QUERY_RFC3986("PHP_QUERY_RFC3986");
 
-class StandardURLExtension : public Extension {
+class StandardURLExtension final : public Extension {
  public:
   StandardURLExtension() : Extension("url") {}
-  virtual void moduleInit() {
+  void moduleInit() override {
     Native::registerConstant<KindOfInt64>(
       s_PHP_URL_SCHEME.get(), k_PHP_URL_SCHEME
     );

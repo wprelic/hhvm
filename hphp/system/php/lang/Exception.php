@@ -24,7 +24,7 @@ class Exception {
    * special logic to call the __init__ method before
    * calling __construct just to make sure $this->trace is always populated.
    */
-  final function __init__() {
+  final public function __init__() {
     if (isset($this->trace)) {
       return;
     }
@@ -52,9 +52,21 @@ class Exception {
    * @previous   mixed   The previous exception used for the exception
    *                     chaining.
    */
-  function __construct($message = '', $code = 0, Exception $previous = null) {
-    $this->message = $message;
-    $this->code = $code;
+  public function __construct($message = '', $code = 0,
+                              Exception $previous = null) {
+
+    // Child classes may just override the protected property
+    // without implementing a constructor or calling parent one.
+    // In this case we should not override it from the param.
+
+    if ($message !== '' || $this->message === '') {
+      $this->message = $message;
+    }
+
+    if ($code !== 0 || $this->code === 0) {
+      $this->code = $code;
+    }
+
     $this->previous = $previous;
   }
 
@@ -66,7 +78,7 @@ class Exception {
    *
    * @return     mixed   Returns the Exception message as a string.
    */
-  function getMessage() {
+  public function getMessage() {
     return $this->message;
   }
 
@@ -80,15 +92,15 @@ class Exception {
    * @return     mixed   Returns the previous Exception if available or NULL
    *                     otherwise.
    */
-  final function getPrevious() {
+  final public function getPrevious() {
     return $this->previous;
   }
 
-  final function setPrevious(Exception $previous) {
+  final public function setPrevious(Exception $previous) {
     $this->previous = $previous;
   }
 
-  final function setPreviousChain(Exception $previous) {
+  final public function setPreviousChain(Exception $previous) {
     $cur = $this;
     $next = $cur->getPrevious();
     while ($next instanceof Exception) {
@@ -108,7 +120,7 @@ class Exception {
    *                     but possibly as other type in Exception descendants
    *                     (for example as string in PDOException).
    */
-  function getCode() {
+  public function getCode() {
     return $this->code;
   }
 
@@ -121,7 +133,7 @@ class Exception {
    * @return     mixed   Returns the filename in which the exception was
    *                     created.
    */
-  final function getFile() {
+  final public function getFile() {
     if (!$this->__check_init(__METHOD__)) {
       return null;
     }
@@ -137,7 +149,7 @@ class Exception {
    * @return     mixed   Returns the line number where the exception was
    *                     created.
    */
-  final function getLine() {
+  final public function getLine() {
     if (!$this->__check_init(__METHOD__)) {
       return null;
     }
@@ -152,7 +164,7 @@ class Exception {
    *
    * @return     mixed   Returns the Exception stack trace as an array.
    */
-  final function getTrace() {
+  final public function getTrace() {
     if (!$this->__check_init(__METHOD__)) {
       return null;
     }
@@ -167,7 +179,7 @@ class Exception {
    *
    * @return     mixed   Returns the Exception stack trace as a string.
    */
-  final function getTraceAsString() {
+  final public function getTraceAsString() {
     if (!$this->__check_init(__METHOD__)) {
       return null;
     }
@@ -196,7 +208,7 @@ class Exception {
    *
    * @return     mixed   Returns the string representation of the exception.
    */
-  function __toString() {
+  public function __toString() {
     $res = "";
     $lst = array();
     $ex = $this;
@@ -242,5 +254,10 @@ class Exception {
 
   public static function setTraceOptions($opts) {
     self::$traceOpts = (int)$opts;
+  }
+
+  final private function __clone() {
+    trigger_error("Trying to clone an uncloneable object of class " .
+                  get_class($this), E_USER_ERROR);
   }
 }

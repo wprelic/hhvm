@@ -20,7 +20,8 @@
 #include "hphp/compiler/expression/constant_expression.h"
 #include "hphp/compiler/statement/block_statement.h"
 #include "hphp/compiler/analysis/function_scope.h"
-#include "hphp/runtime/base/complex-types.h"
+
+#include "hphp/runtime/base/type-variant.h"
 
 using namespace HPHP;
 
@@ -196,7 +197,7 @@ void IfStatement::outputCodeModel(CodeGenerator &cg) {
     cg.printPropertyHeader("trueBlock");
     cg.printAsBlock(statements);
     cg.printPropertyHeader("sourceLocation");
-    cg.printLocation(this->getLocation());
+    cg.printLocation(this);
     // false block will be supplied by next iteration, or code following loop
   }
   // supply the false block for the else

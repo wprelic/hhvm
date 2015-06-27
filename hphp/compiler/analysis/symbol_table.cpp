@@ -29,7 +29,6 @@
 #include "hphp/compiler/expression/simple_variable.h"
 
 #include "hphp/runtime/base/class-info.h"
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/base/variable-serializer.h"
 
 #include "hphp/util/logger.h"
@@ -305,7 +304,7 @@ void Symbol::serializeClassVar(JSON::DocTarget::OutputStream &out) const {
 
   JSON::DocTarget::MapStream ms(out);
   ms.add("name", m_name);
-  ms.add("line", m_declaration ? m_declaration->getLocation()->line0 : 0);
+  ms.add("line", m_declaration ? m_declaration->line0() : 0);
 
   int mods = 0;
   if (isPublic())    mods |= ClassInfo::IsPublic;

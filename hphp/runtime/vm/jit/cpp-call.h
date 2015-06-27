@@ -18,6 +18,7 @@
 #define incl_HPHP_VM_JIT_CPP_CALL_H_
 
 #include "hphp/runtime/base/array-data.h"
+#include "hphp/runtime/vm/jit/vasm-reg.h"
 
 #include <cstdint>
 
@@ -94,9 +95,7 @@ struct CppCall {
    *   CppCall::array(&g_array_funcs.nvGetInt)
    *
    * The call mechanism assumes that the first argument to the function is an
-   * ArrayData*, and loads the kind from there.  This should only be used if
-   * you know that the array data vtable is in low memory---e.g. in
-   * code-gen-x64 you should go through arrayCallIfLowMem() first.
+   * ArrayData*, and loads the kind from there.
    */
   template<class Ret, class... Args>
   static CppCall array(Ret (*const (*p)[ArrayData::kNumKinds])(Args...)) {
@@ -114,7 +113,7 @@ struct CppCall {
   /*
    * Call destructor using r as function table index
    */
-  static CppCall destruct(PhysReg r) {
+  static CppCall destruct(Vreg r) {
     return CppCall { Kind::Destructor, r };
   }
 
@@ -128,19 +127,19 @@ struct CppCall {
    * mutually exclusive, depending on the kind.
    */
   void* address() const {
-    assert(kind() == Kind::Direct);
+    assertx(kind() == Kind::Direct);
     return m_u.fptr;
   }
   int vtableOffset() const {
-    assert(m_kind == Kind::Virtual);
+    assertx(m_kind == Kind::Virtual);
     return m_u.vtableOffset;
   }
-  PhysReg reg() const {
-    assert(m_kind == Kind::Destructor);
+  Vreg reg() const {
+    assertx(m_kind == Kind::Destructor);
     return m_u.reg;
   }
   void* arrayTable() const {
-    assert(kind() == Kind::ArrayVirt);
+    assertx(kind() == Kind::ArrayVirt);
     return m_u.fptr;
   }
 
@@ -148,11 +147,11 @@ private:
   union U {
     /* implicit */ U(void* fptr)       : fptr(fptr) {}
     /* implicit */ U(int vtableOffset) : vtableOffset(vtableOffset) {}
-    /* implicit */ U(PhysReg reg)      : reg(reg) {}
+    /* implicit */ U(Vreg reg)         : reg(reg) {}
 
     void* fptr;
     int vtableOffset;
-    PhysReg reg;
+    Vreg reg;
   };
 
 private:

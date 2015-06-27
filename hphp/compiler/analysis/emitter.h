@@ -24,12 +24,18 @@
 #include "hphp/compiler/statement/trait_prec_statement.h"
 #include "hphp/compiler/statement/trait_alias_statement.h"
 #include "hphp/compiler/statement/typedef_statement.h"
+#include "hphp/compiler/expression/binary_op_expression.h"
+#include "hphp/compiler/expression/object_property_expression.h"
+#include "hphp/parser/parser.h"
 
+#include "hphp/runtime/base/header-kind.h"
 #include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/func-emitter.h"
 #include "hphp/runtime/vm/unit.h"
 #include "hphp/runtime/vm/unit-emitter.h"
 #include "hphp/util/hash.h"
+
+#include <folly/Optional.h>
 
 #include <deque>
 #include <utility>
@@ -61,15 +67,19 @@ namespace Compiler {
 class Label;
 class EmitterVisitor;
 
+using OptLocation = folly::Optional<Location::Range>;
+
 class Emitter {
 public:
   Emitter(ConstructPtr node, UnitEmitter& ue, EmitterVisitor& ev)
-    : m_node(node), m_ue(ue), m_ev(ev) {}
+      : m_node(node), m_ue(ue), m_ev(ev) {}
   UnitEmitter& getUnitEmitter() { return m_ue; }
   ConstructPtr getNode() { return m_node; }
   EmitterVisitor& getEmitterVisitor() { return m_ev; }
-  void setTempLocation(LocationPtr loc) { m_tempLoc = loc; }
-  LocationPtr getTempLocation() { return m_tempLoc; }
+  void setTempLocation(const OptLocation& r) {
+    m_tempLoc = r;
+  }
+  const OptLocation& getTempLocation() { return m_tempLoc; }
   void incStat(int counter, int value) {
     if (RuntimeOption::EnableEmitterStats) {
       IncStat(counter, value);
@@ -140,7 +150,7 @@ private:
   ConstructPtr m_node;
   UnitEmitter& m_ue;
   EmitterVisitor& m_ev;
-  LocationPtr m_tempLoc;
+  OptLocation m_tempLoc;
 };
 
 struct SymbolicStack {
@@ -492,15 +502,13 @@ public:
     return m_retLocal;
   }
 
-  class IncludeTimeFatalException : public Exception {
-  public:
+  struct IncludeTimeFatalException : Exception {
     ConstructPtr m_node;
     bool m_parseFatal;
     IncludeTimeFatalException(ConstructPtr node, const char* fmt, ...)
         : Exception(), m_node(node), m_parseFatal(false) {
       va_list ap; va_start(ap, fmt); format(fmt, ap); va_end(ap);
     }
-    virtual ~IncludeTimeFatalException() throw() {}
     EXCEPTION_COMMON_IMPL(IncludeTimeFatalException);
     void setParseFatal(bool b = true) { m_parseFatal = b; }
   };
@@ -616,14 +624,7 @@ private:
   };
 
 private:
-  static const size_t kMinStringSwitchCases = 8;
-  static const bool systemlibDefinesIdx =
-#ifdef FACEBOOK
-    true
-#else
-    false
-#endif
-    ;
+  static constexpr size_t kMinStringSwitchCases = 8;
 
   UnitEmitter& m_ue;
   FuncEmitter* m_curFunc;
@@ -653,8 +654,9 @@ private:
   std::deque<FaultRegion*> m_faultRegions;
   std::deque<FPIRegion*> m_fpiRegions;
   std::vector<Array> m_staticArrays;
+  std::vector<folly::Optional<CollectionType>> m_staticColType;
   std::set<std::string,stdltistr> m_hoistables;
-  LocationPtr m_tempLoc;
+  OptLocation m_tempLoc;
   std::unordered_set<std::string> m_staticEmitted;
 
   // The stack of all Regions that this EmitterVisitor is currently inside
@@ -680,6 +682,8 @@ public:
     ErrorOnCell,
   };
   PassByRefKind getPassByRefKind(ExpressionPtr exp);
+  void emitCall(Emitter& e, FunctionCallPtr func,
+                ExpressionListPtr params, Offset fpiStart);
   void emitAGet(Emitter& e);
   void emitCGetL2(Emitter& e);
   void emitCGetL3(Emitter& e);
@@ -716,10 +720,16 @@ public:
   void emitStringSwitch(Emitter& e, SwitchStatementPtr s,
                         std::vector<Label>& caseLabels, Label& done,
                         const SwitchState& state);
-
+  void emitArrayInit(Emitter& e, ExpressionListPtr el,
+                     folly::Optional<CollectionType> ct = folly::none);
+  void emitPairInit(Emitter&e, ExpressionListPtr el);
+  void emitVectorInit(Emitter&e, CollectionType ct, ExpressionListPtr el);
+  void emitMapInit(Emitter&e, CollectionType ct, ExpressionListPtr el);
+  void emitSetInit(Emitter&e, CollectionType ct, ExpressionListPtr el);
+  void emitCollectionInit(Emitter& e, BinaryOpExpressionPtr exp);
   void markElem(Emitter& e);
   void markNewElem(Emitter& e);
-  void markProp(Emitter& e);
+  void markProp(Emitter& e, PropAccessType propAccessType);
   void markSProp(Emitter& e);
   void markName(Emitter& e);
   void markNameSecond(Emitter& e);
@@ -746,11 +756,11 @@ public:
                              ExpressionListPtr params,
                              bool coerce_params = false);
   void emitMethodPrologue(Emitter& e, MethodStatementPtr meth);
+  void emitDeprecationWarning(Emitter& e, MethodStatementPtr meth);
   void emitMethod(MethodStatementPtr meth);
   void emitMemoizeProp(Emitter& e, MethodStatementPtr meth, Id localID,
                        const std::vector<Id>& paramIDs, uint numParams);
   void addMemoizeProp(MethodStatementPtr meth);
-  bool isMemoizeBlessedType(const TypeConstraint &tc);
   void emitMemoizeMethod(MethodStatementPtr meth, const StringData* methName);
   void emitConstMethodCallNoParams(Emitter& e, string name);
   bool emitHHInvariant(Emitter& e, SimpleFunctionCallPtr);
@@ -781,9 +791,11 @@ public:
   void emitFuncCall(Emitter& e, FunctionCallPtr node,
                     const char* nameOverride = nullptr,
                     ExpressionListPtr paramsOverride = nullptr);
-  void emitFuncCallArg(Emitter& e, ExpressionPtr exp, int paramId);
+  void emitFuncCallArg(Emitter& e, ExpressionPtr exp, int paramId,
+                       bool isUnpack);
   void emitBuiltinCallArg(Emitter& e, ExpressionPtr exp, int paramId,
                          bool byRef);
+  void emitLambdaCaptureArg(Emitter& e, ExpressionPtr exp);
   void emitBuiltinDefaultArg(Emitter& e, Variant& v,
                              MaybeDataType t, int paramId);
   void emitClass(Emitter& e, ClassScopePtr cNode, bool topLevel);
@@ -806,7 +818,7 @@ public:
   // These methods handle the return, break, continue, and goto operations.
   // These methods are aware of try/finally blocks and foreach blocks and
   // will free iterators and jump to finally epilogues as appropriate.
-  void emitReturn(Emitter& e, char sym, bool hasConstraint, StatementPtr s);
+  void emitReturn(Emitter& e, char sym, StatementPtr s);
   void emitBreak(Emitter& e, int depth, StatementPtr s);
   void emitContinue(Emitter& e, int depth, StatementPtr s);
   void emitGoto(Emitter& e, StringData* name, StatementPtr s);
@@ -829,6 +841,10 @@ public:
                               std::vector<Label*>& cases, int depth);
   void emitGotoTrampoline(Emitter& e, Region* entry,
                           std::vector<Label*>& cases, StringData* name);
+
+  // Returns true if VerifyRetType should be emitted before Ret for
+  // the current function.
+  bool shouldEmitVerifyRetType();
 
   Funclet* addFunclet(Thunklet* body);
   Funclet* addFunclet(StatementPtr stmt,
@@ -867,8 +883,8 @@ public:
   void copyOverFPIRegions(FuncEmitter* fe);
   void saveMaxStackCells(FuncEmitter* fe);
   void finishFunc(Emitter& e, FuncEmitter* fe);
-
-  void initScalar(TypedValue& tvVal, ExpressionPtr val);
+  void initScalar(TypedValue& tvVal, ExpressionPtr val,
+                  folly::Optional<CollectionType> ct = folly::none);
   bool requiresDeepInit(ExpressionPtr initExpr) const;
 
   void emitClassTraitPrecRule(PreClassEmitter* pce, TraitPrecStatementPtr rule);
@@ -906,8 +922,6 @@ void emitAllHHBC(AnalysisResultPtr&& ar);
 
 
 extern "C" {
-  StringData* hphp_compiler_serialize_code_model_for(String code,
-                                                     String prefix);
   Unit* hphp_compiler_parse(const char* code, int codeLen, const MD5& md5,
                             const char* filename);
   Unit* hphp_build_native_func_unit(const HhbcExtFuncInfo* builtinFuncs,

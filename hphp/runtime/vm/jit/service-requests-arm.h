@@ -25,16 +25,11 @@ namespace arm {
  */
 
 TCA emitServiceReqWork(CodeBlock& cb, TCA start, SRFlags flags,
+                       folly::Optional<FPInvOffset>,
                        ServiceRequest req, const ServiceReqArgVec& argInfo);
-void emitBindJmp(CodeBlock& cb, CodeBlock& frozen, SrcKey dest);
-void emitBindJcc(CodeBlock& cb, CodeBlock& frozen, jit::ConditionCode cc,
-                 SrcKey dest);
-void emitBindSideExit(CodeBlock& cb, CodeBlock& frozen, SrcKey dest,
-                      jit::ConditionCode cc);
-void emitBindCall(Vout& v, CodeBlock& frozen,
-                  const Func* funcd, int numArgs);
-void emitCallNativeImpl(Vout& v, Vout& vcold, SrcKey srcKey,
-                        const Func* funcd, int numArgs);
+void emitBindJ(CodeBlock& cb, CodeBlock& frozen, jit::ConditionCode cc,
+               SrcKey dest);
+size_t reusableStubSize();
 
 }}}
 

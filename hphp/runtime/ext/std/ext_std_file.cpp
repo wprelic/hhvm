@@ -17,32 +17,35 @@
 
 #include "hphp/runtime/ext/std/ext_std_file.h"
 
-#include "hphp/runtime/ext/stream/ext_stream.h"
-#include "hphp/runtime/ext/string/ext_string.h"
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/array-util.h"
+#include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/base/directory.h"
+#include "hphp/runtime/base/file-stream-wrapper.h"
+#include "hphp/runtime/base/file-util.h"
+#include "hphp/runtime/base/http-client.h"
+#include "hphp/runtime/base/ini-setting.h"
+#include "hphp/runtime/base/actrec-args.h"
+#include "hphp/runtime/base/pipe.h"
+#include "hphp/runtime/base/plain-file.h"
+#include "hphp/runtime/base/request-local.h"
+#include "hphp/runtime/base/runtime-error.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/stat-cache.h"
+#include "hphp/runtime/base/stream-wrapper-registry.h"
+#include "hphp/runtime/base/string-util.h"
+#include "hphp/runtime/base/thread-info.h"
+#include "hphp/runtime/base/thread-init-fini.h"
+#include "hphp/runtime/base/user-stream-wrapper.h"
+#include "hphp/runtime/base/zend-scanf.h"
 #include "hphp/runtime/ext/ext_hash.h"
 #include "hphp/runtime/ext/std/ext_std_options.h"
-#include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/runtime-error.h"
-#include "hphp/runtime/base/ini-setting.h"
-#include "hphp/runtime/base/array-util.h"
-#include "hphp/runtime/base/http-client.h"
-#include "hphp/runtime/base/request-local.h"
-#include "hphp/runtime/base/thread-init-fini.h"
+#include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/runtime/server/static-content-cache.h"
-#include "hphp/runtime/base/zend-scanf.h"
-#include "hphp/runtime/base/pipe.h"
-#include "hphp/runtime/base/stream-wrapper-registry.h"
-#include "hphp/runtime/base/file-stream-wrapper.h"
-#include "hphp/runtime/base/directory.h"
-#include "hphp/runtime/base/thread-info.h"
-#include "hphp/runtime/base/stat-cache.h"
-#include "hphp/runtime/base/string-util.h"
-#include "hphp/runtime/base/user-stream-wrapper.h"
 #include "hphp/system/constants.h"
 #include "hphp/system/systemlib.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/process.h"
-#include "hphp/runtime/base/file-util.h"
 #include <folly/String.h>
 #include <dirent.h>
 #include <glob.h>
@@ -60,9 +63,15 @@
 #include <boost/algorithm/string/predicate.hpp>
 #include <vector>
 
+#define REGISTER_CONSTANT(name, value)                                         \
+  Native::registerConstant<KindOfInt64>(makeStaticString(#name), value)        \
+
+#define REGISTER_STRING_CONSTANT(name, value)                                  \
+  Native::registerConstant<KindOfStaticString>(makeStaticString(#name),        \
+                                               value.get())                    \
 
 #define CHECK_HANDLE_BASE(handle, f, ret)               \
-  File *f = handle.getTyped<File>(true, true);          \
+  auto f = dyn_cast_or_null<File>(handle);              \
   if (f == nullptr || f->isClosed()) {                  \
     raise_warning("Not a valid stream resource");       \
     return (ret);                                       \
@@ -126,6 +135,12 @@
 # define GLOB_FLAGMASK (~0)
 #endif
 
+#define PHP_GLOB_FLAGS (0 | GLOB_BRACE | GLOB_MARK  \
+                          | GLOB_NOSORT | GLOB_NOCHECK \
+                          | GLOB_NOESCAPE | GLOB_ERR \
+                          | GLOB_ONLYDIR)
+#define PHP_GLOB_FLAGMASK (GLOB_FLAGMASK & PHP_GLOB_FLAGS)
+
 namespace HPHP {
 
 static const StaticString s_STREAM_URL_STAT_LINK("STREAM_URL_STAT_LINK");
@@ -174,6 +189,11 @@ static int statSyscall(
   auto canUseFileCache = useFileCache && isFileStream;
   if (isRelative && !pathIndex) {
     auto fullpath = g_context->getCwd() + String::FromChar('/') + path;
+    if (!ThreadInfo::s_threadInfo->m_reqInjectionData.hasSafeFileAccess() &&
+        !canUseFileCache) {
+      if (strlen(fullpath.data()) != fullpath.size()) return ENOENT;
+      return ::stat(fullpath.data(), buf);
+    }
     std::string realpath = StatCache::realpath(fullpath.data());
     // realpath will return an empty string for nonexistent files
     if (realpath.empty()) {
@@ -252,18 +272,13 @@ Array stat_impl(struct stat *stat_sb) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-const int64_t k_STREAM_URL_STAT_LINK = 1;
-const int64_t k_STREAM_URL_STAT_QUIET = 2;
-
 Variant HHVM_FUNCTION(fopen,
                       const String& filename,
                       const String& mode,
                       bool use_include_path /* = false */,
                       const Variant& context /* = null */) {
   CHECK_PATH_FALSE(filename, 1);
-  if (!context.isNull() &&
-      (!context.isResource() ||
-       !context.toResource().getTyped<StreamContext>())) {
+  if (!context.isNull() && dyn_cast<StreamContext>(context) == nullptr) {
     raise_warning("$context must be a valid Stream Context or NULL");
     return false;
   }
@@ -272,28 +287,27 @@ Variant HHVM_FUNCTION(fopen,
     return false;
   }
 
-  Resource resource = File::Open(filename, mode,
-                                 use_include_path ? File::USE_INCLUDE_PATH : 0,
-                                 context);
-  if (resource.isNull()) {
+  auto file = File::Open(filename, mode,
+                         use_include_path ? File::USE_INCLUDE_PATH : 0,
+                         cast_or_null<StreamContext>(context));
+  if (!file) {
     return false;
   }
-  return resource;
+  return Variant(file);
 }
 
 Variant HHVM_FUNCTION(popen,
                       const String& command,
                       const String& mode) {
   CHECK_PATH_FALSE(command, 1);
-  File *file = newres<Pipe>();
-  Resource handle(file);
+  auto file = makeSmartPtr<Pipe>();
   bool ret = CHECK_ERROR(file->open(File::TranslateCommand(command), mode));
   if (!ret) {
     raise_warning("popen(%s,%s): Invalid argument",
                   command.data(), mode.data());
     return false;
   }
-  return handle;
+  return Variant(std::move(file));
 }
 
 bool HHVM_FUNCTION(fclose,
@@ -456,10 +470,16 @@ Variant HHVM_FUNCTION(fputs,
 }
 
 Variant HHVM_FUNCTION(fprintf,
-                      const Resource& handle,
+                      const Variant& handle,
                       const String& format,
                       const Array& args /* = null_array */) {
-  CHECK_HANDLE(handle, f);
+  if (!handle.isResource()) {
+    raise_param_type_warning("fprintf", 1, DataType::KindOfResource,
+                             handle.getType());
+    return false;
+  }
+  const Resource res = handle.toResource();
+  CHECK_HANDLE(res, f);
   return f->printf(format, args);
 }
 
@@ -570,23 +590,27 @@ Variant HHVM_FUNCTION(file_put_contents,
                       int flags /* = 0 */,
                       const Variant& context /* = null */) {
   CHECK_PATH(filename, 1);
-  Resource resource = File::Open(
-    filename, (flags & PHP_FILE_APPEND) ? "ab" : "wb", flags, context);
-  File *f = resource.getTyped<File>(true);
-  if (!f) {
+  auto file = File::Open(
+    filename,
+    (flags & PHP_FILE_APPEND) ? "ab" : "wb",
+    flags,
+    dyn_cast_or_null<StreamContext>(context)
+  );
+
+  if (!file) {
     return false;
   }
 
   if (flags & LOCK_EX) {
     // Check to make sure we are dealing with a regular file
-    if (!dynamic_cast<PlainFile*>(f)) {
+    if (!isa<PlainFile>(file)) {
       raise_warning(
         "%s(): Exclusive locks may only be set for regular files",
         __FUNCTION__ + 2);
       return false;
     }
 
-    if (!f->lock(LOCK_EX)) {
+    if (!file->lock(LOCK_EX)) {
       return false;
     }
   }
@@ -595,7 +619,7 @@ Variant HHVM_FUNCTION(file_put_contents,
 
   switch (data.getType()) {
     case KindOfResource: {
-      File *fsrc = data.toResource().getTyped<File>(true, true);
+      auto fsrc = dyn_cast_or_null<File>(data);
       if (!fsrc) {
         raise_warning("Not a valid stream resource");
         return false;
@@ -605,7 +629,7 @@ Variant HHVM_FUNCTION(file_put_contents,
         int len = fsrc->readImpl(buffer, sizeof(buffer));
         if (len == 0) break;
         numbytes += len;
-        int written = f->writeImpl(buffer, len);
+        int written = file->writeImpl(buffer, len);
         if (written != len) {
           numbytes = -1;
           break;
@@ -620,7 +644,7 @@ Variant HHVM_FUNCTION(file_put_contents,
         String value = iter.second();
         if (!value.empty()) {
           numbytes += value.size();
-          int written = f->writeImpl(value.data(), value.size());
+          int written = file->writeImpl(value.data(), value.size());
           if (written != value.size()) {
             numbytes = -1;
             break;
@@ -647,7 +671,7 @@ Variant HHVM_FUNCTION(file_put_contents,
       String value = data.toString();
       if (!value.empty()) {
         numbytes += value.size();
-        int written = f->writeImpl(value.data(), value.size());
+        int written = file->writeImpl(value.data(), value.size());
         if (written != value.size()) {
           numbytes = -1;
         }
@@ -660,7 +684,7 @@ Variant HHVM_FUNCTION(file_put_contents,
   }
 
   // like fwrite(), fclose() can error when fflush()ing
-  if (numbytes < 0 || !f->close()) {
+  if (numbytes < 0 || !file->close()) {
     return false;
   }
 
@@ -791,12 +815,11 @@ static String resolve_parse_ini_filename(const String& filename) {
   }
 
   // Next, see if include path was set in the ini settings.
-  auto const includePaths = ThreadInfo::s_threadInfo.getNoCheck()->
-    m_reqInjectionData.getIncludePaths();
+  auto const& includePaths =
+    ThreadInfo::s_threadInfo->m_reqInjectionData.getIncludePaths();
 
-  unsigned int pathCount = includePaths.size();
-  for (int i = 0; i < (int)pathCount; i++) {
-    resolved = includePaths[i] + '/' + filename;
+  for (auto const& path : includePaths) {
+    resolved = path + '/' + filename;
     if (HHVM_FN(file_exists)(resolved)) {
       return resolved;
     }
@@ -1049,9 +1072,38 @@ bool HHVM_FUNCTION(is_executable,
   */
 }
 
+static VFileType lookupVirtualFile(const String& filename) {
+  if (filename.empty() || !StaticContentCache::TheFileCache) {
+    return VFileType::NotFound;
+  }
+
+  String cwd;
+  std::string root;
+  bool isRelative = (filename.charAt(0) != '/');
+  if (isRelative) {
+    cwd = g_context->getCwd();
+    root = RuntimeOption::SourceRoot;
+    if (cwd.empty() || cwd[cwd.size() - 1] != '/') root.pop_back();
+  }
+
+  if (!isRelative || !root.compare(cwd.data())) {
+    return StaticContentCache::TheFileCache->getFileType(filename.data());
+  }
+
+  return VFileType::NotFound;
+}
+
 bool HHVM_FUNCTION(is_file,
                    const String& filename) {
   CHECK_PATH_FALSE(filename, 1);
+  if (filename.empty()) {
+    return false;
+  }
+  auto vtype = lookupVirtualFile(filename);
+  if (vtype != VFileType::NotFound) {
+    return vtype == VFileType::PlainFile;
+  }
+
   struct stat sb;
   CHECK_SYSTEM_SILENT(statSyscall(filename, &sb, true));
   return (sb.st_mode & S_IFMT) == S_IFREG;
@@ -1060,20 +1112,16 @@ bool HHVM_FUNCTION(is_file,
 bool HHVM_FUNCTION(is_dir,
                    const String& filename) {
   CHECK_PATH_FALSE(filename, 1);
-  String cwd;
   if (filename.empty()) {
     return false;
   }
-  bool isRelative = (filename.charAt(0) != '/');
-  if (isRelative) cwd = g_context->getCwd();
-  if (!isRelative || cwd == String(RuntimeOption::SourceRoot)) {
-    if (File::IsVirtualDirectory(filename)) {
-      return true;
-    }
+  auto vtype = lookupVirtualFile(filename);
+  if (vtype != VFileType::NotFound) {
+    return vtype == VFileType::Directory;
   }
 
   struct stat sb;
-  CHECK_SYSTEM_SILENT(statSyscall(filename, &sb));
+  CHECK_SYSTEM_SILENT(statSyscall(filename, &sb, false));
   return (sb.st_mode & S_IFMT) == S_IFDIR;
 }
 
@@ -1097,6 +1145,11 @@ bool HHVM_FUNCTION(is_uploaded_file,
 bool HHVM_FUNCTION(file_exists,
                    const String& filename) {
   CHECK_PATH_FALSE(filename, 1);
+  auto vtype = lookupVirtualFile(filename);
+  if (vtype != VFileType::NotFound) {
+    return true;
+  }
+
   if (filename.empty() ||
       (accessSyscall(filename, F_OK, true)) < 0) {
     return false;
@@ -1408,7 +1461,11 @@ bool HHVM_FUNCTION(chgrp,
   }
 
   int gid = get_gid(group);
-  if (gid == -1) return false;
+  if (gid == -1) {
+    raise_warning("chgrp(): Unable to find gid for %s",
+                  group.toString().c_str());
+    return false;
+  }
   CHECK_SYSTEM(chown(File::TranslatePath(filename).data(), (uid_t)-1, gid));
   return true;
 }
@@ -1433,7 +1490,11 @@ bool HHVM_FUNCTION(lchgrp,
   }
 
   int gid = get_gid(group);
-  if (gid == 0) return false;
+  if (gid == -1) {
+    raise_warning("lchgrp(): Unable to find gid for %s",
+                  group.toString().c_str());
+    return false;
+  }
   CHECK_SYSTEM(lchown(File::TranslatePath(filename).data(), (uid_t)-1, gid));
   return true;
 }
@@ -1649,21 +1710,28 @@ Variant HHVM_FUNCTION(glob,
       cwd_skip = cwd.length() + 1;
     }
   }
-  int nret = glob(work_pattern.data(), flags & GLOB_FLAGMASK, NULL, &globbuf);
+  int nret = glob(work_pattern.data(),
+                  flags & PHP_GLOB_FLAGMASK,
+                  nullptr,
+                  &globbuf);
   if (nret == GLOB_NOMATCH) {
+    globfree(&globbuf);
     return empty_array();
   }
 
   if (!globbuf.gl_pathc || !globbuf.gl_pathv) {
     if (ThreadInfo::s_threadInfo->m_reqInjectionData.hasSafeFileAccess()) {
       if (!HHVM_FN(is_dir)(work_pattern)) {
+        globfree(&globbuf);
         return false;
       }
     }
+    globfree(&globbuf);
     return empty_array();
   }
 
   if (nret) {
+    globfree(&globbuf);
     return false;
   }
 
@@ -1718,8 +1786,7 @@ Variant HHVM_FUNCTION(tempnam,
     trailing_slash = "";
   }
   String templ = tmpdir + trailing_slash + pbase + "XXXXXX";
-  char buf[PATH_MAX + 1];
-  strcpy(buf, templ.data());
+  auto buf = templ.get()->mutableData();
   int fd = mkstemp(buf);
   if (fd < 0) {
     Logger::Verbose("%s/%d: %s", __FUNCTION__, __LINE__,
@@ -1728,13 +1795,13 @@ Variant HHVM_FUNCTION(tempnam,
   }
 
   close(fd);
-  return String(buf, CopyString);
+  return templ.setSize(strlen(buf));
 }
 
 Variant HHVM_FUNCTION(tmpfile) {
   FILE *f = tmpfile();
   if (f) {
-    return Resource(newres<PlainFile>(f));
+    return Variant(makeSmartPtr<PlainFile>(f));
   }
   return false;
 }
@@ -1800,37 +1867,50 @@ bool HHVM_FUNCTION(chroot,
 /**
  * A stack maintains the states of nested structures.
  */
-struct directory_data {
-  Resource defaultDirectory;
-  ~directory_data() {
-    defaultDirectory.detach();
+
+namespace {
+struct DirectoryData final : RequestEventHandler {
+  void requestInit() override {
+    assert(!defaultDirectory);
   }
+  void requestShutdown() override {
+    defaultDirectory = nullptr;
+  }
+  SmartPtr<Directory> defaultDirectory;
 };
-IMPLEMENT_THREAD_LOCAL(directory_data, s_directory_data);
-InitFiniNode file_init([]() {
-  s_directory_data->defaultDirectory.detach();
-}, InitFiniNode::When::ThreadInit);
+
+IMPLEMENT_STATIC_REQUEST_LOCAL(DirectoryData, s_directory_data);
 
 const StaticString
   s_handle("handle"),
   s_path("path");
 
-static Directory *get_dir(const Resource& dir_handle) {
+SmartPtr<Directory> get_dir(const Resource& dir_handle) {
   if (dir_handle.isNull()) {
     auto defaultDir = s_directory_data->defaultDirectory;
-    if (defaultDir.isNull()) {
+    if (!defaultDir) {
       raise_warning("no Directory resource supplied");
       return nullptr;
     }
-    return get_dir(defaultDir);
+    return defaultDir;
   }
 
-  Directory *d = dir_handle.getTyped<Directory>(true, true);
+  auto d = dyn_cast_or_null<Directory>(dir_handle);
   if (!d) {
     raise_warning("Not a valid directory resource");
     return nullptr;
   }
   return d;
+}
+
+bool StringDescending(const String& s1, const String& s2) {
+  return s1.more(s2);
+}
+
+bool StringAscending(const String& s1, const String& s2) {
+  return s1.less(s2);
+}
+
 }
 
 Variant HHVM_FUNCTION(dir,
@@ -1839,7 +1919,7 @@ Variant HHVM_FUNCTION(dir,
   if (same(dir, false)) {
     return false;
   }
-  ObjectData* d = SystemLib::AllocDirectoryObject();
+  auto d = SystemLib::AllocDirectoryObject();
   *(d->o_realProp(s_path, 0)) = directory;
   *(d->o_realProp(s_handle, 0)) = dir;
   return d;
@@ -1850,12 +1930,12 @@ Variant HHVM_FUNCTION(opendir,
                       const Variant& context /* = null */) {
   Stream::Wrapper* w = Stream::getWrapperFromURI(path);
   if (!w) return false;
-  Directory *p = w->opendir(path);
+  auto p = w->opendir(path);
   if (!p) {
     return false;
   }
   s_directory_data->defaultDirectory = p;
-  return Resource(p);
+  return Variant(p);
 }
 
 Variant HHVM_FUNCTION(readdir,
@@ -1863,7 +1943,7 @@ Variant HHVM_FUNCTION(readdir,
   const Resource& res_dir_handle = dir_handle.isNull()
                                  ? null_resource
                                  : dir_handle.toResource();
-  Directory *dir = get_dir(res_dir_handle);
+  auto dir = get_dir(res_dir_handle);
   if (!dir) {
     return false;
   }
@@ -1875,19 +1955,11 @@ void HHVM_FUNCTION(rewinddir,
   const Resource& res_dir_handle = dir_handle.isNull()
                                  ? null_resource
                                  : dir_handle.toResource();
-  Directory *dir = get_dir(res_dir_handle);
+  auto dir = get_dir(res_dir_handle);
   if (!dir) {
     return;
   }
   dir->rewind();
-}
-
-static bool StringDescending(const String& s1, const String& s2) {
-  return s1.more(s2);
-}
-
-static bool StringAscending(const String& s1, const String& s2) {
-  return s1.less(s2);
 }
 
 Variant HHVM_FUNCTION(scandir,
@@ -1902,11 +1974,10 @@ Variant HHVM_FUNCTION(scandir,
   CHECK_PATH(directory, 1);
   Stream::Wrapper* w = Stream::getWrapperFromURI(directory);
   if (!w) return false;
-  Directory *dir = w->opendir(directory);
+  auto dir = w->opendir(directory);
   if (!dir) {
     return false;
   }
-  Resource deleter(dir);
 
   std::vector<String> names;
   while (true) {
@@ -1936,11 +2007,11 @@ void HHVM_FUNCTION(closedir,
   const Resource& res_dir_handle = dir_handle.isNull()
                                  ? null_resource
                                  : dir_handle.toResource();
-  Directory *d = get_dir(res_dir_handle);
+  auto d = get_dir(res_dir_handle);
   if (!d) {
     return;
   }
-  if (same(s_directory_data->defaultDirectory, d)) {
+  if (s_directory_data->defaultDirectory == d) {
     s_directory_data->defaultDirectory = nullptr;
   }
   d->close();
@@ -1948,11 +2019,48 @@ void HHVM_FUNCTION(closedir,
 
 ///////////////////////////////////////////////////////////////////////////////
 
+const StaticString
+  s_STDIN("STDIN"),
+  s_STDOUT("STDOUT"),
+  s_STDERR("STDERR");
+
 void StandardExtension::initFile() {
-  Native::registerConstant<KindOfInt64>(s_STREAM_URL_STAT_LINK.get(),
-                                        k_STREAM_URL_STAT_LINK);
-  Native::registerConstant<KindOfInt64>(s_STREAM_URL_STAT_QUIET.get(),
-                                        k_STREAM_URL_STAT_QUIET);
+
+  REGISTER_STRING_CONSTANT(DIRECTORY_SEPARATOR, s_DIRECTORY_SEPARATOR);
+  REGISTER_CONSTANT(FILE_USE_INCLUDE_PATH, k_FILE_USE_INCLUDE_PATH);
+  REGISTER_CONSTANT(FILE_IGNORE_NEW_LINES, k_FILE_IGNORE_NEW_LINES);
+  REGISTER_CONSTANT(FILE_SKIP_EMPTY_LINES, k_FILE_SKIP_EMPTY_LINES);
+  REGISTER_CONSTANT(FILE_APPEND, k_FILE_APPEND);
+  REGISTER_CONSTANT(FILE_NO_DEFAULT_CONTEXT, k_FILE_NO_DEFAULT_CONTEXT);
+  REGISTER_CONSTANT(FILE_TEXT, k_FILE_TEXT);
+  REGISTER_CONSTANT(FILE_BINARY, k_FILE_BINARY);
+  REGISTER_CONSTANT(FNM_NOESCAPE, k_FNM_NOESCAPE);
+  REGISTER_CONSTANT(FNM_CASEFOLD, k_FNM_CASEFOLD);
+  REGISTER_CONSTANT(FNM_PERIOD, k_FNM_PERIOD);
+  REGISTER_CONSTANT(FNM_PATHNAME, k_FNM_PATHNAME);
+  REGISTER_CONSTANT(GLOB_AVAILABLE_FLAGS, k_GLOB_AVAILABLE_FLAGS);
+  REGISTER_CONSTANT(GLOB_BRACE, k_GLOB_BRACE);
+  REGISTER_CONSTANT(GLOB_ERR, k_GLOB_ERR);
+  REGISTER_CONSTANT(GLOB_MARK, k_GLOB_MARK);
+  REGISTER_CONSTANT(GLOB_NOCHECK, k_GLOB_NOCHECK);
+  REGISTER_CONSTANT(GLOB_NOESCAPE, k_GLOB_NOESCAPE);
+  REGISTER_CONSTANT(GLOB_NOSORT, k_GLOB_NOSORT);
+  REGISTER_CONSTANT(GLOB_ONLYDIR, k_GLOB_ONLYDIR);
+  REGISTER_CONSTANT(LOCK_SH, k_LOCK_SH);
+  REGISTER_CONSTANT(LOCK_EX, k_LOCK_EX);
+  REGISTER_CONSTANT(LOCK_UN, k_LOCK_UN);
+  REGISTER_CONSTANT(LOCK_NB, k_LOCK_NB);
+  REGISTER_STRING_CONSTANT(PATH_SEPARATOR, s_PATH_SEPARATOR);
+  REGISTER_CONSTANT(SCANDIR_SORT_ASCENDING, k_SCANDIR_SORT_ASCENDING);
+  REGISTER_CONSTANT(SCANDIR_SORT_DESCENDING, k_SCANDIR_SORT_DESCENDING);
+  REGISTER_CONSTANT(SCANDIR_SORT_NONE, k_SCANDIR_SORT_NONE);
+  REGISTER_CONSTANT(SEEK_SET, k_SEEK_SET);
+  REGISTER_CONSTANT(SEEK_CUR, k_SEEK_CUR);
+  REGISTER_CONSTANT(SEEK_END, k_SEEK_END);
+
+  Native::registerConstant(s_STDIN.get(),  BuiltinFiles::GetSTDIN);
+  Native::registerConstant(s_STDOUT.get(), BuiltinFiles::GetSTDOUT);
+  Native::registerConstant(s_STDERR.get(), BuiltinFiles::GetSTDERR);
 
   HHVM_FE(fopen);
   HHVM_FE(popen);

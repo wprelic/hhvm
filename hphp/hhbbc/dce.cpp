@@ -252,7 +252,7 @@ struct DceState {
    * removed, however, they must all be removed, because of the need
    * to keep eval stack consumers and producers balanced.
    */
-  boost::dynamic_bitset<> markedDead;
+  boost::dynamic_bitset<> markedDead{};
 
   /*
    * The set of locals that were ever live in this block.  (This
@@ -526,24 +526,40 @@ void dce(Env& env, const bc::Dup&) {
 }
 
 void dce(Env& env, const bc::CGetL& op) {
+  auto const ty = locRaw(env, op.loc1);
   addGen(env, op.loc1->id);
-  pushRemovable(env);
+  if (readCouldHaveSideEffects(ty)) {
+    push(env);
+  } else {
+    pushRemovable(env);
+  }
 }
 
 void dce(Env& env, const bc::CGetL2& op) {
+  auto const ty = locRaw(env, op.loc1);
   addGen(env, op.loc1->id);
   auto const u1 = push(env);
   auto const u2 = push(env);
-  popCond(env, u1, u2);
+  if (readCouldHaveSideEffects(ty)) {
+    pop(env);
+  } else {
+    popCond(env, u1, u2);
+  }
 }
 
 void dce(Env& env, const bc::CGetL3& op) {
+  auto const ty = locRaw(env, op.loc1);
   addGen(env, op.loc1->id);
   auto const u1 = push(env);
   auto const u2 = push(env);
   auto const u3 = push(env);
-  popCond(env, u1, u2, u3);
-  popCond(env, u1, u2, u3);
+  if (readCouldHaveSideEffects(ty)) {
+    pop(env);
+    pop(env);
+  } else {
+    popCond(env, u1, u2, u3);
+    popCond(env, u1, u2, u3);
+  }
 }
 
 void dce(Env& env, const bc::RetC&)  { pop(env); readDtorLocs(env); }

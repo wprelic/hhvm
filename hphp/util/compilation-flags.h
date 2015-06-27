@@ -39,16 +39,16 @@ const bool debug =
 #endif
   ;
 
-const bool packed_tv =
-#ifdef PACKED_TV
+const bool contiguous_heap =
+#if CONTIGUOUS_HEAP
   true
 #else
   false
 #endif
   ;
 
-const bool memory_profiling =
-#ifdef MEMORY_PROFILING
+const bool hhvm_reuse_tc =
+#ifdef HHVM_REUSE_TC
   true
 #else
   false

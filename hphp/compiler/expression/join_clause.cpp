@@ -16,7 +16,6 @@
 
 #include "hphp/compiler/expression/join_clause.h"
 #include "hphp/compiler/analysis/code_error.h"
-#include "hphp/runtime/base/complex-types.h"
 
 using namespace HPHP;
 
@@ -109,7 +108,7 @@ void JoinClause::outputCodeModel(CodeGenerator &cg) {
     cg.printValue(m_group);
   }
   cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
+  cg.printLocation(this);
   cg.printObjectFooter();
 }
 
@@ -127,4 +126,3 @@ void JoinClause::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
     cg_printf(" into %s", m_group.c_str());
   }
 }
-

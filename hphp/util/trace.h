@@ -91,12 +91,14 @@ namespace Trace {
       TM(asmx64)        \
       TM(atomicvector)  \
       TM(bcinterp)      \
+      TM(bisector)      \
+      TM(class_load)     \
       TM(datablock)     \
+      TM(decreftype)    \
       TM(debugger)      \
       TM(debuggerflow)  \
       TM(debuginfo)     \
       TM(dispatchBB)    \
-      TM(emitter)       \
       TM(fixup)         \
       TM(fr)            \
       TM(gc)            \
@@ -108,16 +110,27 @@ namespace Trace {
       TM(hhbbc_emit)    \
       TM(hhbbc_index)   \
       TM(hhbbc_time)    \
+      TM(hhbbc_iface)   \
       TM(hhbc)          \
       TM(vasm)          \
+      TM(vasm_copy)     \
+      TM(vasm_phi)      \
       TM(hhir)          \
       TM(hhirTracelets) \
+      TM(hhir_cfg)      \
+      TM(hhir_checkhoist) \
       TM(hhir_dce)      \
-      TM(hhir_meme)     \
-      TM(hhir_aloc)     \
+      TM(hhir_store)    \
+      TM(hhir_alias)    \
+      TM(hhir_loop)     \
       TM(hhir_load)     \
-      TM(llvm)          \
+      TM(hhir_refineTmps) \
+      TM(hhir_gvn)      \
       TM(hhir_refcount) \
+      TM(layout)        \
+      TM(hhir_licm)     \
+      TM(llvm)          \
+      TM(llvm_count)    \
       TM(inlining)      \
       TM(instancebits)  \
       TM(intercept)     \
@@ -133,10 +146,13 @@ namespace Trace {
       TM(refcount)      \
       TM(regalloc)      \
       TM(region)        \
+      TM(reusetc)       \
       TM(ringbuffer)    \
       TM(runtime)       \
       TM(servicereq)    \
+      TM(simplify)      \
       TM(smartalloc)    \
+      TM(heaptrace)     \
       TM(stat)          \
       TM(statgroups)    \
       TM(stats)         \
@@ -227,10 +243,9 @@ void ftraceRelease(Args&&... args) {
   traceRelease("%s", folly::format(std::forward<Args>(args)...).str().c_str());
 }
 
-// Trace to the global ring buffer in all builds, and also trace normally
-// via the standard TRACE(n, ...) macro.
-#define TRACE_RB(n, ...)                            \
-  HPHP::Trace::traceRingBufferRelease(__VA_ARGS__); \
+// Trace to the global ring buffer and the normal TRACE destination.
+#define TRACE_RB(n, ...)                                        \
+  ONTRACE(n, HPHP::Trace::traceRingBufferRelease(__VA_ARGS__)); \
   TRACE(n, __VA_ARGS__);
 void traceRingBufferRelease(const char* fmt, ...) ATTRIBUTE_PRINTF(1,2);
 
@@ -369,6 +384,7 @@ void dumpRingbuffer();
   DEBUG_ONLY static const HPHP::Trace::Module TRACEMOD = HPHP::Trace::name;
 
 #define ITRACE(...)     do { } while (0)
+#define ITRACE_MOD(...) do { } while (0)
 struct Indent {
   Indent() {
     always_assert(true && "If this struct is completely empty we get unused "

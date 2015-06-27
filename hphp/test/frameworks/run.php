@@ -1,4 +1,3 @@
-#!/usr/bin/env php
 <?hh
 /*
  * This script allows us to more easily test the key OSS PHP frameworks
@@ -175,6 +174,18 @@ function fork_buckets(Traversable $data, (function(array):int) $callback): int {
   return $thread_ret_val;
 }
 
+function list_tests(Vector $frameworks): void {
+  if ($frameworks->isEmpty()) {
+    error_and_exit("No frameworks available on which to list tests");
+  }
+
+  foreach($frameworks as $framework) {
+    foreach($framework->getTests() as $test) {
+      print fbmake_test_name($framework, $test).PHP_EOL;
+    }
+  }
+}
+
 function run_tests(Vector $frameworks): void {
   if ($frameworks->isEmpty()) {
     error_and_exit("No frameworks available on which to run tests");
@@ -219,7 +230,16 @@ function run_tests(Vector $frameworks): void {
     // vector; otherwise, we are just going to add the framework to run
     // serially and use its global phpunit test run command to run the entire
     // suite (just like a normal phpunit run outside this framework).
-    if ($framework->isParallel() && !Options::$as_phpunit) {
+    $filter_tests = Options::$filter_tests;
+    if ($filter_tests !== null) {
+      foreach($framework->getTests() as $test) {
+        $testname = fbmake_test_name($framework, $test);
+        if ($filter_tests->contains($testname)) {
+          $st = new Runner($framework, $test);
+          $all_tests->add($st);
+        }
+      }
+    } elseif ($framework->isParallel() && !Options::$as_phpunit) {
       foreach($framework->getTests() as $test) {
         $st = new Runner($framework, $test);
         $all_tests->add($st);
@@ -350,7 +370,7 @@ function get_unit_testing_infra_dependencies(): void {
       (time() - filectime(__DIR__."/composer.phar")) >= 29*24*60*60)
   ) {
     human("Getting composer.phar....\n");
-    unlink(__DIR__."/composer.phar");
+    delete_file(__DIR__."/composer.phar");
     $comp_url = "http://getcomposer.org/composer.phar";
     $get_composer_command = "curl ".$comp_url." -o ".
       __DIR__."/composer.phar 2>&1";
@@ -405,7 +425,7 @@ function get_unit_testing_infra_dependencies(): void {
     if (file_exists($vendor_dir)) {
       remove_dir_recursive($vendor_dir);
     }
-    unlink($lock_file);
+    delete_file($lock_file);
     file_put_contents($md5_file, $checksum);
   }
 
@@ -660,26 +680,35 @@ function oss_test_option_map(): OptionInfoMap {
     'cache-directory:'    => Pair {'',   'Directory to store source tarballs'},
     'local-source-only'   => Pair {'',   'Fail if git or composer calls are '.
                                          'needed'},
+    'list-tests'          => Pair {'',   'List tests that would be run'},
+    'run-specified:'      => Pair {'',   'Run only the specified tests by '.
+                                         'name, separated by a comma. Test '.
+                                         'names are returned by '.
+                                         '--list-tests. If the name is '.
+                                         'prepended with an @, load the '.
+                                         'test names from file instead.'},
   };
 }
 
-function main(array $argv): void {
+function main(array &$argv): void {
   $options = parse_options(oss_test_option_map());
   if ($options->containsKey('help')) {
     help();
     return;
   }
 
-  // Parse all the options passed to run.php and come out with a list of
-  // frameworks passed into test (or --all or --allexcept)
-  $passed_frameworks = Options::parse($options, $argv);
+  // Parse all the options passed to run.php
+  Options::parse($options);
+  $passed_frameworks = new Vector($argv);
   $available_frameworks = new Set(array_keys(Options::$framework_info));
   include_all_php(__DIR__."/framework_class_overrides");
   $framework_class_overrides = get_subclasses_of("Framework")->toSet();
   $frameworks = prepare($available_frameworks, $framework_class_overrides,
                         $passed_frameworks);
 
-  if (Options::$run_tests) {
+  if (Options::$list_tests) {
+    list_tests($frameworks);
+  } elseif (Options::$run_tests) {
     run_tests($frameworks);
   }
 }

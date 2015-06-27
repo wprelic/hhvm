@@ -41,7 +41,7 @@ StaticMemberExpression::StaticMemberExpression
   if (exp->is(KindOfSimpleVariable)) {
     SimpleVariablePtr s(dynamic_pointer_cast<SimpleVariable>(exp));
     m_exp = ExpressionPtr
-      (new ScalarExpression(getScope(), getLocation(),
+      (new ScalarExpression(getScope(), getRange(),
                             T_STRING, s->getName(), true));
 
   } else {
@@ -112,7 +112,6 @@ void StaticMemberExpression::analyzeProgram(AnalysisResultPtr ar) {
         }
       }
     }
-    addUserClass(ar, m_className);
   }
   m_exp->analyzeProgram(ar);
 }
@@ -164,7 +163,7 @@ ExpressionPtr StaticMemberExpression::preOptimize(AnalysisResultConstPtr ar) {
 
 unsigned StaticMemberExpression::getCanonHash() const {
   int64_t val = Expression::getCanonHash() +
-    hash_string(toLower(m_className).c_str(), m_className.size());
+    hash_string_i_unsafe(m_className.c_str(), m_className.size());
   return ~unsigned(val) ^ unsigned(val >> 32);
 }
 
@@ -189,7 +188,7 @@ void StaticMemberExpression::outputCodeModel(CodeGenerator &cg) {
     m_exp->outputCodeModel(cg);
   }
   cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
+  cg.printLocation(this);
   cg.printObjectFooter();
 }
 

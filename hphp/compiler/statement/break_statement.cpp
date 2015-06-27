@@ -16,7 +16,6 @@
 
 #include "hphp/compiler/statement/break_statement.h"
 #include "hphp/compiler/expression/scalar_expression.h"
-#include "hphp/runtime/base/complex-types.h"
 
 using namespace HPHP;
 
@@ -84,7 +83,7 @@ void BreakStatement::outputCodeModel(CodeGenerator &cg) {
   cg.printPropertyHeader("depth");
   cg.printValue((int)m_depth);
   cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
+  cg.printLocation(this);
   cg.printObjectFooter();
 }
 

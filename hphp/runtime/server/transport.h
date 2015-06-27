@@ -24,14 +24,16 @@
 
 #include "hphp/util/compression.h"
 #include "hphp/util/functional.h"
-#include "hphp/runtime/base/types.h"
-#include "hphp/runtime/base/complex-types.h"
-#include "hphp/runtime/base/string-holder.h"
 #include "hphp/runtime/base/debuggable.h"
 #include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/string-holder.h"
+#include "hphp/runtime/base/type-string.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
+
+class Array;
+struct Variant;
 
 /**
  * For storing headers and cookies.
@@ -135,10 +137,9 @@ public:
   virtual const char *getServerName() {
     return "";
   };
-  virtual const char *getServerAddr() {
-    return  RuntimeOption::ServerPrimaryIPv4.empty() ?
-       RuntimeOption::ServerPrimaryIPv6.c_str() :
-       RuntimeOption::ServerPrimaryIPv4.c_str();
+  virtual const std::string& getServerAddr() {
+    auto const& ipv4 = RuntimeOption::GetServerPrimaryIPv4();
+    return ipv4.empty() ? RuntimeOption::GetServerPrimaryIPv6() : ipv4;
   };
   virtual uint16_t getServerPort() {
     return RuntimeOption::ServerPort;
@@ -241,7 +242,7 @@ public:
    * Caller deletes data, callee must copy
    */
   virtual void sendImpl(const void *data, int size, int code,
-                        bool chunked) = 0;
+                        bool chunked, bool eom) = 0;
 
   /**
    * Override to implement more send end logic.
@@ -420,6 +421,8 @@ public:
   bool isSSL() const {return m_isSSL;}
 
 protected:
+  template <typename F> friend void scan(const Transport&, F&);
+
   /**
    * Parameter parsing in this class is done by making just one copy of the
    * entire query (either URL or post data), then insert termintaing NULLs

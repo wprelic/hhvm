@@ -18,9 +18,9 @@
 #include "hphp/runtime/ext/asio/ext_asio.h"
 
 #include "hphp/runtime/ext/ext_closure.h"
-#include "hphp/runtime/ext/asio/asio_context.h"
-#include "hphp/runtime/ext/asio/asio_session.h"
-#include "hphp/runtime/ext/asio/resumable_wait_handle.h"
+#include "hphp/runtime/ext/asio/asio-context.h"
+#include "hphp/runtime/ext/asio/asio-session.h"
+#include "hphp/runtime/ext/asio/resumable-wait-handle.h"
 #include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/system/systemlib.h"
 
@@ -37,14 +37,12 @@ Object HHVM_FUNCTION(asio_get_running_in_context, int ctx_idx) {
   auto session = AsioSession::Get();
 
   if (ctx_idx <= 0) {
-    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
-      "Expected ctx_idx to be a positive integer"));
-    throw e;
+    SystemLib::throwInvalidArgumentExceptionObject(
+      "Expected ctx_idx to be a positive integer");
   }
   if (ctx_idx > session->getCurrentContextIdx()) {
-    Object e(SystemLib::AllocInvalidArgumentExceptionObject(
-      "Expected ctx_idx to be less than or equal to the current context index"));
-    throw e;
+    SystemLib::throwInvalidArgumentExceptionObject(
+      "Expected ctx_idx to be less than or equal to the current context index");
   }
 
   if (ctx_idx < session->getCurrentContextIdx()) {
@@ -63,7 +61,7 @@ Object HHVM_FUNCTION(asio_get_running) {
   return c_ResumableWaitHandle::getRunning(vmfp());
 }
 
-class AsioExtension : public Extension {
+class AsioExtension final : public Extension {
   public:
    AsioExtension() : Extension("asio", "0.1") {}
 

@@ -11,12 +11,12 @@ function reschedule() {
 function t(WaitHandle $wh, $a): void {
   echo $wh->getName(), ' ', count($a), "\nbefore: ";
   foreach ($a as $k => $aa) {
-    echo "$k:", $aa->isFinished() ? 1 : 0, ",";
+    echo "$k:", HH\Asio\has_finished($aa) ? 1 : 0, ",";
   }
   echo "\nafter : ";
-  $wh->join();
+  HH\Asio\join($wh);
   foreach ($a as $k => $aa) {
-    echo "$k:", $aa->isFinished() ? 1 : 0, ",";
+    echo "$k:", HH\Asio\has_finished($aa) ? 1 : 0, ",";
   }
   echo "\n";
 }
@@ -48,8 +48,8 @@ function get_handles() {
   $arrays[] = array(0 => reschedule(), 2 => answer() );
   $arrays[] = array(0 => reschedule(), 'zero' => answer() );
   $arrays[] = array(reschedule(), answer());
-  $arrays[] = miarray(0 => reschedule(), 1 => answer());
-  $arrays[] = msarray('zero' => reschedule(), 'one' => answer());
+  $arrays[] = array(0 => reschedule(), 1 => answer());
+  $arrays[] = array('zero' => reschedule(), 'one' => answer());
 
   $a = array(0 => reschedule());
   $a[2] = answer();
@@ -112,12 +112,12 @@ $finished = () ==> {
   foreach ($handles as $hs) {
     echo count($hs), "\t";
     foreach ($hs as $h) {
-      echo $h->isFinished() ? 1 : 0;
+      echo HH\Asio\has_finished($h) ? 1 : 0;
     }
     echo "\n";
   }
 };
 $finished();
-$wh->join();
+HH\Asio\join($wh);
 $finished();
 echo "done\n";

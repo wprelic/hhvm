@@ -92,10 +92,17 @@ using TimeZoneCacheEntry = std::pair<const char*, timelib_tzinfo*>;
 
 TimeZoneCache* s_tzCache;
 
+using TimeZoneValidityCache =
+  folly::AtomicHashArray<const char*, bool, cstr_hash, ahm_eqstr>;
+using TimeZoneValidityCacheEntry = std::pair<const char*, bool>;
+
+TimeZoneValidityCache* s_tzvCache;
+
 void timezone_init() {
   // Allocate enough space to cache all possible timezones, if needed.
   constexpr size_t kMaxTimeZoneCache = 1000;
   s_tzCache = TimeZoneCache::create(kMaxTimeZoneCache).release();
+  s_tzvCache = TimeZoneValidityCache::create(kMaxTimeZoneCache).release();
 }
 
 const timelib_tzdb *TimeZone::GetDatabase() {
@@ -165,12 +172,29 @@ String TimeZone::CurrentName() {
   return String(s_guessed_timezone.m_tzid);
 }
 
-SmartResource<TimeZone> TimeZone::Current() {
-  return newres<TimeZone>(CurrentName());
+SmartPtr<TimeZone> TimeZone::Current() {
+  return makeSmartPtr<TimeZone>(CurrentName());
 }
 
 bool TimeZone::SetCurrent(const String& zone) {
-  if (!IsValid(zone)) {
+  bool valid;
+  const char* name = zone.data();
+  auto const it = s_tzvCache->find(name);
+  if (it != s_tzvCache->end()) {
+    valid = it->second;
+  } else {
+    valid = IsValid(zone);
+
+    auto key = strdup(name);
+    auto result = s_tzvCache->insert(TimeZoneValidityCacheEntry(key, valid));
+    if (!result.second) {
+      // The cache is full or a collision occurred, and we don't need our
+      // strdup'ed key.
+      free(key);
+    }
+  }
+
+  if (!valid) {
     raise_notice("Timezone ID '%s' is invalid", zone.data());
     return false;
   }
@@ -229,9 +253,12 @@ Array TimeZone::GetAbbreviations() {
 }
 
 String TimeZone::AbbreviationToName(String abbr, int utcoffset /* = -1 */,
-                                    bool isdst /* = true */) {
+                                    int isdst /* = 1 */) {
+  if (isdst != 0 && isdst != 1) {
+    isdst = -1;
+  }
   return String(timelib_timezone_id_from_abbr(abbr.data(), utcoffset,
-                                              isdst ? -1 : 0),
+                                              isdst),
                 CopyString);
 }
 
@@ -250,8 +277,8 @@ TimeZone::TimeZone(timelib_tzinfo *tzi) {
   m_tzi = tzi;
 }
 
-SmartResource<TimeZone> TimeZone::cloneTimeZone() const {
-  return newres<TimeZone>(m_tzi);
+SmartPtr<TimeZone> TimeZone::cloneTimeZone() const {
+  return makeSmartPtr<TimeZone>(m_tzi);
 }
 
 String TimeZone::name() const {
@@ -284,23 +311,38 @@ bool TimeZone::dst(int64_t timestamp) const {
   return ret;
 }
 
-Array TimeZone::transitions() const {
+Array TimeZone::transitions(int64_t timestamp_begin, /* = k_PHP_INT_MIN */
+                            int64_t timestamp_end /* = k_PHP_INT_MAX */) const {
   Array ret;
   if (m_tzi) {
-    for (unsigned int i = 0; i < m_tzi->timecnt; ++i) {
-      int index = m_tzi->trans_idx[i];
-      int timestamp = m_tzi->trans[i];
-      DateTime dt(timestamp);
-      ttinfo &offset = m_tzi->type[index];
-      const char *abbr = m_tzi->timezone_abbr + offset.abbr_idx;
-
+    // If explicitly provided add the beginning timestamp to the ret array
+    if (timestamp_begin > k_PHP_INT_MIN) {
+      auto dt = makeSmartPtr<DateTime>(timestamp_begin);
       ret.append(make_map_array(
-        s_ts, timestamp,
-        s_time, dt.toString(DateTime::DateFormat::ISO8601),
-        s_offset, offset.offset,
-        s_isdst, (bool)offset.isdst,
-        s_abbr, String(abbr, CopyString)
-      ));
+            s_ts, timestamp_begin,
+            s_time, dt->toString(DateTime::DateFormat::ISO8601),
+            s_offset, m_tzi->type[0].offset,
+            s_isdst, (bool)m_tzi->type[0].isdst,
+            s_abbr, String(m_tzi->timezone_abbr + m_tzi->type[0].abbr_idx,
+                           CopyString)
+          ));
+    }
+    for (unsigned int i = 0; i < m_tzi->timecnt; ++i) {
+      int timestamp = m_tzi->trans[i];
+      if (timestamp > timestamp_begin && timestamp <= timestamp_end) {
+        int index = m_tzi->trans_idx[i];
+        auto dt = makeSmartPtr<DateTime>(timestamp);
+        ttinfo &offset = m_tzi->type[index];
+        const char *abbr = m_tzi->timezone_abbr + offset.abbr_idx;
+
+        ret.append(make_map_array(
+          s_ts, timestamp,
+          s_time, dt->toString(DateTime::DateFormat::ISO8601),
+          s_offset, offset.offset,
+          s_isdst, (bool)offset.isdst,
+          s_abbr, String(abbr, CopyString)
+        ));
+      }
     }
   }
   return ret;

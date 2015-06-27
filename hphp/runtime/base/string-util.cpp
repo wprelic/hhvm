@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <vector>
 #include "hphp/zend/zend-html.h"
+#include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/bstring.h"
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/base/zend-url.h"
@@ -113,8 +114,9 @@ Variant StringUtil::Explode(const String& input, const String& delimiter,
   return ret;
 }
 
-String StringUtil::Implode(const Variant& items, const String& delim) {
-  if (!isContainer(items)) {
+String StringUtil::Implode(const Variant& items, const String& delim,
+                           const bool checkIsContainer /* = true */) {
+  if (checkIsContainer && !isContainer(items)) {
     throw_param_is_not_container();
   }
   int size = getContainerSize(items);
@@ -133,20 +135,21 @@ String StringUtil::Implode(const Variant& items, const String& delim) {
   assert(i == size);
 
   String s = String(len, ReserveString);
-  char *buffer = s.bufferSlice().ptr;
+  char *buffer = s.mutableData();
   const char *sdelim = delim.data();
   char *p = buffer;
-  for (int i = 0; i < size; i++) {
+  String &init_str = sitems[0];
+  int init_len = init_str.size();
+  memcpy(p, init_str.data(), init_len);
+  p += init_len;
+  sitems[0].~String();
+  for (int i = 1; i < size; i++) {
     String &item = sitems[i];
-    if (i && lenDelim) {
-      memcpy(p, sdelim, lenDelim);
-      p += lenDelim;
-    }
+    memcpy(p, sdelim, lenDelim);
+    p += lenDelim;
     int lenItem = item.size();
-    if (lenItem) {
-      memcpy(p, item.data(), lenItem);
-      p += lenItem;
-    }
+    memcpy(p, item.data(), lenItem);
+    p += lenItem;
     sitems[i].~String();
   }
   smart_free(sitems);
@@ -421,7 +424,7 @@ String StringUtil::Translate(const String& input, const String& from,
 
   int len = input.size();
   String retstr(len, ReserveString);
-  char *ret = retstr.bufferSlice().ptr;
+  char *ret = retstr.mutableData();
   memcpy(ret, input.data(), len);
   auto trlen = std::min(from.size(), to.size());
   string_translate(ret, len, from.data(), to.data(), trlen);
@@ -440,6 +443,11 @@ int64_t StringUtil::CRC32(const String& input) {
 }
 
 String StringUtil::Crypt(const String& input, const char *salt /* = "" */) {
+  if (salt && salt[0] == '\0') {
+    raise_notice("crypt(): No salt parameter was specified."
+      " You must use a randomly generated salt and a strong"
+      " hash function to produce a secure hash.");
+  }
   return String(string_crypt(input.c_str(), salt), AttachString);
 }
 
@@ -450,7 +458,7 @@ String StringUtil::MD5(const char *data, uint32_t size,
   if (raw) return String((char*)md5.digest, rawLen, CopyString);
   auto const hexLen = rawLen * 2;
   String hex(hexLen, ReserveString);
-  string_bin2hex((char*)md5.digest, rawLen, hex.bufferSlice().ptr);
+  string_bin2hex((char*)md5.digest, rawLen, hex.mutableData());
   hex.setSize(hexLen);
   return hex;
 }

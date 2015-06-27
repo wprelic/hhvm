@@ -13,22 +13,15 @@
 (* The main entry point *)
 (*****************************************************************************)
 type options = {
-    check_mode       : bool;
-    json_mode        : bool;
-    root             : Path.path;
-    should_detach    : bool;
-    convert          : Path.path option;
-    load_save_opt    : env_store_action option;
-    version          : bool;
-  }
-
-and env_store_action =
-  | Load of load_info
-  | Save of string
-
-and load_info = {
-  filename : string;
-  to_recheck : string list;
+  ai_mode          : bool;
+  check_mode       : bool;
+  json_mode        : bool;
+  root             : Path.t;
+  should_detach    : bool;
+  convert          : Path.t option;
+  no_load          : bool;
+  save_filename    : string option;
+  waiting_client   : int option;
 }
 
 val parse_options: unit -> options
@@ -38,9 +31,12 @@ val default_options: root:string -> options
 (* Accessors *)
 (*****************************************************************************)
 
-val check_mode    : options -> bool
-val json_mode     : options -> bool
-val root          : options -> Path.path
-val should_detach : options -> bool
-val convert       : options -> Path.path option
-val load_save_opt : options -> env_store_action option
+val ai_mode             : options -> bool
+val check_mode          : options -> bool
+val json_mode           : options -> bool
+val root                : options -> Path.t
+val should_detach       : options -> bool
+val convert             : options -> Path.t option
+val no_load             : options -> bool
+val save_filename       : options -> string option
+val waiting_client      : options -> int option

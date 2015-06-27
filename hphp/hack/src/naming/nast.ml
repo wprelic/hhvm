@@ -8,8 +8,9 @@
  *
  *)
 
-
 open Utils
+
+module SN = Naming_special_names
 
 type id = Pos.t * Ident.t
 type sid = Pos.t * string
@@ -20,7 +21,6 @@ type is_terminal = bool
 type call_type =
   | Cnormal    (* when the call looks like f() *)
   | Cuser_func (* when the call looks like call_user_func(...) *)
-
 
 type shape_field_name =
   | SFlit of pstring
@@ -48,13 +48,35 @@ and hint_ =
   | Hany
   | Hmixed
   | Htuple of hint list
-  | Habstr of string * hint option
+  | Habstr of string * (Ast.constraint_kind * hint) option
   | Harray of hint option * hint option
   | Hprim of tprim
   | Hoption of hint
   | Hfun of hint list * bool * hint
   | Happly of sid * hint list
   | Hshape of hint ShapeMap.t
+  | Hthis
+
+ (* This represents the use of a type const. Type consts are accessed like
+  * regular consts in Hack, i.e.
+  *
+  * [self | static | Class]::TypeConst
+  *
+  * Class  => Happly "Class"
+  * self   => Happly of the class of definition
+  * static => Habstr ("static",
+  *           Habstr ("this", (Constraint_as, Happly of class of definition)))
+  * Type const access can be chained such as
+  *
+  * Class::TC1::TC2::TC3
+  *
+  * We resolve the root of the type access chain as a type as follows.
+  *
+  * This will result in the following representation
+  *
+  * Haccess (Happly "Class", ["TC1", "TC2", "TC3"])
+  *)
+  | Haccess of hint * sid list
 
 and tprim =
   | Tvoid
@@ -62,30 +84,37 @@ and tprim =
   | Tbool
   | Tfloat
   | Tstring
-  | Tnum
   | Tresource
+  | Tnum
   | Tarraykey
+  | Tnoreturn
 
 and class_ = {
-  c_mode           : Ast.mode         ;
+  c_mode           : FileInfo.mode    ;
   c_final          : bool             ;
   c_is_xhp         : bool;
   c_kind           : Ast.class_kind   ;
   c_name           : sid              ;
-    (* The type parameters of a class A<T> (T is the parameter) *)
-  c_tparams        : tparam list      ;
+  (* The type parameters of a class A<T> (T is the parameter) *)
+  c_tparams :
+    tparam list *
+    (* keeping around the ast version of the constraint only
+     * for the purposes of Naming.class_meth_bodies *)
+    ((Ast.constraint_kind * Ast.hint) option SMap.t);
   c_extends        : hint list        ;
   c_uses           : hint list        ;
+  c_xhp_attr_uses  : hint list        ;
   c_req_extends    : hint list        ;
   c_req_implements : hint list        ;
   c_implements     : hint list        ;
   c_consts         : class_const list ;
+  c_typeconsts     : class_typeconst list   ;
   c_static_vars    : class_var list   ;
   c_vars           : class_var list   ;
   c_constructor    : method_ option   ;
   c_static_methods : method_ list     ;
   c_methods        : method_ list     ;
-  c_user_attributes : Ast.user_attribute SMap.t;
+  c_user_attributes : user_attribute list;
   c_enum           : enum_ option     ;
 }
 
@@ -94,11 +123,31 @@ and enum_ = {
   e_constraint : hint option;
 }
 
-and tparam = Ast.variance * sid * hint option
+and user_attribute = {
+  ua_name: sid;
+  ua_params: expr list (* user attributes are restricted to scalar values *)
+}
 
-and class_const = hint option * sid * expr
+and tparam = Ast.variance * sid * (Ast.constraint_kind * hint) option
+
+(* expr = None indicates an abstract const *)
+and class_const = hint option * sid * expr option
+
+(* This represents a type const definition. If a type const is abstract then
+ * then the type hint acts as a constraint. Any concrete definition of the
+ * type const must satisfy the constraint.
+ *
+ * If the type const is not abstract then a type must be specified.
+ *)
+and class_typeconst = {
+  c_tconst_name : sid;
+  c_tconst_constraint : hint option;
+  c_tconst_type : hint option;
+}
+
 and class_var = {
   cv_final      : bool        ;
+  cv_is_xhp     : bool        ;
   cv_visibility : visibility  ;
   cv_type       : hint option ;
   cv_id         : sid         ;
@@ -106,25 +155,18 @@ and class_var = {
 }
 
 and method_ = {
-  m_unsafe          : bool                      ;
-  m_final           : bool                      ;
-  m_abstract        : bool                      ;
-  m_visibility      : visibility                ;
-  m_name            : sid                       ;
-  m_tparams         : tparam list               ;
-  m_variadic        : fun_variadicity           ;
-  m_params          : fun_param list            ;
-  m_body            : body_block                ;
-  m_user_attributes : Ast.user_attribute SMap.t ;
-  m_ret             : hint option               ;
-  m_fun_kind        : fun_kind                  ;
+  m_final           : bool                ;
+  m_abstract        : bool                ;
+  m_visibility      : visibility          ;
+  m_name            : sid                 ;
+  m_tparams         : tparam list         ;
+  m_variadic        : fun_variadicity     ;
+  m_params          : fun_param list      ;
+  m_body            : func_body           ;
+  m_fun_kind        : Ast.fun_kind;
+  m_user_attributes : user_attribute list ;
+  m_ret             : hint option         ;
 }
-
-and fun_kind =
-  | FSync
-  | FGenerator
-  | FAsync
-  | FAsyncGenerator
 
 and visibility =
   | Private
@@ -152,29 +194,54 @@ and fun_variadicity = (* does function take varying number of args? *)
   | FVnonVariadic (* standard non variadic function *)
 
 and fun_ = {
-  f_mode     : Ast.mode;
-  f_unsafe   : bool;
+  f_mode     : FileInfo.mode;
   f_ret      : hint option;
   f_name     : sid;
   f_tparams  : tparam list;
   f_variadic : fun_variadicity;
   f_params   : fun_param list;
-  f_body     : body_block;
-  f_fun_kind : fun_kind;
+  f_body     : func_body;
+  f_fun_kind : Ast.fun_kind;
+  f_user_attributes : user_attribute list;
 }
 
-and typedef = tparam list * hint option * hint
+and typedef = {
+  t_tparams : tparam list;
+  t_constraint : hint option;
+  t_kind : hint;
+  t_user_attributes : user_attribute list;
+}
 
 and gconst = {
-  cst_mode: Ast.mode;
+  cst_mode: FileInfo.mode;
   cst_name: Ast.id;
   cst_type: hint option;
   cst_value: expr option;
 }
 
-and body_block =
-  | UnnamedBody of Ast.block
-  | NamedBody of block
+and func_body =
+  | UnnamedBody of func_unnamed_body
+  | NamedBody of func_named_body
+
+and func_unnamed_body = {
+  (* Unnamed AST for the function body *)
+  fub_ast       : Ast.block;
+  (* Unnamed AST for the function type params *)
+  fub_tparams   : Ast.tparam list;
+  (* Namespace info *)
+  fub_namespace : Namespace_env.env;
+}
+
+and func_named_body = {
+  (* Named AST for the function body *)
+  fnb_nast     : block;
+  (* True if there are any UNSAFE blocks; the presence of any unsafe
+   * block in the function makes comparing the function body to the
+   * declared return type impossible, since that block could return;
+   * functions declared in Mdecl are by definition UNSAFE
+   *)
+  fnb_unsafe   : bool;
+}
 
 and stmt =
   | Expr of expr
@@ -218,6 +285,7 @@ and expr_ =
   | This
   | Id of sid
   | Lvar of id
+  | Lplaceholder of sid
   | Fun_id of sid
   | Method_id of expr * pstring
   (* meth_caller('Class name', 'method name') *)
@@ -227,7 +295,10 @@ and expr_ =
   | Array_get of expr * expr option
   | Class_get of class_id * pstring
   | Class_const of class_id * pstring
-  | Call of call_type * expr * expr list * expr list
+  | Call of call_type
+    * expr (* function *)
+    * expr list (* positional args *)
+    * expr list (* unpacked args *)
   | True
   | False
   | Int of pstring
@@ -253,14 +324,18 @@ and expr_ =
   | Assert of assert_expr
   | Clone of expr
 
+(* These are "very special" constructs that we look for in, among
+ * other places, terminality checks. invariant does not appear here
+ * because it gets rewritten to If + AE_invariant_violation.
+ *
+ * TODO: get rid of assert_expr entirely in favor of rewriting to if
+ * and noreturn *)
 and assert_expr =
   | AE_assert of expr
-  | AE_invariant of expr * expr * expr list
-  | AE_invariant_violation of expr * expr list
 
 and case =
-| Default of block
-| Case of expr * block
+  | Default of block
+  | Case of expr * block
 
 and catch = sid * id * block
 
@@ -276,12 +351,25 @@ and special_func =
   | Gen_array_va_rec of expr list
 
 type def =
- | Fun of fun_
- | Class of class_
- | Typedef of typedef
+  | Fun of fun_
+  | Class of class_
+  | Typedef of typedef
 
 type program = def list
 
+(* Expecting that Naming.func_body / Naming.class_meth_bodies has been
+ * allowed at the AST. Ideally this would be enforced by the compiler,
+ * a la the typechecking decl vs local phases *)
 let assert_named_body = function
   | NamedBody b -> b
   | UnnamedBody _ -> failwith "Expecting a named function body"
+
+let class_id_to_str cid =
+  match cid with
+    | CIparent -> SN.Classes.cParent
+    | CIself -> SN.Classes.cSelf
+    | CIstatic -> SN.Classes.cStatic
+    | CIvar (_, This) -> SN.SpecialIdents.this
+    | CIvar (_, Lvar (_, x)) -> "$"^string_of_int(x)
+    | CIvar _ -> assert false
+    | CI (_, x) -> x

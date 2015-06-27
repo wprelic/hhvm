@@ -17,25 +17,30 @@
 #ifndef incl_HPHP_VM_CLASS_H_
 #define incl_HPHP_VM_CLASS_H_
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/attr.h"
 #include "hphp/runtime/base/datatype.h"
 #include "hphp/runtime/base/rds.h"
+#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/repo-auth-type.h"
 #include "hphp/runtime/base/type-array.h"
 #include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/base/typed-value.h"
+#include "hphp/runtime/base/atomic-countable.h"
 #include "hphp/runtime/vm/fixed-string-map.h"
 #include "hphp/runtime/vm/indexed-string-map.h"
 #include "hphp/runtime/vm/instance-bits.h"
 #include "hphp/runtime/vm/preclass.h"
+#include "hphp/runtime/vm/trait-method-import-data.h"
 
 #include "hphp/util/default-ptr.h"
+#include "hphp/util/hash-map-typedefs.h"
 
-#include <boost/range/iterator_range.hpp>
+#include <folly/Range.h>
 
 #include <list>
 #include <memory>
+#include <type_traits>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -48,11 +53,14 @@ struct Func;
 struct HhbcExtClassInfo;
 struct StringData;
 
-namespace Native { struct NativeDataInfo; }
+namespace Native {
+struct NativeDataInfo;
+struct NativePropHandler;
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 
-using ClassPtr = AtomicSmartPtr<Class>;
+using ClassPtr = AtomicSharedLowPtr<Class>;
 
 /*
  * Class represents the full definition of a user class in a given request
@@ -104,7 +112,7 @@ struct Class : AtomicCountable {
     LowStringPtr m_mangledName;
     LowStringPtr m_originalMangledName;
     // First parent class that declares this property.
-    LowClassPtr m_class;
+    LowPtr<Class> m_class;
     Attr m_attrs;
     LowStringPtr m_typeConstraint;
     // When built in RepoAuthoritative mode, this is a control-flow
@@ -124,7 +132,7 @@ struct Class : AtomicCountable {
     LowStringPtr m_typeConstraint;
     LowStringPtr m_docComment;
     // Most derived class that declared this property.
-    LowClassPtr m_class;
+    LowPtr<Class> m_class;
     int m_idx;
     // Used if (m_class == this).
     TypedValue m_val;
@@ -136,11 +144,12 @@ struct Class : AtomicCountable {
    */
   struct Const {
     // Most derived class that declared this constant.
-    LowClassPtr m_class;
+    LowPtr<Class> m_class;
     LowStringPtr m_name;
-    TypedValue m_val;
-    LowStringPtr m_phpCode;
-    LowStringPtr m_typeConstraint;
+    TypedValueAux m_val;
+
+    bool isAbstract()      const { return m_val.constModifiers().m_isAbstract; }
+    bool isType()          const { return m_val.constModifiers().m_isType; }
   };
 
   /*
@@ -185,15 +194,34 @@ struct Class : AtomicCountable {
   };
 
   /*
+   * A slot in a Class vtable vector, pointing to the vtable for an interface
+   * and the interface itself. Used for efficient interface method dispatch and
+   * instance checks.
+   */
+  struct VtableVecSlot {
+    LowPtr<LowPtr<Func>> vtable;
+    LowPtr<Class> iface;
+  };
+
+  /*
    * Container types.
    */
   using MethodMap         = FixedStringMap<Slot, false, Slot>;
   using MethodMapBuilder  = FixedStringMapBuilder<Func*, Slot, false, Slot>;
-  using InterfaceMap      = IndexedStringMap<LowClassPtr, true, int>;
+  using InterfaceMap      = IndexedStringMap<LowPtr<Class>, true, int>;
   using RequirementMap    = IndexedStringMap<
                               const PreClass::ClassRequirement*, true, int>;
 
   using TraitAliasVec = std::vector<PreClass::TraitAliasRule::NamePair>;
+  using ScopedClonesMap = hphp_hash_map<uintptr_t,ClassPtr>;
+
+  /*
+   * We store the length of vectors of methods, parent classes and interfaces.
+   *
+   * In lowptr builds, we limit all of these quantities to 2^16-1 to save
+   * memory.
+   */
+  using veclen_t = std::conditional<use_lowptr, uint16_t, uint32_t>::type;
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -206,6 +234,42 @@ struct Class : AtomicCountable {
    * phase changes before that (see destroy()).
    */
   static Class* newClass(PreClass* preClass, Class* parent);
+
+  /*
+   * Make a clone of this Closure subclass, with `ctx' as the closure scope.
+   *
+   * Passing a value of `attrs' that is not AttrNone indicates that the scoping
+   * is dynamic---i.e., via Closure::bind(), as opposed to a CreateCl opcode.
+   * If the specified `attrs' do not match those of the __invoke method, we
+   * update them in the clone along with the scope.  All closure __invoke
+   * methods have AttrPublic, so using AttrNone as a sentinel here is
+   * unambiguous.
+   *
+   * If the scoping already exists in m_extra->m_scopedClones, or if this class
+   * is already scoped correctly, just return it.  Otherwise, we scope our own
+   * m_invoke if it's not already scoped, or clone ourselves and scope the
+   * clone's m_invoke, then add the mapping to m_scopedClones.  It is required
+   * for correctness that all clones be added to the cache, because the cache
+   * participates in synchronization with instance bits initialization.
+   *
+   * Note that all scoping events via CreateCl opcodes clone from the
+   * "template" Closure subclass that is generated by the emitter, whereas
+   * scoping events via Closure::bind() clone from another scoped clone (which
+   * may or may not be the first clone, which aliases the template class).
+   * Thus, when rescoping dynamically, we need to find the template class
+   * first, since it owns the clone cache.
+   *
+   * Additionally, for dynamic rescopings, we always produce a clone.  Many
+   * situations may arise in Closure::bind() that never do in CreateCl---e.g.,
+   * a closure object whose class is Closure rather than an emitter-generated
+   * subclass of Closure, a closure scoped to its own class, etc.  Requiring a
+   * clone in the dynamic case keeps us from mucking up the template __invoke's
+   * attrs, and gives us the invariant that the template class is being used as
+   * a scoped clone iff its __invoke has a different cls().
+   *
+   * @requires: parent() == SystemLib::s_ClosureClass
+   */
+  Class* rescope(Class* ctx, Attr attrs = AttrNone);
 
   /*
    * Called when a Class becomes unreachable.
@@ -276,33 +340,39 @@ public:
   // Pre- and post-allocations.                                         [const]
 
   /*
-   * The start of malloc'd memory for `this' (i.e., including the method
-   * table).
+   * Pointer to this Class's FuncVec, which is allocated before this.
    */
-  LowFuncPtr* mallocPtrFromThis() const;
+  LowPtr<Func>* funcVec() const;
+
+  /*
+   * The start of malloc'd memory for `this' (i.e., including anything
+   * allocated before the object itself.).
+   */
+  void* mallocPtr() const;
 
   /*
    * Pointer to the array of Class pointers, allocated immediately after
    * `this', which contain this class's inheritance hierarchy (including `this'
    * as the last element).
    */
-  const LowClassPtr* classVec() const;
+  const LowPtr<Class>* classVec() const;
 
   /*
    * The size of the classVec.
    */
-  unsigned classVecLen() const;
+  veclen_t classVecLen() const;
 
 
   /////////////////////////////////////////////////////////////////////////////
   // Ancestry.                                                          [const]
 
   /*
-   * Determine if this represents a non-strict subtype of `cls'.
-   *
-   * Returns uint64_t instead of bool because it's called directly from the TC.
+   * Determine if this represents a non-strict subtype of `cls'.  The nonIFace
+   * variant is faster, but has the additional precondition that `cls' is not
+   * an interface.
    */
-  uint64_t classof(const Class* cls) const;
+  bool classof(const Class*) const;
+  bool classofNonIFace(const Class*) const;
 
   /*
    * Whether this class implements an interface called `name'.
@@ -370,6 +440,12 @@ public:
   const Func* getDeclaredCtor() const;
   const Func* getDtor() const;
   const Func* getToString() const;
+
+  /*
+   * Look up a class' cached __invoke function.  We only cache __invoke methods
+   * if they are instance methods or if the class is a static closure.
+   */
+  const Func* getCachedInvoke() const;
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -443,7 +519,17 @@ public:
    */
   Func* lookupMethod(const StringData* methName) const;
 
-  static void getMethodNames(const Class* cls, const Class* ctx, Array& result);
+  /*
+   * Return an Array (via `out') of all the methods of `cls' visible in the
+   * context of `ctx' (which may be nullptr).
+   *
+   * The Array has the form [lowercase name => declared name], ordered with
+   * methods implemented by `cls' first, followed by its parents' methods, and
+   * so on, in declaration order for each Class in the hierarchy.  Any
+   * unimplemented interface methods come last.
+   */
+  static void getMethodNames(const Class* cls, const Class* ctx, Array& out);
+
 
   /////////////////////////////////////////////////////////////////////////////
   // Property metadata.                                                 [const]
@@ -523,6 +609,11 @@ public:
   void initSProps() const;
 
   /*
+   * Check if class has been initialized.
+   */
+  bool initialized() const;
+
+  /*
    * PropInitVec for this class's declared properties, with default values for
    * scalars only.
    *
@@ -551,17 +642,17 @@ public:
   /*
    * RDS handle of the request-local PropInitVec.
    */
-  RDS::Handle propHandle() const;
+  rds::Handle propHandle() const;
 
   /*
    * RDS handle for the static properties' is-initialized flag.
    */
-  RDS::Handle sPropInitHandle() const;
+  rds::Handle sPropInitHandle() const;
 
   /*
    * RDS handle for the static property at `index'.
    */
-  RDS::Handle sPropHandle(Slot index) const;
+  rds::Handle sPropHandle(Slot index) const;
 
   /*
    * Get the PropInitVec for the current request.
@@ -577,62 +668,46 @@ public:
   /////////////////////////////////////////////////////////////////////////////
   // Property lookup and accessibility.                                 [const]
 
-  /*
-   * Get the slot and accessibility of the declared instance property `key' on
-   * this class from the context `ctx'.
-   *
-   * Accessibility refers to the public/protected/private attribute of the
-   * property.  The value of `accessible' is output by reference.
-   *
-   * Return kInvalidInd iff the property was not declared on this class or any
-   * ancestor.  Note that if `accessible' is true, then the property must
-   * exist.
-   */
-  Slot getDeclPropIndex(Class* ctx, const StringData* key,
-                        bool& accessible) const;
+  template <class T>
+  struct PropLookup {
+    T prop;
+    bool accessible;
+  };
 
   /*
-   * Get the slot, visibility, and accessibility of the static property
-   * `sPropName on this class from the context `ctx'.
+   * Get the slot and accessibility of a declared instance property on a class
+   * from the given context.
    *
-   * Visibility refers to whether or not the property exists at all.
    * Accessibility refers to the public/protected/private attribute of the
    * property.
    *
-   * Both `visible' and `accessible' are output by reference.
-   *
-   * Return kInvalidInd (and set `visible' to false) iff the property does not
-   * exist.  Note also that if `accessible' is true, then the property must
-   * exist.
+   * Return kInvalidInd for the property iff the property was not declared on
+   * this class or any ancestor.  Note that if the return is marked as
+   * accessible, then the property must exist.
    */
-  Slot findSProp(Class* ctx, const StringData* sPropName,
-                 bool& visible, bool& accessible) const;
+  PropLookup<Slot> getDeclPropIndex(const Class*, const StringData*) const;
+
+  /*
+   * The equivalent of getDeclPropIndex(), but for static properties.
+   */
+  PropLookup<Slot> findSProp(const Class*, const StringData*) const;
 
   /*
    * Get the request-local value of the static property `sPropName', as well as
-   * its visibility and accessibility, from the context `ctx'.
+   * its accessibility, from the given context.
    *
    * The behavior is identical to that of findSProp(), except substituting
    * nullptr for kInvalidInd.
    *
    * May perform initialization.
    */
-  TypedValue* getSProp(Class* ctx, const StringData* sPropName,
-                       bool& visible, bool& accessible) const;
+  PropLookup<TypedValue*> getSProp(const Class*, const StringData*) const;
 
   /*
-   * Identical to getSProp(), but the output is boxed.
-   *
-   * Used by the ext_zend_compat layer.
+   * Return whether or not a declared instance property is accessible from the
+   * given context.
    */
-  RefData* zGetSProp(Class* ctx, const StringData* sPropName,
-                     bool& visible, bool& accessible) const;
-
-  /*
-   * Return whether or not the declared instance property described by `prop'
-   * is accessible from the context `ctx'.
-   */
-  static bool IsPropAccessible(const Prop& prop, Class* ctx);
+  static bool IsPropAccessible(const Prop&, Class*);
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -652,6 +727,11 @@ public:
    * Whether this class has a constant named `clsCnsName'.
    */
   bool hasConstant(const StringData* clsCnsName) const;
+
+  /*
+   * Whether this class has a type constant named `typeCnsName'.
+   */
+  bool hasTypeConstant(const StringData* typeCnsName) const;
 
   /*
    * Look up the actual value of a class constant.  Perform dynamic
@@ -690,7 +770,7 @@ public:
   /*
    * Interfaces this class declared in its "implements" clause.
    */
-  boost::iterator_range<const ClassPtr*> declInterfaces() const;
+  folly::Range<const ClassPtr*> declInterfaces() const;
 
   /*
    * All interfaces implemented by this class, including those declared in
@@ -727,6 +807,7 @@ public:
    */
   const RequirementMap& allRequirements() const;
 
+
   /////////////////////////////////////////////////////////////////////////////
   // Objects.                                                           [const]
 
@@ -744,6 +825,66 @@ public:
 
 
   /////////////////////////////////////////////////////////////////////////////
+  // JIT data.
+
+  /*
+   * Get and set the RDS handle for the class with this class's name.
+   *
+   * We can burn these into the TC even when classes are not persistent, since
+   * only a single name-to-class mapping will exist per request.
+   */
+  rds::Handle classHandle() const;
+  void setClassHandle(rds::Link<Class*> link) const;
+
+  /*
+   * Get and set the RDS-cached class with this class's name.
+   */
+  Class* getCached() const;
+  void setCached();
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Native data.
+
+  /*
+   * NativeData type declared in <<__NativeData("Type")>>.
+   */
+  const Native::NativeDataInfo* getNativeDataInfo() const;
+
+  /*
+   * Whether the class registered native handler of magic props.
+   */
+  bool hasNativePropHandler() const;
+
+  /*
+   * Return the actual native handler of magic props.
+   *
+   * @requires hasNativePropHandler()
+   */
+  const Native::NativePropHandler* getNativePropHandler() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
+  // Closure subclasses.
+
+  /*
+   * Is this a scoped subclass of Closure?
+   */
+  bool isScopedClosure() const;
+
+  /*
+   * Return all the scoped clones of this closure class, or an empty map when
+   * this is not a closure class.
+   *
+   * NOTE: Accessing this table is only permitted when synchronized with
+   * instance bits initialization.
+   *
+   * @see: ExtraData::m_scopedClones
+   */
+  const ScopedClonesMap& scopedClones() const;
+
+
+  /////////////////////////////////////////////////////////////////////////////
   // Other methods.
   //
   // Avoiding adding methods to this section.
@@ -755,21 +896,6 @@ public:
   bool verifyPersistent() const;
 
   /*
-   * Get and set the RDS handle for the class with this class's name.
-   *
-   * We can burn these into the TC even when classes are not persistent, since
-   * only a single name-to-class mapping will exist per request.
-   */
-  RDS::Handle classHandle() const;
-  void setClassHandle(RDS::Link<Class*> link) const;
-
-  /*
-   * Get and set the RDS-cached class with this class's name.
-   */
-  Class* getCached() const;
-  void setCached();
-
-  /*
    * Set the instance bits on this class.
    *
    * The instance bits are a bitfield cache for instanceof checks.  During
@@ -779,11 +905,6 @@ public:
    */
   void setInstanceBits();
   void setInstanceBitsAndParents();
-
-  /*
-   * NativeData type declared in <<__NativeData("Type")>>.
-   */
-  const Native::NativeDataInfo* getNativeDataInfo() const;
 
   /*
    * Get the underlying enum base type if this is an enum.
@@ -806,6 +927,8 @@ public:
   OFF(invoke)
   OFF(preClass)
   OFF(propDataCache)
+  OFF(vtableVecLen)
+  OFF(vtableVec)
 #undef OFF
 
 
@@ -844,6 +967,18 @@ private:
     uint32_t m_builtinODTailSize{0};
 
     /*
+     * Cache for Closure subclass scopings.
+     *
+     * Only meaningful when `this' is an unscoped subclass of Closure.  When we
+     * need to create a closure in the scope of a Class C (and with attrs A),
+     * we clone `this', rescope its __invoke() appropriately, and then cache
+     * the (C,A) => clone binding here.
+     *
+     * @see: rescope()
+     */
+    ScopedClonesMap m_scopedClones;
+
+    /*
      * Objects with the <<__NativeData("T")>> UA are allocated with extra space
      * prior to the ObjectData structure itself.
      */
@@ -865,22 +1000,85 @@ private:
   using SPropMap = IndexedStringMap<SProp,true,Slot>;
 
   struct TraitMethod {
-    TraitMethod(Class* trait, Func* method, Attr modifiers)
-      : m_trait(trait)
-      , m_method(method)
-      , m_modifiers(modifiers)
+    TraitMethod(const Class* trait_, const Func* method_, Attr modifiers_)
+      : trait(trait_)
+      , method(method_)
+      , modifiers(modifiers_)
     {}
 
-    LowClassPtr m_trait;
-    Func* m_method;
-    Attr m_modifiers;
+    using class_type = const Class*;
+    using method_type = const Func*;
+    using modifiers_type = Attr;
+
+    const Class* trait;
+    const Func* method;
+    Attr modifiers;
   };
 
-  using TraitMethodList      = std::list<TraitMethod>;
-  using MethodToTraitListMap = hphp_hash_map<LowStringPtr,
-                                             TraitMethodList,
-                                             string_data_hash,
-                                             string_data_isame>;
+  struct TMIOps {
+    using prec_type  = const PreClass::TraitPrecRule&;
+    using alias_type = const PreClass::TraitAliasRule&;
+
+    // Whether `str' is empty.
+    static bool strEmpty(const StringData* str);
+
+    // Return the name for the trait class.
+    static const StringData* clsName(const Class* traitCls);
+
+    // Is-a methods.
+    static bool isTrait(const Class* traitCls);
+    static bool isAbstract(Attr modifiers);
+
+    // Whether to exclude methods with name `methName' when adding.
+    static bool exclude(const StringData* methName);
+
+    // TraitMethod constructor.
+    static TraitMethod traitMethod(const Class* traitCls,
+                                   const Func* traitMeth,
+                                   alias_type rule);
+
+    // Accessors for the precedence rule type.
+    static const StringData* precMethodName(prec_type rule);
+    static const StringData* precSelectedTraitName(prec_type rule);
+    static TraitNameSet      precOtherTraitNames(prec_type rule);
+
+    // Accessors for the alias rule type.
+    static const StringData* aliasTraitName(alias_type rule);
+    static const StringData* aliasOrigMethodName(alias_type rule);
+    static const StringData* aliasNewMethodName(alias_type rule);
+    static Attr aliasModifiers(alias_type rule);
+
+    // Register a trait alias once the trait class is found.
+    static void addTraitAlias(Class* cls, alias_type rule,
+                              const Class* traitCls);
+
+    // Trait class/method finders.
+    static const Class* findSingleTraitWithMethod(const Class* cls,
+                                       const StringData* origMethName);
+    static const Class* findTraitClass(const Class* cls,
+                                       const StringData* traitName);
+    static const Func* findTraitMethod(const Class* cls,
+                                       const Class* traitCls,
+                                       const StringData* origMethName);
+
+    // Errors.
+    static void errorUnknownMethod(prec_type rule);
+    static void errorUnknownMethod(alias_type rule,
+                                   const StringData* methName);
+    template <class Rule>
+    static void errorUnknownTrait(const Rule& rule,
+                                  const StringData* traitName);
+    static void errorDuplicateMethod(const Class* cls,
+                                     const StringData* methName);
+  };
+
+  friend class TMIOps;
+
+  using TMIData = TraitMethodImportData<TraitMethod,
+                                        TMIOps,
+                                        const StringData*,
+                                        string_data_hash,
+                                        string_data_isame>;
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -896,20 +1094,14 @@ private:
 
   bool needsInitSProps() const;
 
-  void importTraitMethod(const TraitMethod&  traitMethod,
-                         const StringData*   methName,
+  /*
+   * Trait method import routines.
+   */
+  void importTraitMethod(const TMIData::MethodData& mdata,
                          MethodMapBuilder& curMethodMap);
-  Class* findSingleTraitWithMethod(const StringData* methName);
-  void setImportTraitMethodModifiers(TraitMethodList& methList,
-                                     Class*           traitCls,
-                                     Attr             modifiers);
   void importTraitMethods(MethodMapBuilder& curMethodMap);
-  void addTraitPropInitializers(std::vector<const Func*>&, bool staticProps);
-  void applyTraitRules(MethodToTraitListMap& importMethToTraitMap);
-  void applyTraitPrecRule(const PreClass::TraitPrecRule& rule,
-                          MethodToTraitListMap& importMethToTraitMap);
-  void applyTraitAliasRule(const PreClass::TraitAliasRule& rule,
-                           MethodToTraitListMap& importMethToTraitMap);
+  void applyTraitRules(TMIData& tmid);
+
   void importTraitProps(int idxOffset,
                         PropMap::Builder& curPropMap,
                         SPropMap::Builder& curSPropMap);
@@ -923,16 +1115,13 @@ private:
                              const int idxOffset,
                              PropMap::Builder& curPropMap,
                              SPropMap::Builder& curSPropMap);
-  void addTraitAlias(const StringData* traitName,
-                     const StringData* origMethName,
-                     const StringData* newMethName);
+  void addTraitPropInitializers(std::vector<const Func*>&, bool staticProps);
 
   void checkInterfaceMethods();
+  void checkInterfaceConstraints();
   void methodOverrideCheck(const Func* parentMethod, const Func* method);
 
   static bool compatibleTraitPropInit(TypedValue& tv1, TypedValue& tv2);
-  void removeSpareTraitAbstractMethods(
-    MethodToTraitListMap& importMethToTraitMap);
 
   void setParent();
   void setSpecial();
@@ -942,6 +1131,7 @@ private:
   void setProperties();
   void setInitializers();
   void setInterfaces();
+  void setInterfaceVtables();
   void setClassVec();
   void setFuncVec(MethodMapBuilder& builder);
   void setRequirements();
@@ -982,7 +1172,7 @@ public:
   // hot, and must be the last member.
 
 public:
-  LowClassPtr m_nextClass{nullptr}; // used by NamedEntity
+  LowPtr<Class> m_nextClass{nullptr}; // used by NamedEntity
 
 private:
   default_ptr<ExtraData> m_extra;
@@ -990,79 +1180,104 @@ private:
   RequirementMap m_requirements;
   std::unique_ptr<ClassPtr[]> m_declInterfaces;
   uint32_t m_numDeclInterfaces{0};
-  mutable RDS::Link<Array> m_nonScalarConstantCache{RDS::kInvalidHandle};
+  mutable rds::Link<Array> m_nonScalarConstantCache{rds::kInvalidHandle};
 
-  LowFuncPtr m_toString;
-  LowFuncPtr m_invoke; // __invoke, iff non-static (or closure)
+  LowPtr<Func> m_toString;
+  LowPtr<Func> m_invoke; // __invoke, iff non-static (or closure)
 
   ConstMap m_constants;
+
   ClassPtr m_parent;
   int32_t m_declPropNumAccessible;
-  mutable RDS::Link<Class*> m_cachedClass{RDS::kInvalidHandle};
+  mutable rds::Link<Class*> m_cachedClass{rds::kInvalidHandle};
 
-  // Vector of 86pinit() methods that need to be called to complete instance
-  // property initialization, and a pointer to a 86sinit() method that needs to
-  // be called to complete static property initialization (or NULL).  Such
-  // initialization is triggered only once, the first time one of the following
-  // happens:
-  //    - An instance of this class is created.
-  //    - A static property of this class is accessed.
+  /*
+   * Whether this is a subclass of Closure whose m_invoke->m_cls has been set
+   * to the closure's context class.
+   */
+  std::atomic<bool> m_scoped{false};
+
+  // NB: 24 bytes available here (in USE_LOWPTR builds).
+
+  /*
+   * Vector of 86pinit() methods that need to be called to complete instance
+   * property initialization, and a pointer to a 86sinit() method that needs to
+   * be called to complete static property initialization (or NULL).  Such
+   * initialization is triggered only once, the first time one of the following
+   * happens:
+   *    - An instance of this class is created.
+   *    - A static property of this class is accessed.
+   */
   FixedVector<const Func*> m_sinitVec;
-  LowFuncPtr m_ctor;
-  LowFuncPtr m_dtor;
+  LowPtr<Func> m_ctor;
+  LowPtr<Func> m_dtor;
   PropInitVec m_declPropInit;
   FixedVector<const Func*> m_pinitVec;
   SPropMap m_staticProperties;
   PreClassPtr m_preClass;
   InterfaceMap m_interfaces;
-  // Bitmap of parent classes and implemented interfaces.  Each bit corresponds
-  // to a commonly used class name, determined during the profiling warmup
-  // requests.
+
+  /*
+   * Bitmap of parent classes and implemented interfaces.  Each bit corresponds
+   * to a commonly used class name, determined during the profiling warmup
+   * requests.
+   */
   InstanceBits::BitSet m_instanceBits;
   MethodMap m_methods;
 
-  // Static properties are stored in RDS.  There are three phases of sprop
-  // initialization:
-  // 1. The array of links is itself allocated on Class creation.
-  // 2. The links are bound either when codegen needs the handle value, or when
-  //    initSProps() is called in any request.  Afterwards, m_sPropCacheInit is
-  //    bound, defaulting to false.
-  // 3. The RDS value at m_sPropCacheInit is set to true when initSProps() is
-  //    called, and the values are actually initialized.
-  mutable RDS::Link<TypedValue>* m_sPropCache{nullptr};
-  mutable RDS::Link<bool> m_sPropCacheInit{RDS::kInvalidHandle};
+  /*
+   * Static properties are stored in RDS.  There are three phases of sprop
+   * initialization:
+   * 1. The array of links is itself allocated on Class creation.
+   * 2. The links are bound either when codegen needs the handle value, or when
+   *    initSProps() is called in any request.  Afterwards, m_sPropCacheInit is
+   *    bound, defaulting to false.
+   * 3. The RDS value at m_sPropCacheInit is set to true when initSProps() is
+   *    called, and the values are actually initialized.
+   */
+  mutable rds::Link<TypedValue>* m_sPropCache{nullptr};
+  mutable rds::Link<bool> m_sPropCacheInit{rds::kInvalidHandle};
 
-  unsigned m_classVecLen;
-  unsigned m_funcVecLen;
+  veclen_t m_classVecLen;
+  veclen_t m_funcVecLen;
+  veclen_t m_vtableVecLen{0};
+  LowPtr<VtableVecSlot> m_vtableVec{nullptr};
 
-  // Each ObjectData is created with enough trailing space to directly store
-  // the vector of declared properties. To look up a property by name and
-  // determine whether it is declared, use m_declPropMap. If the declared
-  // property index is already known (as may be the case when executing via the
-  // TC), property metadata in m_declPropInfo can be directly accessed.
-  //
-  // m_declPropInit is indexed by the Slot values from m_declProperties, and
-  // contains initialization information.
+  /*
+   * Each ObjectData is created with enough trailing space to directly store
+   * the vector of declared properties. To look up a property by name and
+   * determine whether it is declared, use m_declPropMap. If the declared
+   * property index is already known (as may be the case when executing via the
+   * TC), property metadata in m_declPropInfo can be directly accessed.
+   *
+   * m_declPropInit is indexed by the Slot values from m_declProperties, and
+   * contains initialization information.
+   */
   PropMap m_declProperties;
 
   MaybeDataType m_enumBaseTy;
   uint16_t m_ODAttrs;
-  mutable RDS::Link<PropInitVec*> m_propDataCache{RDS::kInvalidHandle};
+  mutable rds::Link<PropInitVec*> m_propDataCache{rds::kInvalidHandle};
 
-  unsigned m_needInitialization : 1;      // requires initialization,
-                                          // due to [ps]init or simply
-                                          // having static members
-  unsigned m_completelyUnused : 1;        // keep things in the same place
-  unsigned m_callsCustomInstanceInit : 1; // should we always call __init__
-                                          // on new instances?
-  unsigned m_hasDeepInitProps : 1;
-  unsigned m_attrCopy : 28;               // cache of m_preClass->attrs().
+  /*
+   * Whether the Class requires initialization, because it has either
+   * {p,s}init() methods or static members.
+   */
+  bool m_needInitialization : 1;
+
+  bool m_callsCustomInstanceInit : 1;
+  bool m_hasDeepInitProps : 1;
+
+  /*
+   * Cache of m_preClass->attrs().
+   */
+  unsigned m_attrCopy : 28;
 
   /*
    * Vector of Class pointers that encodes the inheritance hierarchy, including
    * this Class as the last element.
    */
-  LowClassPtr m_classVec[1]; // Dynamically sized; must come last.
+  LowPtr<Class> m_classVec[1]; // Dynamically sized; must come last.
 };
 
 ///////////////////////////////////////////////////////////////////////////////

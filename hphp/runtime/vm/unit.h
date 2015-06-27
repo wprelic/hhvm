@@ -73,7 +73,7 @@ struct SourceLoc {
    * Constructors.
    */
   SourceLoc() {}
-  explicit SourceLoc(const Location& l);
+  explicit SourceLoc(const Location::Range& l);
 
   /*
    * Reset to, or check for, the invalid state.
@@ -84,7 +84,7 @@ struct SourceLoc {
   /*
    * Set to a parser Location.
    */
-  void setLoc(const Location* l);
+  void setLoc(const Location::Range* l);
 
   /*
    * Equality.
@@ -110,15 +110,15 @@ struct OffsetRange {
   OffsetRange() {}
 
   OffsetRange(Offset base, Offset past)
-    : m_base(base)
-    , m_past(past)
+    : base(base)
+    , past(past)
   {}
 
-  Offset m_base{0};
-  Offset m_past{0};
+  Offset base{0};
+  Offset past{0};
 };
 
-typedef std::vector<OffsetRange> OffsetRangeVec;
+using OffsetRangeVec = std::vector<OffsetRange>;
 
 /*
  * Generic entry for representing many-to-one mappings of Offset -> T.
@@ -550,8 +550,8 @@ public:
    * burn the Class* into the TC, since it will be defined by the time the code
    * that needs the Class* runs (via autoload or whatnot).
    */
-  static Class* lookupUniqueClass(const NamedEntity* ne);
-  static Class* lookupUniqueClass(const StringData* name);
+  static Class* lookupClassOrUniqueClass(const NamedEntity* ne);
+  static Class* lookupClassOrUniqueClass(const StringData* name);
 
   /*
    * Look up, or autoload and define, the Class in this request with name
@@ -620,14 +620,15 @@ public:
   static bool defCns(const StringData* cnsName, const TypedValue* value,
                      bool persistent = false);
 
+  using SystemConstantCallback = const Variant& (*)();
   /*
    * Define a constant with name `cnsName' which stores an arbitrary data
    * pointer in its TypedValue (with datatype KindOfUnit).
    *
    * The canonical examples are STDIN, STDOUT, and STDERR.
    */
-  static void defDynamicSystemConstant(const StringData* cnsName,
-                                       const void* data);
+  static bool defSystemConstantCallback(const StringData* cnsName,
+                                        SystemConstantCallback callback);
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -823,44 +824,31 @@ private:
 };
 
 ///////////////////////////////////////////////////////////////////////////////
+// TODO(#4717225): Rewrite these in iterators.h.
 
-struct ConstPreClassMethodRanger {
-  typedef Func* const* Iter;
-  typedef const Func* Value;
-  static Iter get(PreClassPtr pc) {
-    return pc->methods();
-  }
-};
-
-struct MutablePreClassMethodRanger {
-  typedef Func** Iter;
-  typedef Func* Value;
-  static Func** get(PreClassPtr pc) {
-    return pc->mutableMethods();
-  }
-};
-
-template<typename FuncRange,
-         typename GetMethods>
-struct AllFuncsImpl {
-  explicit AllFuncsImpl(const Unit* unit)
+struct AllFuncs {
+  explicit AllFuncs(const Unit* unit)
     : fr(unit->funcs())
     , mr(0, 0)
     , cr(unit->preclasses())
   {
     if (fr.empty()) skip();
   }
-  bool empty() const { return fr.empty() && mr.empty() && cr.empty(); }
-  typedef typename GetMethods::Value FuncPtr;
-  FuncPtr front() const {
+
+  bool empty() const {
+    return fr.empty() && mr.empty() && cr.empty();
+  }
+
+  const Func* front() const {
     assert(!empty());
     if (!fr.empty()) return fr.front();
     assert(!mr.empty());
     return mr.front();
   }
-  FuncPtr popFront() {
-    FuncPtr f = !fr.empty() ? fr.popFront() :
-      !mr.empty() ? mr.popFront() : 0;
+
+  const Func* popFront() {
+    auto f = !fr.empty() ? fr.popFront() :
+             !mr.empty() ? mr.popFront() : 0;
     assert(f);
     if (fr.empty() && mr.empty()) skip();
     return f;
@@ -870,9 +858,9 @@ private:
   void skip() {
     assert(fr.empty());
     while (!cr.empty() && mr.empty()) {
-      PreClassPtr c = cr.popFront();
-      mr = Unit::FuncRange(GetMethods::get(c),
-                           GetMethods::get(c) + c->numMethods());
+      auto c = cr.popFront();
+      mr = Unit::FuncRange(c->methods(),
+                           c->methods() + c->numMethods());
     }
   }
 
@@ -880,27 +868,6 @@ private:
   Unit::FuncRange mr;
   Unit::PreClassRange cr;
 };
-
-typedef AllFuncsImpl<Unit::FuncRange,ConstPreClassMethodRanger> AllFuncs;
-typedef AllFuncsImpl<Unit::MutableFuncRange,MutablePreClassMethodRanger>
-  MutableAllFuncs;
-
-/*
- * Range over all defined classes.
- */
-class AllClasses {
-  NamedEntity::Map::iterator m_next, m_end;
-  Class* m_current;
-  void next();
-  void skip();
-
-public:
-  AllClasses();
-  bool empty() const;
-  Class* front() const;
-  Class* popFront();
-};
-
 
 class AllCachedClasses {
   NamedEntity::Map::iterator m_next, m_end;

@@ -18,7 +18,7 @@
 #ifndef incl_HPHP_EXT_REFLECTION_H_
 #define incl_HPHP_EXT_REFLECTION_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/vm/native-data.h"
 
 namespace HPHP {
@@ -44,7 +44,7 @@ void HHVM_FUNCTION(hphp_set_static_property, const String& cls,
 class Reflection {
  public:
   static HPHP::Class* s_ReflectionExceptionClass;
-  static ObjectData* AllocReflectionExceptionObject(const Variant& message);
+  static Object AllocReflectionExceptionObject(const Variant& message);
 };
 
 
@@ -78,6 +78,7 @@ class ReflectionFuncHandle {
   }
 
  private:
+  template <typename F> friend void scan(const ReflectionFuncHandle&, F&);
   const Func* m_func{nullptr};
 };
 
@@ -123,7 +124,117 @@ class ReflectionClassHandle {
   void wakeup(const Variant& content, ObjectData* obj);
 
  private:
+  template <typename F> friend void scan(const ReflectionClassHandle&, F&);
   const Class* m_cls{nullptr};
+};
+
+/* A ReflectionConstHandle is a NativeData object wrapping a Const*
+ * for the purposes of ReflectionTypeConstant. */
+extern const StaticString s_ReflectionConstHandle;
+class ReflectionConstHandle {
+ public:
+  ReflectionConstHandle(): m_const(nullptr) {}
+  explicit ReflectionConstHandle(const Class::Const* cst): m_const(cst) {};
+  ReflectionConstHandle(const ReflectionConstHandle&) = delete;
+  ReflectionConstHandle& operator=(const ReflectionConstHandle& other) {
+    m_const = other.m_const;
+    return *this;
+  }
+  ~ReflectionConstHandle() {}
+
+  static ReflectionConstHandle* Get(ObjectData* obj) {
+    return Native::data<ReflectionConstHandle>(obj);
+  }
+
+  static const Class::Const* GetConstFor(ObjectData* obj) {
+    return Native::data<ReflectionConstHandle>(obj)->getConst();
+  }
+
+  const Class::Const* getConst() { return m_const; }
+
+  void setConst(const Class::Const* cst) {
+    assert(cst != nullptr);
+    assert(m_const == nullptr);
+    m_const = cst;
+  }
+
+ private:
+  template <typename F> friend void scan(const ReflectionConstHandle&, F&);
+  const Class::Const* m_const{nullptr};
+};
+
+/* A ReflectionPropHandle is a NativeData object wrapping a Prop*
+ * for the purposes of ReflectionProperty. */
+extern const StaticString s_ReflectionPropHandle;
+class ReflectionPropHandle {
+ public:
+  ReflectionPropHandle(): m_prop(nullptr) {}
+  explicit ReflectionPropHandle(const Class::Prop* prop): m_prop(prop) {};
+  ReflectionPropHandle(const ReflectionPropHandle& other) {
+    m_prop = other.m_prop;
+  }
+  ReflectionPropHandle& operator=(const ReflectionPropHandle& other) {
+    m_prop = other.m_prop;
+    return *this;
+  }
+  ~ReflectionPropHandle() {}
+
+  static ReflectionPropHandle* Get(ObjectData* obj) {
+    return Native::data<ReflectionPropHandle>(obj);
+  }
+
+  static const Class::Prop* GetPropFor(ObjectData* obj) {
+    return Native::data<ReflectionPropHandle>(obj)->getProp();
+  }
+
+  const Class::Prop* getProp() { return m_prop; }
+
+  void setProp(const Class::Prop* prop) {
+    assert(prop != nullptr);
+    assert(m_prop == nullptr);
+    m_prop = prop;
+  }
+
+ private:
+  template <typename F> friend void scan(const ReflectionPropHandle&, F&);
+  const Class::Prop* m_prop{nullptr};
+};
+
+/* A ReflectionSPropHandle is a NativeData object wrapping a SProp*
+ * for the purposes of static ReflectionProperty. */
+extern const StaticString s_ReflectionSPropHandle;
+class ReflectionSPropHandle {
+ public:
+  ReflectionSPropHandle(): m_sprop(nullptr) {}
+  explicit ReflectionSPropHandle(const Class::SProp* sprop): m_sprop(sprop) {};
+  ReflectionSPropHandle(const ReflectionSPropHandle& other) {
+    m_sprop = other.m_sprop;
+  }
+  ReflectionSPropHandle& operator=(const ReflectionSPropHandle& other) {
+    m_sprop = other.m_sprop;
+    return *this;
+  }
+  ~ReflectionSPropHandle() {}
+
+  static ReflectionSPropHandle* Get(ObjectData* obj) {
+    return Native::data<ReflectionSPropHandle>(obj);
+  }
+
+  static const Class::SProp* GetSPropFor(ObjectData* obj) {
+    return Native::data<ReflectionSPropHandle>(obj)->getSProp();
+  }
+
+  const Class::SProp* getSProp() { return m_sprop; }
+
+  void setSProp(const Class::SProp* sprop) {
+    assert(sprop != nullptr);
+    assert(m_sprop == nullptr);
+    m_sprop = sprop;
+  }
+
+ private:
+  template <typename F> friend void scan(const ReflectionSPropHandle&, F&);
+  const Class::SProp* m_sprop{nullptr};
 };
 
 namespace DebuggerReflection {

@@ -31,9 +31,10 @@ using namespace HPHP;
 
 ClassConstant::ClassConstant
 (STATEMENT_CONSTRUCTOR_PARAMETERS, std::string typeConstraint,
- ExpressionListPtr exp, bool abstract)
+ ExpressionListPtr exp, bool abstract, bool typeconst)
   : Statement(STATEMENT_CONSTRUCTOR_PARAMETER_VALUES(ClassConstant)),
-    m_typeConstraint(typeConstraint), m_exp(exp), m_abstract(abstract) {
+    m_typeConstraint(typeConstraint), m_exp(exp), m_abstract(abstract),
+    m_typeconst(typeconst) {
 }
 
 StatementPtr ClassConstant::clone() {
@@ -46,11 +47,13 @@ StatementPtr ClassConstant::clone() {
 // parser functions
 
 void ClassConstant::onParseRecur(AnalysisResultConstPtr ar,
+                                 FileScopeRawPtr fs,
                                  ClassScopePtr scope) {
   ConstantTablePtr constants = scope->getConstants();
 
   if (scope->isTrait()) {
-    parseTimeFatal(Compiler::InvalidTraitStatement,
+    parseTimeFatal(fs,
+                   Compiler::InvalidTraitStatement,
                    "Traits cannot have constants");
   }
 
@@ -60,12 +63,19 @@ void ClassConstant::onParseRecur(AnalysisResultConstPtr ar,
         dynamic_pointer_cast<ConstantExpression>((*m_exp)[i]);
       const std::string &name = exp->getName();
       if (constants->isPresent(name)) {
-        exp->parseTimeFatal(Compiler::DeclaredConstantTwice,
-                                   "Cannot redeclare %s::%s",
-                                   scope->getOriginalName().c_str(),
-                                   name.c_str());
+        exp->parseTimeFatal(fs,
+                            Compiler::DeclaredConstantTwice,
+                            "Cannot redeclare %s::%s",
+                            scope->getOriginalName().c_str(),
+                            name.c_str());
       }
-      // Unlike below, there's no reason to call parseRecur
+
+      // HACK: break attempts to write global constants here;
+      // see ConstantExpression::preOptimize
+      exp->setContext(Expression::LValue);
+
+      // Unlike with assignment expression below, nothing needs to be added
+      // to the scope's constant table
     }
   } else {
     for (int i = 0; i < m_exp->getCount(); i++) {
@@ -76,12 +86,22 @@ void ClassConstant::onParseRecur(AnalysisResultConstPtr ar,
       const std::string &name =
         dynamic_pointer_cast<ConstantExpression>(var)->getName();
       if (constants->isPresent(name)) {
-        assignment->parseTimeFatal(Compiler::DeclaredConstantTwice,
+        assignment->parseTimeFatal(fs,
+                                   Compiler::DeclaredConstantTwice,
                                    "Cannot redeclare %s::%s",
                                    scope->getOriginalName().c_str(),
                                    name.c_str());
       } else {
-        assignment->onParseRecur(ar, scope);
+        if (isTypeconst()) {
+          // We do not want type constants to be available at run time.
+          // To ensure this we do not want them to be added to the constants
+          // table. The constants table is used to inline values for expressions
+          // See ClassConstantExpression::preOptimize.
+          // AssignmentExpression::onParseRecur essentially adds constants to
+          // the constant table so we skip it.
+          continue;
+        }
+        assignment->onParseRecur(ar, fs, scope);
       }
     }
   }
@@ -121,7 +141,7 @@ void ClassConstant::setNthKid(int n, ConstructPtr cp) {
 }
 
 StatementPtr ClassConstant::preOptimize(AnalysisResultConstPtr ar) {
-  if (!isAbstract()) {
+  if (!isAbstract() && !isTypeconst()) {
     for (int i = 0; i < m_exp->getCount(); i++) {
       AssignmentExpressionPtr assignment =
         dynamic_pointer_cast<AssignmentExpression>((*m_exp)[i]);
@@ -140,6 +160,9 @@ StatementPtr ClassConstant::preOptimize(AnalysisResultConstPtr ar) {
       }
     }
   }
+
+  // abstract constants are not added to the constant table and don't have
+  // any values to propagate.
   return StatementPtr();
 }
 
@@ -155,7 +178,7 @@ void ClassConstant::outputCodeModel(CodeGenerator &cg) {
   cg.printPropertyHeader("expressions");
   cg.printExpressionVector(m_exp);
   cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
+  cg.printLocation(this);
   cg.printObjectFooter();
 }
 
@@ -167,6 +190,9 @@ void ClassConstant::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
     cg_printf("abstract ");
   }
   cg_printf("const ");
+  if (isTypeconst()) {
+    cg_printf("type ");
+  }
   m_exp->outputPHP(cg, ar);
   cg_printf(";\n");
 }

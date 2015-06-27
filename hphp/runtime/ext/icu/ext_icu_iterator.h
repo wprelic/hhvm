@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_ICU_ITERATOR_H
 #define incl_HPHP_ICU_ITERATOR_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/strenum.h>
@@ -54,7 +54,7 @@ public:
       c_IntlIterator = Unit::lookupClass(s_IntlIterator.get());
       assert(c_IntlIterator);
     }
-    auto obj = ObjectData::newInstance(c_IntlIterator);
+    Object obj{c_IntlIterator};
     if (se) {
       Native::data<IntlIterator>(obj)->setEnumeration(se);
     }
@@ -99,6 +99,7 @@ public:
   icu::StringEnumeration *enumeration() const { return m_enum; }
 
 private:
+  template <typename F> friend void HPHP::scan(const IntlIterator&, F&);
   icu::StringEnumeration *m_enum = nullptr;
   int64_t m_key = -1;
   Variant m_current{Variant::NullInit()};
@@ -114,7 +115,7 @@ public:
   explicit BugStringCharEnumeration(UEnumeration* _uenum) : uenum(_uenum) {}
   ~BugStringCharEnumeration() { uenum_close(uenum); }
 
-  int32_t count(UErrorCode& status) const {
+  int32_t count(UErrorCode& status) const override {
     return uenum_count(uenum, &status);
   }
 
@@ -141,7 +142,7 @@ public:
     return str;
   }
 
-  void reset(UErrorCode& status) {
+  void reset(UErrorCode& status) override {
     uenum_reset(uenum, &status);
   }
 

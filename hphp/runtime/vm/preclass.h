@@ -17,13 +17,14 @@
 #ifndef incl_HPHP_VM_PRECLASS_H_
 #define incl_HPHP_VM_PRECLASS_H_
 
+#include "hphp/runtime/base/atomic-shared-ptr.h"
 #include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/attr.h"
-#include "hphp/runtime/base/countable.h"
 #include "hphp/runtime/base/repo-auth-type.h"
 #include "hphp/runtime/base/type-string.h"
 #include "hphp/runtime/base/typed-value.h"
 #include "hphp/runtime/base/user-attributes.h"
+#include "hphp/runtime/base/atomic-countable.h"
 #include "hphp/runtime/vm/indexed-string-map.h"
 #include "hphp/runtime/vm/type-constraint.h"
 
@@ -31,6 +32,7 @@
 #include "hphp/util/range.h"
 
 #include <type_traits>
+#include <unordered_set>
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -48,17 +50,12 @@ namespace Native { struct NativeDataInfo; }
 
 ///////////////////////////////////////////////////////////////////////////////
 
-typedef hphp_hash_set<LowStringPtr,
-                      string_data_hash,
-                      string_data_isame> TraitNameSet;
+using TraitNameSet = std::unordered_set<LowStringPtr,
+                                        string_data_hash,
+                                        string_data_isame>;
 
-#ifdef USE_LOWPTR
-using BuiltinCtorFunction = LowPtr<ObjectData*(Class*), uint32_t>;
-using BuiltinDtorFunction = LowPtr<void(ObjectData*, const Class*), uint32_t>;
-#else
-using BuiltinCtorFunction = LowPtr<ObjectData*(Class*), uintptr_t>;
-using BuiltinDtorFunction = LowPtr<void(ObjectData*, const Class*), uintptr_t>;
-#endif
+using BuiltinCtorFunction = LowPtr<ObjectData*(Class*)>;
+using BuiltinDtorFunction = LowPtr<void(ObjectData*, const Class*)>;
 
 /*
  * A PreClass represents the source-level definition of a PHP class, interface,
@@ -158,21 +155,25 @@ struct PreClass : AtomicCountable {
    */
   struct Const {
     Const(const StringData* name,
-          const StringData* typeConstraint,
-          const TypedValue& val,
+          const TypedValueAux& val,
           const StringData* phpCode);
 
     void prettyPrint(std::ostream&, const PreClass*) const;
 
-    const StringData* name()           const { return m_name; }
-    const StringData* typeConstraint() const { return m_typeConstraint; }
-    const TypedValue& val()            const { return m_val; }
-    const StringData* phpCode()        const { return m_phpCode; }
+    const StringData* name()     const { return m_name; }
+    const TypedValueAux& val()   const { return m_val; }
+    const StringData* phpCode()  const { return m_phpCode; }
+    bool isAbstract()      const { return m_val.constModifiers().m_isAbstract; }
+    bool isType()          const { return m_val.constModifiers().m_isType; }
+
+    template<class SerDe> void serde(SerDe& sd);
 
   private:
     LowStringPtr m_name;
-    LowStringPtr m_typeConstraint;
-    TypedValue m_val;
+    /* m_aux.u_isAbstractConst indicates an abstract constant. A TypedValue
+     * with KindOfUninit represents a constant whose value is not
+     * statically available (e.g. "const X = self::Y + 5;") */
+    TypedValueAux m_val;
     LowStringPtr m_phpCode;
   };
 
@@ -308,7 +309,26 @@ public:
   const StringData* parent()       const { return m_parent; }
   const StringData* docComment()   const { return m_docComment; }
   Hoistable         hoistability() const { return m_hoistable; }
-  const TypeConstraint& enumBaseTy()   const { return m_enumBaseTy; }
+
+  /*
+   * Number of methods declared on this class (as opposed to included via
+   * traits).
+   *
+   * This value is only valid when trait methods are flattened; otherwise, it
+   * is -1.
+   */
+  int32_t numDeclMethods() const { return m_numDeclMethods; }
+
+  /*
+   * The interface vtable slot for this PreClass, or kInvalidSlot if it wasn't
+   * assigned one or isn't an interface.
+   */
+  Slot ifaceVtableSlot() const { return m_ifaceVtableSlot; }
+
+  /*
+   * If this is an enum class, return the type of its enum values.
+   */
+  const TypeConstraint& enumBaseTy() const { return m_enumBaseTy; }
 
   /*
    * For a builtin class c_Foo:
@@ -436,6 +456,8 @@ private:
   LowStringPtr m_name;
   LowStringPtr m_parent;
   LowStringPtr m_docComment;
+  int32_t m_numDeclMethods;
+  Slot m_ifaceVtableSlot{kInvalidSlot};
   TypeConstraint m_enumBaseTy;
   BuiltinCtorFunction m_instanceCtor{nullptr};
   BuiltinDtorFunction m_instanceDtor{nullptr};
@@ -451,7 +473,7 @@ private:
   ConstMap m_constants;
 };
 
-typedef AtomicSmartPtr<PreClass> PreClassPtr;
+typedef AtomicSharedPtr<PreClass> PreClassPtr;
 
 ///////////////////////////////////////////////////////////////////////////////
 }

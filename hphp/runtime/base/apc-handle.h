@@ -17,12 +17,13 @@
 #ifndef incl_HPHP_APC_HANDLE_H_
 #define incl_HPHP_APC_HANDLE_H_
 
-#include "hphp/runtime/base/types.h"
 #include <atomic>
-#include "hphp/util/lock.h"
-#include "hphp/util/hash.h"
+
 #include "hphp/util/atomic.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/util/hash.h"
+#include "hphp/util/lock.h"
+
+#include "hphp/runtime/base/type-variant.h"
 
 #if (defined(__APPLE__) || defined(__APPLE_CC__)) && (defined(__BIG_ENDIAN__) || defined(__LITTLE_ENDIAN__))
 # if defined(__LITTLE_ENDIAN__)
@@ -84,15 +85,17 @@ namespace HPHP {
  *
  */
 struct APCHandle {
+  struct Pair {
+    APCHandle* handle;
+    size_t size;
+  };
+
   /*
    * Create an instance of an APC object according to the type of source and
    * the various flags. This is the only entry point to create APC entities.
    */
-  static APCHandle* Create(const Variant& source,
-                           size_t& size,
-                           bool serialized,
-                           bool inner = false,
-                           bool unserializeObj = false);
+  static Pair Create(const Variant& source, bool serialized,
+                     bool inner = false, bool unserializeObj = false);
 
   /*
    * Memory management API.
@@ -165,37 +168,42 @@ struct APCHandle {
   /*
    * For KindOfObject and KindOfArray, reprectively, these flags distinguish
    * between the APCObject and APCArray representations and serialized
-   * APCString representations.
+   * APCString representations.  And an APCCollection wraps an array that
+   * represents a php KindOfObject for a particular collection type.
    */
-  bool isSerializedObj() const { return m_flags & SerializedObj; }
-  bool isSerializedArray() const { return m_flags & SerializedArray; }
-  void setSerializedObj() { m_flags |= SerializedObj; }
-  void setSerializedArray() { m_flags |= SerializedArray; }
+  bool isSerializedObj() const { return m_flags & FSerializedObj; }
+  bool isSerializedArray() const { return m_flags & FSerializedArray; }
+  bool isAPCCollection() const { return m_flags & FAPCCollection; }
+  void setSerializedObj() { m_flags |= FSerializedObj; }
+  void setSerializedArray() { m_flags |= FSerializedArray; }
+  void setAPCCollection() { m_flags |= FAPCCollection; }
 
   /*
    * If true, this APCHandle is not using reference counting.
    */
-  bool isUncounted() const { return m_flags & Uncounted; }
-  void setUncounted() { m_flags |= Uncounted; }
+  bool isUncounted() const { return m_flags & FUncounted; }
+  void setUncounted() { m_flags |= FUncounted; }
 
   /*
    * If this APCHandle is using an APCArray representation, this flag
    * discriminates between two different storage schemes inside APCArray.
    */
-  bool isPacked() const { return m_flags & Packed; }
-  void setPacked() { m_flags |= Packed; }
+  bool isPacked() const { return m_flags & FPacked; }
+  void setPacked() { m_flags |= FPacked; }
 
 private:
-  constexpr static uint8_t SerializedArray = 1 << 0;
-  constexpr static uint8_t SerializedObj   = 1 << 1;
-  constexpr static uint8_t Packed          = 1 << 2;
-  constexpr static uint8_t Uncounted       = 1 << 3;
+  constexpr static uint8_t FSerializedArray = 1 << 0;
+  constexpr static uint8_t FSerializedObj   = 1 << 1;
+  constexpr static uint8_t FPacked          = 1 << 2;
+  constexpr static uint8_t FUncounted       = 1 << 3;
+  constexpr static uint8_t FAPCCollection   = 1 << 4;
 
 private:
   friend struct APCTypedValue;
   friend struct APCString;
   friend struct APCArray;
   friend struct APCObject;
+  friend struct APCCollection;
   explicit APCHandle(DataType type) : m_type(type) {}
   APCHandle(const APCHandle&) = delete;
   APCHandle& operator=(APCHandle const&) = delete;
@@ -218,17 +226,10 @@ private:
   void deleteShared();
 
 private:
-#if PACKED_TV
-  std::atomic<uint8_t> m_obj_attempted{false};
-  DataType m_type;
-  uint8_t m_flags{0};
-  mutable std::atomic<uint32_t> m_count{1};
-#else
   DataType m_type;
   std::atomic<uint8_t> m_obj_attempted{false};
   uint8_t m_flags{0};
   mutable std::atomic<uint32_t> m_count{1};
-#endif
 };
 
 ///////////////////////////////////////////////////////////////////////////////

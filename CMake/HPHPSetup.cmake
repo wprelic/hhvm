@@ -3,10 +3,22 @@ include(Options)
 # Do this until cmake has a define for ARMv8
 INCLUDE(CheckCXXSourceCompiles)
 CHECK_CXX_SOURCE_COMPILES("
+#ifndef __x86_64__
+#error Not x64
+#endif
+int main() { return 0; }" IS_X64)
+
+CHECK_CXX_SOURCE_COMPILES("
 #ifndef __AARCH64EL__
 #error Not ARMv8
 #endif
 int main() { return 0; }" IS_AARCH64)
+
+CHECK_CXX_SOURCE_COMPILES("
+#ifndef __powerpc64__
+#error Not PPC64
+#endif
+int main() { return 0; }" IS_PPC64)
 
 set(HHVM_WHOLE_ARCHIVE_LIBRARIES
     hphp_runtime_static
@@ -22,8 +34,15 @@ if (APPLE)
   set(ENABLE_FASTCGI 1)
   set(HHVM_ANCHOR_SYMS
     -Wl,-u,_register_fastcgi_server
-    -Wl,-segaddr,__text,0
-    -Wl,-all_load ${HHVM_WHOLE_ARCHIVE_LIBRARIES})
+    -Wl,-pagezero_size,0x00001000
+    # Set the .text.keep section to be executable.
+    -Wl,-segprot,.text,rx,rx)
+  foreach(lib ${HHVM_WHOLE_ARCHIVE_LIBRARIES})
+    # It's important to use -Xlinker and not -Wl here: ${lib} needs to be its
+    # own option on the command line, since target_link_libraries will expand it
+    # from its logical name here into the full .a path. (Eww.)
+    list(APPEND HHVM_ANCHOR_SYMS -Xlinker -force_load -Xlinker ${lib})
+  endforeach()
 elseif (IS_AARCH64)
   set(HHVM_ANCHOR_SYMS
     -Wl,--whole-archive ${HHVM_WHOLE_ARCHIVE_LIBRARIES} -Wl,--no-whole-archive)
@@ -54,11 +73,20 @@ set(HHVM_LINK_LIBRARIES
   hphp_zend
   hphp_util
   hphp_hhbbc
+  jit_sort
   vixl neo)
 
 if(ENABLE_FASTCGI)
   LIST(APPEND HHVM_LINK_LIBRARIES hphp_thrift)
   LIST(APPEND HHVM_LINK_LIBRARIES hphp_proxygen)
+  include(CheckCXXSourceCompiles)
+  CHECK_CXX_SOURCE_COMPILES("#include <pthread.h>
+  int main() {
+    return pthread_mutex_timedlock();
+  }" PTHREAD_TIMEDLOCK)
+  if (NOT PTHREAD_TIMEDLOCK)
+    add_definitions(-DTHRIFT_MUTEX_EMULATE_PTHREAD_TIMEDLOCK)
+  endif()
 endif()
 
 if(NOT CMAKE_BUILD_TYPE)
@@ -137,13 +165,13 @@ if(MSVC OR CYGWIN OR MINGW)
   add_definitions(-DWIN32_LEAN_AND_MEAN)
 endif()
 
-if(${CMAKE_BUILD_TYPE} MATCHES "Release")
+if(${CMAKE_BUILD_TYPE} MATCHES "Debug")
+  add_definitions(-DDEBUG)
+  message("Generating DEBUG build")
+else()
   add_definitions(-DRELEASE=1)
   add_definitions(-DNDEBUG)
   message("Generating Release build")
-else()
-  add_definitions(-DDEBUG)
-  message("Generating DEBUG build")
 endif()
 
 if(DEBUG_MEMORY_LEAK)
@@ -192,17 +220,12 @@ if(ENABLE_FASTCGI)
   add_definitions(-DENABLE_FASTCGI=1)
 endif ()
 
-if(DISABLE_HARDWARE_COUNTERS)
+if(DISABLE_HARDWARE_COUNTERS OR NOT LINUX)
   add_definitions(-DNO_HARDWARE_COUNTERS=1)
 endif ()
 
 if(ENABLE_AVX2)
   add_definitions(-DENABLE_AVX2=1)
-endif()
-
-if(PACKED_TV)
-  # Allows a packed tv build
-  add_definitions(-DPACKED_TV=1)
 endif()
 
 # enable the OSS options if we have any
@@ -231,12 +254,19 @@ if (NOT PCRE_LIBRARY)
   include_directories("${TP_DIR}/pcre")
 endif()
 
-include_directories("${TP_DIR}/fastlz")
+if (NOT FASTLZ_LIBRARY)
+  include_directories("${TP_DIR}/fastlz")
+endif()
+
 include_directories("${TP_DIR}/timelib")
 include_directories("${TP_DIR}/libafdt/src")
 include_directories("${TP_DIR}/libmbfl")
 include_directories("${TP_DIR}/libmbfl/mbfl")
 include_directories("${TP_DIR}/libmbfl/filter")
+if (ENABLE_MCROUTER)
+  include_directories("${TP_DIR}/mcrouter")
+endif()
+
 add_definitions(-DNO_LIB_GFLAGS)
 include_directories("${TP_DIR}/folly")
 include_directories("${TP_DIR}/thrift")

@@ -21,10 +21,11 @@
 
 #include <folly/ScopeGuard.h>
 
+#include "hphp/runtime/base/array-data-defs.h"
 #include "hphp/runtime/base/strings.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/tv-conversions.h"
-#include "hphp/runtime/ext/ext_math.h"
+#include "hphp/runtime/ext/std/ext_std_math.h"
 #include "hphp/util/overflow.h"
 
 namespace HPHP {
@@ -63,7 +64,7 @@ TypedNum numericConvHelper(Cell cell) {
       throw_bad_array_operand();
 
     case KindOfObject:
-      return make_int(cell.m_data.pobj->o_toInt64());
+      return make_int(cell.m_data.pobj->toInt64());
 
     case KindOfResource:
       return make_int(cell.m_data.pres->o_toInt64());
@@ -302,7 +303,6 @@ StringData* stringBitOp(BitOp bop, SzOp sop, StringData* s1, StringData* s2) {
   }
   newStr->setSize(newLen);
 
-  newStr->setRefCount(1);
   return newStr;
 }
 
@@ -328,7 +328,10 @@ Cell cellBitOp(StrLenOp strLenOp, Cell c1, Cell c2) {
 template<class Op>
 void cellBitOpEq(Op op, Cell& c1, Cell c2) {
   auto const result = op(c1, c2);
-  cellSet(result, c1);
+  auto const type = c1.m_type;
+  auto const data = c1.m_data.num;
+  tvCopy(result, c1);
+  tvRefcountedDecRefHelper(type, data);
 }
 
 // Op must implement the interface described for cellIncDecOp.
@@ -345,7 +348,7 @@ void stringIncDecOp(Op op, Cell& cell) {
 
   int64_t ival;
   double dval;
-  auto const dt = sd->isNumericWithVal(ival, dval, true /* allow_errors */);
+  auto const dt = sd->isNumericWithVal(ival, dval, false /* allow_errors */);
 
   if (dt == KindOfInt64) {
     decRefStr(sd);
@@ -425,13 +428,12 @@ struct IncBase {
       auto const tmp = StringData::Make(sd, CopyString);
       auto const tmp2 = tmp->increment();
       if (tmp2 != tmp) {
-        assert(tmp->getCount() == 0);
+        assert(tmp->hasExactlyOneRef());
         tmp->release();
         return tmp2;
       }
       return tmp;
     }();
-    newSd->incRefCount();
     decRefStr(sd);
     cellCopy(make_tv<KindOfString>(newSd), cell);
   }
@@ -514,7 +516,7 @@ Cell cellDiv(Cell c1, Cell c2) {
 }
 
 Cell cellPow(Cell c1, Cell c2) {
-  return *f_pow(tvAsVariant(&c1), tvAsVariant(&c2)).asCell();
+  return *HHVM_FN(pow)(tvAsVariant(&c1), tvAsVariant(&c2)).asCell();
 }
 
 Cell cellMod(Cell c1, Cell c2) {
@@ -631,7 +633,6 @@ void cellBitNot(Cell& cell) {
           cell.m_data.pstr->slice(),
           CopyString
         );
-        newSd->incRefCount();
         cell.m_data.pstr->decRefCount(); // can't go to zero
         cell.m_data.pstr = newSd;
         cell.m_type = KindOfString;

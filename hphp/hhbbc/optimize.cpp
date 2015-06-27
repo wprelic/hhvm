@@ -29,7 +29,6 @@
 
 #include "hphp/runtime/vm/hhbc.h"
 #include "hphp/runtime/base/datatype.h"
-#include "hphp/runtime/base/complex-types.h"
 
 #include "hphp/hhbbc/hhbbc.h"
 #include "hphp/hhbbc/analyze.h"
@@ -178,9 +177,6 @@ bool hasObviousStackOutput(Op op) {
   case Op::NewArray:
   case Op::NewPackedArray:
   case Op::NewStructArray:
-  case Op::NewVArray:
-  case Op::NewMIArray:
-  case Op::NewMSArray:
   case Op::AddElemC:
   case Op::AddElemV:
   case Op::AddNewElemC:
@@ -225,8 +221,6 @@ bool hasObviousStackOutput(Op op) {
   case Op::IsTypeC:
   case Op::IsTypeL:
   case Op::OODeclExists:
-  case Op::Floor:
-  case Op::Ceil:
     return true;
 
   // Consider CGetL obvious because if we knew the type of the local,
@@ -433,7 +427,19 @@ void first_pass(const Index& index,
     };
 
     auto const flags = step(interp, op);
-    srcStack.resize(state.stack.size(), op.op);
+
+    if (op.op == Op::CGetL2) {
+      srcStack.insert(srcStack.end() - 1, op.op);
+    } else if (op.op == Op::CGetL3) {
+      srcStack.insert(srcStack.end() - 2, op.op);
+    } else {
+      for (int i = 0; i < op.numPop(); i++) {
+        srcStack.pop_back();
+      }
+      for (int i = 0; i < op.numPush(); i++) {
+        srcStack.push_back(op.op);
+      }
+    }
 
     /*
      * We only try to remove mid-block unreachable code if we're not in an FPI

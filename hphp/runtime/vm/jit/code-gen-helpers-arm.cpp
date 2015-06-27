@@ -20,6 +20,10 @@
 #include "hphp/runtime/vm/jit/abi-arm.h"
 #include "hphp/runtime/vm/jit/back-end.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/vasm.h"
+#include "hphp/runtime/vm/jit/vasm-emit.h"
+#include "hphp/runtime/vm/jit/vasm-instr.h"
+#include "hphp/runtime/vm/jit/vasm-reg.h"
 
 namespace HPHP { namespace jit { namespace arm {
 
@@ -32,12 +36,6 @@ void emitRegGetsRegPlusImm(vixl::MacroAssembler& as,
   } else if (dstReg.code() != srcReg.code()) {
     as.  Mov  (dstReg, srcReg);
   } // else nothing
-}
-
-//////////////////////////////////////////////////////////////////////
-
-void emitStoreRetIntoActRec(vixl::MacroAssembler& a) {
-  a.  Str  (rLinkReg, rStashedAR[AROFF(m_savedRip)]);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -76,7 +74,7 @@ Vpoint emitCall(Vout& v, CppCall call, RegSet args) {
   PhysReg rHostCall(rHostCallReg);
   switch (call.kind()) {
   case CppCall::Kind::Direct:
-    v << ldimm{reinterpret_cast<intptr_t>(call.address()), rHostCall};
+    v << ldimmq{reinterpret_cast<intptr_t>(call.address()), rHostCall};
     break;
   case CppCall::Kind::Virtual:
     v << load{arg0[0], rHostCall};
@@ -130,49 +128,38 @@ void emitRegRegMove(vixl::MacroAssembler& a, const vixl::CPURegister& dst,
 
 //////////////////////////////////////////////////////////////////////
 
-void emitTestSurpriseFlags(vixl::MacroAssembler& a) {
-  // Keep this in sync with vasm version below
-  static_assert(RequestInjectionData::LastFlag < (1LL << 32),
-                "Translator assumes RequestInjectionFlags fit in 32-bit int");
-  a.  Ldr   (rAsm.W(), rVmTl[RDS::kConditionFlagsOff]);
-  a.  Tst   (rAsm.W(), rAsm.W());
+void emitTestSurpriseFlags(vixl::MacroAssembler& a, PhysReg rds) {
+  not_reached();
 }
 
-Vreg emitTestSurpriseFlags(Vout& v) {
-  // Keep this in sync with arm version above
-  static_assert(RequestInjectionData::LastFlag < (1LL << 32),
-                "Translator assumes RequestInjectionFlags fit in 32-bit int");
-  PhysReg rds{rVmTl};
-  auto flags = v.makeReg();
-  auto sf = v.makeReg();
-  v << loadl{rds[RDS::kConditionFlagsOff], flags};
-  v << testl{flags, flags, sf};
-  return sf;
+Vreg emitTestSurpriseFlags(Vout& v, Vreg rds) {
+  not_reached();
 }
 
 void emitCheckSurpriseFlagsEnter(CodeBlock& mainCode, CodeBlock& coldCode,
-                                 jit::Fixup fixup) {
+                                 PhysReg rds, jit::Fixup fixup) {
   // keep this in sync with vasm version below
   vixl::MacroAssembler a { mainCode };
   vixl::MacroAssembler acold { coldCode };
 
-  emitTestSurpriseFlags(a);
+  emitTestSurpriseFlags(a, rds);
   mcg->backEnd().emitSmashableJump(mainCode, coldCode.frontier(), CC_NZ);
 
   acold.  Mov  (argReg(0), rVmFp);
 
   auto fixupAddr =
       emitCallWithinTC(acold, mcg->tx().uniqueStubs.functionEnterHelper);
-  mcg->recordSyncPoint(fixupAddr, fixup.pcOffset, fixup.spOffset);
+  mcg->recordSyncPoint(fixupAddr, fixup);
   mcg->backEnd().emitSmashableJump(coldCode, mainCode.frontier(), CC_None);
 }
 
-void emitCheckSurpriseFlagsEnter(Vout& v, Vout& vc, jit::Fixup fixup) {
+void emitCheckSurpriseFlagsEnter(Vout& v, Vout& vc, Vreg rds,
+                                 jit::Fixup fixup) {
   // keep this in sync with arm version above
   PhysReg fp{rVmFp}, arg0{argReg(0)};
   auto surprise = vc.makeBlock();
   auto done = v.makeBlock();
-  auto sf = emitTestSurpriseFlags(v);
+  auto sf = emitTestSurpriseFlags(v, rds);
   v << jcc{CC_NZ, sf, {done, surprise}};
 
   vc = surprise;
@@ -181,24 +168,6 @@ void emitCheckSurpriseFlagsEnter(Vout& v, Vout& vc, jit::Fixup fixup) {
   vc << syncpoint{fixup};
   vc << jmp{done};
   v = done;
-}
-
-//////////////////////////////////////////////////////////////////////
-
-void emitEagerVMRegSave(vixl::MacroAssembler& a, RegSaveFlags flags) {
-  a.    Str  (rVmSp, rVmTl[RDS::kVmspOff]);
-  if ((bool)(flags & RegSaveFlags::SaveFP)) {
-    a.  Str  (rVmFp, rVmTl[RDS::kVmfpOff]);
-  }
-
-  if ((bool)(flags & RegSaveFlags::SavePC)) {
-    // m_fp->m_func->m_unit->m_bc
-    a.  Ldr  (rAsm, rVmFp[AROFF(m_func)]);
-    a.  Ldr  (rAsm, rAsm[Func::unitOff()]);
-    a.  Ldr  (rAsm, rAsm[Unit::bcOff()]);
-    a.  Add  (rAsm, rAsm, vixl::Operand(argReg(0), vixl::UXTW));
-    a.  Str  (rAsm, rVmTl[RDS::kVmpcOff]);
-  }
 }
 
 //////////////////////////////////////////////////////////////////////

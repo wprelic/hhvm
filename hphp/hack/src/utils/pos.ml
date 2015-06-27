@@ -67,6 +67,11 @@ let inside p line char_pos =
     else if line = last_line then char_pos <= (p.pos_end.pos_cnum - p.pos_end.pos_bol)
     else line > first_line && line < last_line
 
+let contains pos_container pos =
+  filename pos_container = filename pos &&
+    pos.pos_start.pos_cnum >= pos_container.pos_start.pos_cnum &&
+    pos.pos_end.pos_cnum <= pos_container.pos_end.pos_cnum
+
 let make file (lb:Lexing.lexbuf) =
   let pos_start = lexeme_start_p lb in
   let pos_end = lexeme_end_p lb in
@@ -98,8 +103,19 @@ let set_line pos value =
 
 let to_absolute p = { p with pos_file = Relative_path.to_absolute (p.pos_file) }
 
+(* Compare by filename, then tie-break by start position, and finally by the
+ * end position *)
 let compare x y =
-  String.compare (string (to_absolute x)) (string (to_absolute y))
+  let rec seq = function
+    | [] -> 0
+    | f :: rl ->
+        let result = f x y in
+        if result <> 0 then result else seq rl
+  in
+  seq [(fun x y -> compare x.pos_file y.pos_file);
+       (fun x y -> compare x.pos_start.pos_lnum y.pos_start.pos_lnum);
+       (fun x y -> compare x.pos_start.pos_cnum y.pos_start.pos_cnum);
+       (fun x y -> compare x.pos_end.pos_cnum y.pos_end.pos_cnum)]
 
 module Map = MyMap (struct
   type path = t

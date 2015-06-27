@@ -22,6 +22,8 @@
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/variable-unserializer.h"
 #include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/zend-functions.h"
+#include "hphp/runtime/ext/xdebug/ext_xdebug.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/server/http-protocol.h"
 
@@ -35,13 +37,14 @@ const StaticString
   s_integer("integer"),
   s_int("int"),
   s_float("float"),
+  s_double("double"),
   s_string("string"),
   s_object("object"),
   s_array("array"),
   s_null("null");
 
 String HHVM_FUNCTION(gettype, const Variant& v) {
-  if (v.getType() == KindOfResource && v.getResourceData()->isInvalid()) {
+  if (v.getType() == KindOfResource && v.toCResRef().isInvalid()) {
     return s_unknown_type;
   }
   return getDataTypeString(v.getType());
@@ -73,6 +76,7 @@ bool HHVM_FUNCTION(settype, VRefParam var, const String& type) {
   else if (type == s_integer) var = var.toInt64();
   else if (type == s_int    ) var = var.toInt64();
   else if (type == s_float  ) var = var.toDouble();
+  else if (type == s_double ) var = var.toDouble();
   else if (type == s_string ) var = var.toString();
   else if (type == s_array  ) var = var.toArray();
   else if (type == s_object ) var = var.toObject();
@@ -118,7 +122,7 @@ bool HHVM_FUNCTION(is_object, const Variant& v) {
 }
 
 bool HHVM_FUNCTION(is_resource, const Variant& v) {
-  return (v.getType() == KindOfResource && !v.getResourceData()->isInvalid());
+  return (v.getType() == KindOfResource && !v.toCResRef().isInvalid());
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -170,6 +174,12 @@ static ALWAYS_INLINE void do_var_dump(VariableSerializer vs,
 
 void HHVM_FUNCTION(var_dump, const Variant& expression,
                              const Array& _argv /*=null_array */) {
+  if (UNLIKELY(XDEBUG_GLOBAL(OverloadVarDump) &&
+               XDEBUG_GLOBAL(DefaultEnable))) {
+    HHVM_FN(xdebug_var_dump)(expression, _argv);
+    return;
+  }
+
   VariableSerializer vs(VariableSerializer::Type::VarDump, 0, 2);
   do_var_dump(vs, expression);
 
@@ -184,13 +194,20 @@ void HHVM_FUNCTION(debug_zval_dump, const Variant& variable) {
   vs.serialize(variable, false);
 }
 
+const StaticString
+  s_Null("N;"),
+  s_True("b:1;"),
+  s_False("b:0;"),
+  s_Res("i:0;"),
+  s_EmptyArray("a:0:{}");
+
 String HHVM_FUNCTION(serialize, const Variant& value) {
   switch (value.getType()) {
     case KindOfUninit:
     case KindOfNull:
-      return "N;";
+      return s_Null;
     case KindOfBoolean:
-      return value.getBoolean() ? "b:1;" : "b:0;";
+      return value.getBoolean() ? s_True : s_False;
     case KindOfInt64: {
       StringBuffer sb;
       sb.append("i:");
@@ -210,10 +227,10 @@ String HHVM_FUNCTION(serialize, const Variant& value) {
       return sb.detach();
     }
     case KindOfResource:
-      return "i:0;";
+      return s_Res;
     case KindOfArray: {
       ArrayData *arr = value.getArrayData();
-      if (arr->empty()) return "a:0:{}";
+      if (arr->empty()) return s_EmptyArray;
       // fall-through
     }
     case KindOfDouble:
@@ -238,12 +255,13 @@ Variant HHVM_FUNCTION(unserialize, const String& str,
 
 ALWAYS_INLINE
 static Array get_defined_vars() {
-  VarEnv* v = g_context->getVarEnv();
+  VarEnv* v = g_context->getOrCreateVarEnv();
   return v ? v->getDefinedVariables() : empty_array();
 }
 
 Array HHVM_FUNCTION(get_defined_vars) {
-  raise_disallowed_dynamic_call("extract should not be called dynamically");
+  raise_disallowed_dynamic_call("get_defined_vars should not be "
+    "called dynamically");
   return get_defined_vars();
 }
 
@@ -263,10 +281,10 @@ static const Func* arGetContextFunc(const ActRec* ar) {
   if (ar->m_func->isPseudoMain() || ar->m_func->isBuiltin()) {
     // Pseudomains inherit the context of their caller
     auto const context = g_context.getNoCheck();
-    ar = context->getPrevVMStateUNSAFE(ar);
+    ar = context->getPrevVMState(ar);
     while (ar != nullptr &&
              (ar->m_func->isPseudoMain() || ar->m_func->isBuiltin())) {
-      ar = context->getPrevVMStateUNSAFE(ar);
+      ar = context->getPrevVMState(ar);
     }
     if (ar == nullptr) {
       return nullptr;
@@ -351,7 +369,7 @@ int64_t extract_impl(VRefParam vref_array,
   }
 
   VMRegAnchor _;
-  auto const varEnv = g_context->getVarEnv();
+  auto const varEnv = g_context->getOrCreateVarEnv();
   if (!varEnv) return 0;
 
   if (UNLIKELY(reference)) {

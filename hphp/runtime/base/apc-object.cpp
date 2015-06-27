@@ -24,6 +24,7 @@
 #include "hphp/runtime/base/data-walker.h"
 #include "hphp/runtime/base/apc-handle.h"
 #include "hphp/runtime/base/apc-handle-defs.h"
+#include "hphp/runtime/base/apc-collection.h"
 #include "hphp/runtime/base/externals.h"
 #include "hphp/runtime/base/array-init.h"
 #include "hphp/runtime/base/array-iterator.h"
@@ -53,30 +54,31 @@ APCObject::APCObject(ObjectData* obj, uint32_t propCount)
   , m_propCount{propCount}
 {}
 
-APCHandle* APCObject::Construct(ObjectData* objectData, size_t& size) {
+APCHandle::Pair APCObject::Construct(ObjectData* objectData) {
   // This function assumes the object and object/array down the tree
   // have no internal references and do not implement the serializable
   // interface.
   assert(!objectData->instanceof(SystemLib::s_SerializableClass));
 
   Array odProps;
-  objectData->o_getArray(odProps, false);
+  objectData->o_getArray(odProps);
   auto const propCount = odProps.size();
 
-  size = sizeof(APCObject) + sizeof(Prop) * propCount;
+  auto size = sizeof(APCObject) + sizeof(Prop) * propCount;
   auto const apcObj = new (std::malloc(size)) APCObject(objectData, propCount);
-  if (!propCount) return apcObj->getHandle();
+  if (!propCount) return {apcObj->getHandle(), size};
 
   auto prop = apcObj->props();
-  for (ArrayIter it(odProps); !it.end(); it.next()) {
+  for (ArrayIter it(odProps); !it.end(); it.next(), ++prop) {
     Variant key(it.first());
     assert(key.isString());
     const Variant& value = it.secondRef();
-    APCHandle *val = nullptr;
     if (!value.isNull()) {
-      size_t s = 0;
-      val = APCHandle::Create(value, s, false, true, true);
-      size += s;
+      auto val = APCHandle::Create(value, false, true, true);
+      prop->val = val.handle;
+      size += val.size;
+    } else {
+      prop->val = nullptr;
     }
 
     const String& keySD = key.asCStrRef();
@@ -96,20 +98,15 @@ APCHandle* APCObject::Construct(ObjectData* objectData, size_t& size) {
           prop->ctx = makeStaticString(cls.get());
         }
       }
-
       prop->name = makeStaticString(keySD.substr(subLen));
     } else {
       prop->ctx = nullptr;
       prop->name = makeStaticString(keySD.get());
     }
-
-    prop->val = val;
-
-    ++prop;
   }
   assert(prop == apcObj->props() + propCount);
 
-  return apcObj->getHandle();
+  return {apcObj->getHandle(), size};
 }
 
 ALWAYS_INLINE
@@ -134,22 +131,19 @@ void APCObject::Delete(APCHandle* handle) {
 
 //////////////////////////////////////////////////////////////////////
 
-APCHandle* APCObject::MakeAPCObject(
-    APCHandle* obj, size_t& size, const Variant& value) {
+APCHandle::Pair APCObject::MakeAPCObject(APCHandle* obj, const Variant& value) {
   if (!value.is(KindOfObject) || obj->objAttempted()) {
-    return nullptr;
+    return {nullptr, 0};
   }
   obj->setObjAttempted();
   ObjectData *o = value.getObjectData();
   DataWalker walker(DataWalker::LookupFeature::DetectSerializable);
   DataWalker::DataFeature features = walker.traverseData(o);
-  if (features.isCircular() ||
-      features.hasCollection() ||
-      features.hasSerializableReference()) {
-    return nullptr;
+  if (features.isCircular || features.hasSerializable) {
+    return {nullptr, 0};
   }
-  APCHandle* tmp = APCHandle::Create(value, size, false, true, true);
-  tmp->setObjAttempted();
+  auto tmp = APCHandle::Create(value, false, true, true);
+  tmp.handle->setObjAttempted();
   return tmp;
 }
 
@@ -158,12 +152,13 @@ Variant APCObject::MakeObject(const APCHandle* handle) {
     auto const serObj = APCString::fromHandle(handle)->getStringData();
     return apc_unserialize(serObj->data(), serObj->size());
   }
+  if (handle->isAPCCollection()) {
+    return APCCollection::fromHandle(handle)->createObject();
+  }
   return APCObject::fromHandle(handle)->createObject();
 }
 
 Object APCObject::createObject() const {
-  Object obj;
-
   const Class* klass;
   if (auto const c = m_cls.left()) {
     klass = c;
@@ -172,11 +167,11 @@ Object APCObject::createObject() const {
     if (!klass) {
       Logger::Error("APCObject::getObject(): Cannot find class %s",
                     m_cls.right()->data());
-      return obj;
+      return Object{};
     }
   }
-  obj = ObjectData::newInstance(const_cast<Class*>(klass));
-  obj.get()->clearNoDestruct();
+  Object obj{const_cast<Class*>(klass)};
+  obj->clearNoDestruct();
 
   auto prop = props();
   auto const propEnd = prop + m_propCount;

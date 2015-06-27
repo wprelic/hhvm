@@ -18,7 +18,7 @@
 #ifndef incl_HPHP_EXT_HOTPROFILER_H_
 #define incl_HPHP_EXT_HOTPROFILER_H_
 
-#include "hphp/runtime/ext/ext_fb.h"
+#include "hphp/runtime/base/request-local.h"
 
 #ifdef __FreeBSD__
 #include <sys/param.h>
@@ -67,19 +67,20 @@ namespace HPHP {
 // classes
 
 /**
- * All information we collect about a frame.
+ * Information every Profiler collects about a frame.
+ * Subclasses of Profiler may subclass this as well,
+ * in case they need additional information,
+ * and then override allocateFrame().
  */
 class Frame {
 public:
-  Frame          *m_parent;      // ptr to parent frame
-  const char     *m_name;        // function name
-  uint8_t           m_hash_code;   // hash_code for the function name
-  int             m_recursion;   // recursion level for function
+  Frame          *m_parent;        // pointer to parent frame
+  const char     *m_name;          // function name
+  uint8_t         m_hash_code;     // hash_code for the function name
+  int             m_recursion;     // recursion level for function
 
-  uint64_t          m_tsc_start;   // start value for TSC counter
-  int64_t           m_mu_start;    // memory usage
-  int64_t           m_pmu_start;   // peak memory usage
-  int64_t           m_vtsc_start;    // user/sys time start
+  virtual ~Frame() {
+  }
 
   /**
    * Returns formatted function name
@@ -131,8 +132,7 @@ enum Flag {
 /**
  * Maintain profiles of a running stack.
  */
-class Profiler {
-public:
+struct Profiler {
   explicit Profiler(bool needCPUAffinity);
   virtual ~Profiler();
 
@@ -179,17 +179,6 @@ public:
   static bool extractStats(phpret& ret, StatsMap& stats, int flags,
                            int64_t MHz);
 
-  bool m_successful;
-
-  int64_t    m_MHz; // cpu freq for either the local cpu or the saved trace
-  Frame    *m_stack;      // top of the profile stack
-
-  static bool s_rand_initialized;
-
-  cpu_set_t m_prev_mask;               // saved cpu affinity
-  Frame    *m_frame_free_list;         // freelist of Frame
-  uint8_t     m_func_hash_counters[256]; // counter table by hash code;
-
   /*
    * A hash function to calculate a 8-bit hash code for a function name.
    * This is based on a small modification to 'zend_inline_hash_func' by summing
@@ -217,20 +206,28 @@ public:
 
   /**
    * Fast allocate a Frame structure. Picks one from the
-   * free list if available, else does an actual allocate.
+   * free list if available, else calls allocateFrame
+   * for an actual allocate.
    */
   Frame *createFrame(const char *symbol) {
     Frame *p = m_frame_free_list;
     if (p) {
       m_frame_free_list = p->m_parent;
     } else {
-      p = (Frame*)malloc(sizeof(Frame));
+      p = allocateFrame ();
     }
     p->m_parent = m_stack;
     p->m_name = symbol;
     p->m_hash_code = hprof_inline_hash(symbol);
     m_stack = p;
     return p;
+  }
+
+  /**
+   * Allocate a Frame structure suitable for this class' needs.
+   */
+  virtual Frame *allocateFrame() {
+    return new Frame();
   }
 
   /**
@@ -245,6 +242,20 @@ public:
     p->m_parent = m_frame_free_list; // we overload the m_parent field here
     m_frame_free_list = p;
   }
+
+public:
+  bool m_successful;
+
+  int64_t    m_MHz; // cpu freq for either the local cpu or the saved trace
+  Frame    *m_stack;      // top of the profile stack
+
+  static bool s_rand_initialized;
+
+  cpu_set_t m_prev_mask;               // saved cpu affinity
+  Frame    *m_frame_free_list;         // freelist of Frame
+  uint8_t     m_func_hash_counters[256]; // counter table by hash code;
+private:
+  bool m_has_affinity;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -261,7 +272,6 @@ enum class ProfilerKind {
 struct ProfilerFactory final : RequestEventHandler {
   static bool EnableNetworkProfiler;
 
-public:
   ProfilerFactory() : m_profiler(nullptr), m_external_profiler(nullptr) {
   }
 
@@ -288,7 +298,10 @@ public:
 
   /**
    * Will stop profiling if currently profiling, regardless of how it was
-   * started.
+   * started.  The Variant returned contains profile information.
+   * Some consumers of the return value may json_encode and then var_dump
+   * the returned value, and may choose to skip that step if the return value
+   * is a null Variant.
    */
   Variant stop();
 
@@ -304,7 +317,6 @@ public:
    * Registers a Profiler to use when ProfilerKind::External is used.
    */
   void setExternalProfiler(Profiler *p) {
-    delete(m_external_profiler);
     m_external_profiler = p;
   }
   Profiler *getExternalProfiler() {

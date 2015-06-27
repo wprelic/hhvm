@@ -18,6 +18,7 @@
 #define incl_HPHP_VM_FUNC_H_
 
 #include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/atomic-countable.h"
 #include "hphp/runtime/base/attr.h"
 #include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/datatype.h"
@@ -33,6 +34,7 @@
 #include "hphp/util/fixed-vector.h"
 #include "hphp/util/hash-map-typedefs.h"
 
+#include <atomic>
 #include <utility>
 #include <vector>
 
@@ -101,17 +103,10 @@ struct FPIEnt {
  * The Func class cannot be safely extended, because variable amounts of memory
  * associated with the Func are allocated before and after the actual object.
  *
- * If the function is a closure, the Func is preceded by a Func* which points
- * to the next cloned closures (closures are cloned in order to transplant them
- * into different implementation contexts).  This pointer is considered
- * mutable, even on const Funcs.
- *
  * All Funcs are also followed by a variable number of function prologue
  * pointers.  Six are statically allocated as part of the Func object, but more
  * may follow, depending on the value of getMaxNumPrologues().
  *
- *              +--------------------------------+ low address
- *              |  [Func** to next closure]      |
  *              +--------------------------------+ Func* address
  *              |  Func object                   |
  *              |                                |
@@ -123,6 +118,7 @@ struct FPIEnt {
  */
 struct Func {
   friend class FuncEmitter;
+  template <typename F> friend void scan(const Func&, F&);
 
   /////////////////////////////////////////////////////////////////////////////
   // Types.
@@ -179,11 +175,10 @@ struct Func {
   ~Func();
 
   /*
-   * Allocate memory for a function, including the extra preceding and
-   * succeeding data.
+   * Allocate memory for a function, including the variable number of prologues
+   * that follow.
    */
-  static void* allocFuncMem(const StringData* name, int numParams,
-                            bool needsNextClonedClosure, bool lowMem);
+  static void* allocFuncMem(int numParams);
 
   /*
    * Destruct and free a Func*.
@@ -203,10 +198,20 @@ struct Func {
    * class's copy of the method.
    */
   Func* clone(Class* cls, const StringData* name = nullptr) const;
-  Func* cloneAndModify(Class* cls, Attr attrs) const;
-  Func* cloneAndSetClass(Class* cls) const {
-    return cloneAndModify(cls, attrs());
-  }
+
+  /*
+   * Reset this function's cls and attrs.
+   *
+   * Used to change the Class scope of a closure method.
+   */
+  void rescope(Class* ctx, Attr attrs);
+
+  /*
+   * Free up a PreFunc for re-use as a cloned Func.
+   *
+   * @requires: isPreFunc()
+   */
+  void freeClone() const;
 
   /*
    * Rename a function and reload it.
@@ -267,15 +272,42 @@ struct Func {
   bool top() const;
 
   /*
-   * The Unit, PreClass, Classes of the function.
-   *
-   * The `baseCls' is the first Class in the inheritance hierarchy which
-   * declares the method; the `cls' is the Class which implements it.
+   * The Unit the function is defined in.
    */
   Unit* unit() const;
+
+  /*
+   * The various Class contexts of a method.
+   *
+   * cls():       The Class context of the method.  This is usually the Class
+   *              which implements the method, but for closure methods (i.e.,
+   *              the __invoke() method on a closure object), it is instead the
+   *              Class that the Closure object is scoped to.
+   * preClass():  The PreClass of the method's cls().  For closures, this still
+   *              corresponds to the Closure subclass, rather than to the
+   *              scoped Class.
+   * baseCls():   The first Class in the inheritance hierarchy which declares
+   *              this method.
+   * implCls():   The Class which implements the method.  Just like cls(), but
+   *              ignores closure scope (so it returns baseCls() for closures).
+   *
+   * It is possible for cls() to be nullptr on a method---this occurs when a
+   * closure method is scoped to a null class context (e.g., if the closure is
+   * created in a non-method function scope).  In this case, only the `cls' is
+   * changed; the `preClass' and `baseCls' will continue to refer to the
+   * PreClass and Class of the closure object.
+   *
+   * The converse also occurs---a function can have a `cls' (and `baseCls')
+   * without being a method.  This happens when a pseudomain is included from a
+   * class context.
+   *
+   * Consequently, none of these methods should be used to test whether the
+   * function is a method; for that purpose, see isMethod().
+   */
+  Class* cls() const;
   PreClass* preClass() const;
   Class* baseCls() const;
-  Class* cls() const;
+  Class* implCls() const;
 
   /*
    * The function's short name (e.g., foo).
@@ -579,8 +611,19 @@ struct Func {
    *
    * Instance methods certainly have $this, but pseudomains may as well, if
    * they were included in the context of an instance method definition.
+   *
+   * Note that closure __invoke() methods that are scoped outside the context
+   * of a class (e.g., in a toplevel non-method function) may /not/ have $this.
    */
   bool mayHaveThis() const;
+
+  /*
+   * Is this Func owned by a PreClass?
+   *
+   * A PreFunc may be "adopted" by a Class when clone() is called, but only the
+   * owning PreClass is allowed to free it.
+   */
+  bool isPreFunc() const;
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -651,33 +694,6 @@ struct Func {
    */
   bool isClosureBody() const;
 
-  /*
-   * Is this function cloned from another closure function in order to
-   * transplant it into a different context?
-   */
-  bool isClonedClosure() const;
-
-private:
-  /*
-   * Closures are allocated with an extra pointer before the Func object
-   * itself.  These are used to chain clones of these closures with different
-   * Class contexts.
-   *
-   * We consider this extra pointer to be a mutable member of Func, hence the
-   * `const' specifier here.
-   *
-   * @requires: isClosureBody()
-   */
-  Func*& nextClonedClosure() const;
-
-  /*
-   * Find the clone of this closure with `cls' as its context.
-   *
-   * Return nullptr if this is not a closure or if no such clone exists.
-   */
-  Func* findCachedClone(Class* cls, Attr attrs) const;
-
-public:
 
   /////////////////////////////////////////////////////////////////////////////
   // Resumables.                                                        [const]
@@ -878,7 +894,7 @@ public:
    * We can burn these into the TC even when functions are not persistent,
    * since only a single name-to-function mapping will exist per request.
    */
-  RDS::Handle funcHandle() const;
+  rds::Handle funcHandle() const;
 
   /*
    * Get and set the function body code pointer.
@@ -911,6 +927,11 @@ public:
    */
   void resetPrologue(int numParams);
   void resetPrologues();
+
+  /*
+   * Smash prologue guards to prevent function from being called.
+   */
+  void smashPrologues();
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -961,12 +982,6 @@ public:
    */
   static const AtomicVector<const Func*>& getFuncVec();
 
-  /*
-   * Profile-guided optimization linkage.
-   */
-  bool shouldPGO() const;
-  void setHot() { m_attrs = (Attr)(m_attrs | AttrHot); }
-
 
   /////////////////////////////////////////////////////////////////////////////
   // Public setters.
@@ -979,7 +994,7 @@ public:
 
   void setAttrs(Attr attrs);
   void setBaseCls(Class* baseCls);
-  void setFuncHandle(RDS::Link<Func*> l);
+  void setFuncHandle(rds::Link<Func*> l);
   void setHasPrivateAncestor(bool b);
   void setMethodSlot(Slot s);
 
@@ -1104,7 +1119,7 @@ private:
     int m_line2;    // Only read if SharedData::m_line2 is kSmallDeltaLimit
   };
 
-  typedef AtomicSmartPtr<SharedData> SharedDataPtr;
+  typedef AtomicSharedPtr<SharedData> SharedDataPtr;
 
   /*
    * SharedData accessors for internal use.
@@ -1136,6 +1151,47 @@ private:
 
 
   /////////////////////////////////////////////////////////////////////////////
+  // Internal types.
+
+  struct ClonedFlag {
+    ClonedFlag() {}
+    ClonedFlag(const ClonedFlag&) {}
+    ClonedFlag& operator=(const ClonedFlag&) = delete;
+
+    std::atomic_flag flag = ATOMIC_FLAG_INIT;
+  };
+
+  /*
+   * Wrapper around std::atomic<Attr> that pretends like it's not atomic.
+   *
+   * Func::m_attrs is only accessed by multiple threads in the closure scoping
+   * process for Closure classes, which is synchronized in Class::rescope().
+   * This wrapper is just to make m_attrs copy-constructible, and there should
+   * never be a race when copying.
+   */
+  struct AtomicAttr {
+    AtomicAttr() {}
+    explicit AtomicAttr(Attr attrs) : m_attrs{attrs} {}
+
+    AtomicAttr(const AtomicAttr& o)
+      : m_attrs{o.m_attrs.load(std::memory_order_relaxed)}
+    {}
+
+    AtomicAttr& operator=(Attr attrs) {
+      m_attrs.store(attrs, std::memory_order_relaxed);
+      return *this;
+    }
+
+    /* implicit */ operator Attr() const {
+      return m_attrs.load(std::memory_order_relaxed);
+    }
+
+  private:
+    std::atomic<Attr> m_attrs;
+  };
+
+
+  /////////////////////////////////////////////////////////////////////////////
   // Constants.
 
 private:
@@ -1147,6 +1203,7 @@ private:
 public:
   static std::atomic<bool>     s_treadmill;
   static std::atomic<uint32_t> s_totalClonedClosures;
+
 
   /////////////////////////////////////////////////////////////////////////////
   // Data members.
@@ -1160,16 +1217,16 @@ private:
   int m_magic;
 #endif
   unsigned char* volatile m_funcBody;
-  mutable RDS::Link<Func*> m_cachedFunc{RDS::kInvalidHandle};
+  mutable rds::Link<Func*> m_cachedFunc{rds::kInvalidHandle};
   FuncId m_funcId{InvalidFuncId};
   LowStringPtr m_fullName;
   LowStringPtr m_name;
   // The first Class in the inheritance hierarchy that declared this method.
   // Note that this may be an abstract class that did not provide an
   // implementation.
-  LowClassPtr m_baseCls{nullptr};
+  LowPtr<Class> m_baseCls{nullptr};
   // The Class that provided this method implementation.
-  LowClassPtr m_cls{nullptr};
+  AtomicLowPtr<Class> m_cls{nullptr};
   union {
     const NamedEntity* m_namedEntity{nullptr};
     Slot m_methodSlot;
@@ -1177,6 +1234,8 @@ private:
   // Atomically-accessed intercept flag.  -1, 0, or 1.
   // TODO(#1114385) intercept should work via invalidation.
   mutable char m_maybeIntercepted;
+  mutable ClonedFlag m_cloned;
+  bool m_isPreFunc : 1;
   bool m_hasPrivateAncestor : 1;
   int m_maxStackCells{0};
   uint64_t m_refBitVal{0};
@@ -1186,7 +1245,7 @@ private:
   // 1 if the last param is not variadic; the 31 most significant bits are the
   // total number of params (including the variadic param).
   uint32_t m_paramCounts{0};
-  Attr m_attrs;
+  AtomicAttr m_attrs;
   // This must be the last field declared in this structure, and the Func class
   // should not be inherited from.
   unsigned char* volatile m_prologueTable[kNumFixedPrologues];
@@ -1208,8 +1267,8 @@ const typename Container::value_type* findEH(const Container& ehtab, Offset o) {
   return eh;
 }
 
-
 ///////////////////////////////////////////////////////////////////////////////
+
 }
 
 #define incl_HPHP_VM_FUNC_INL_H_

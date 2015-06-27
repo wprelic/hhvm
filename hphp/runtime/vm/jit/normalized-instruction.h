@@ -29,10 +29,10 @@
 namespace HPHP { namespace jit {
 ///////////////////////////////////////////////////////////////////////////////
 
-struct DynLocation;
-
 /*
- * A NormalizedInstruction has been decorated with its typed inputs.
+ * A NormalizedInstruction contains information about a decoded bytecode
+ * instruction, including the unit it lives in, decoded immediates, and a few
+ * flags of interest the various parts of the jit.
  */
 struct NormalizedInstruction {
   SrcKey source;
@@ -43,8 +43,7 @@ struct NormalizedInstruction {
                      // known Func* that /this/ instruction is pushing)
   const Unit* m_unit;
 
-  std::vector<DynLocation*> inputs;
-  Type outPred;
+  std::vector<Location> inputs;
   ArgUnion imm[4];
   ImmVector immVec; // vector immediate; will have !isValid() if the
                     // instruction has no vector immediate
@@ -52,12 +51,9 @@ struct NormalizedInstruction {
   // The member codes for the M-vector.
   std::vector<MemberCode> immVecM;
 
-  Offset nextOffset; // for intra-trace* non-call control-flow instructions,
-                     // this is the offset of the next instruction in the trace*
   bool endsRegion:1;
   bool nextIsMerge:1;
   bool preppedByRef:1;
-  bool outputPredicted:1;
   bool ignoreInnerType:1;
 
   /*
@@ -79,18 +75,6 @@ struct NormalizedInstruction {
   ~NormalizedInstruction();
 
   std::string toString() const;
-
-  // Returns a DynLocation that will be destroyed with this
-  // NormalizedInstruction.
-  template<typename... Args>
-  DynLocation* newDynLoc(Args&&... args) {
-    m_dynLocs.push_back(
-      jit::make_unique<DynLocation>(std::forward<Args>(args)...));
-    return m_dynLocs.back().get();
-  }
-
- private:
-  jit::vector<jit::unique_ptr<DynLocation>> m_dynLocs;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

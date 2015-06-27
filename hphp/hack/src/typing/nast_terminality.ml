@@ -10,9 +10,13 @@
 
 open Nast
 
+module SN = Naming_special_names
+
+module FuncTerm = Typing_heap.FuncTerminality
+
 (* Module coded with an exception, if we find a terminal statement we
  * throw the exception Exit.
-*)
+ *)
 module Terminal: sig
   val case: case -> bool
   val block: block -> bool
@@ -28,17 +32,21 @@ end = struct
     | Throw _
     | Return _
     | Expr (_, Yield_break)
-    | Expr (_, Assert (
-            AE_assert (_, False) |
-            AE_invariant ((_, False), _, _) |
-            AE_invariant_violation _))
-    | Expr (_, Call (Cnormal, (_, Id (_, "\\exit")), _, _)) -> raise Exit
+    | Expr (_, Assert (AE_assert (_, False)))
+      -> raise Exit
+    | Expr (_, Call (Cnormal, (_, Id (_, fun_name)), _, _)) ->
+      FuncTerm.raise_exit_if_terminal (FuncTerm.get_fun fun_name)
+    | Expr (_, Call (Cnormal, (_, Class_const (CI cls_id, meth_id)), _, _)) ->
+      FuncTerm.raise_exit_if_terminal
+        (FuncTerm.get_static_meth (snd cls_id) (snd meth_id))
+    | If ((_, True), b1, _) -> terminal inside_case b1
+    | If ((_, False), _, b2) -> terminal inside_case b2
     | If (_, b1, b2) ->
       (try terminal inside_case b1; () with Exit ->
         terminal inside_case b2)
     | Switch (_, cl) ->
       terminal_cl cl
-    | Try (b, catch_list, fb) ->
+    | Try (b, catch_list, _) ->
       (* Note: return inside a finally block is allowed in PHP and
        * overrides any return in try or catch. It is an error in <?hh,
        * however. The only way that a finally block can thus be
@@ -113,19 +121,21 @@ end = struct
     | Throw _
     | Return _
     | Expr (_, Yield_break)
-    | Expr (_, Assert (
-            AE_assert (_, False) |
-            AE_invariant ((_, False), _, _) |
-            AE_invariant_violation _))
-    | Expr (_, Call (Cnormal, (_, Id (_, "exit")), _, _)) -> raise Exit
+    | Expr (_, Assert (AE_assert (_, False))) -> raise Exit
+    | Expr (_, Call (Cnormal, (_, Id (_, fun_name)), _, _)) ->
+      FuncTerm.raise_exit_if_terminal (FuncTerm.get_fun fun_name)
+    | Expr (_, Call (Cnormal, (_, Class_const (CI cls_id, meth_id)), _, _)) ->
+      FuncTerm.raise_exit_if_terminal
+        (FuncTerm.get_static_meth (snd cls_id) (snd meth_id))
+    | If ((_, True), b1, _) -> terminal b1
+    | If ((_, False), _, b2) -> terminal b2
     | If (_, b1, b2) ->
-      (try terminal b1; () with Exit ->
-        terminal b2)
+      (try terminal b1; () with Exit -> terminal b2)
     | Switch (_, cl) ->
       terminal_cl cl
-    | Try (b, catches, fb) ->
-      (* NOTE: contents of fb are not executed in normal flow, so they
-       * cannot contribute to terminality *)
+    | Try (b, catches, _) ->
+      (* NOTE: contents of finally block are not executed in normal flow, so
+       * they cannot contribute to terminality *)
       (try terminal b; () with Exit -> terminal_catchl catches)
     | Do _
     | While _

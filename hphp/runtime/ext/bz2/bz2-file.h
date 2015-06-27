@@ -18,7 +18,7 @@
 #ifndef incl_HPHP_BZ2_FILE_H_
 #define incl_HPHP_BZ2_FILE_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/plain-file.h"
 #include <stdio.h>
 #include <bzlib.h>
@@ -32,25 +32,25 @@ public:
   DECLARE_RESOURCE_ALLOCATION(BZ2File);
 
   // overriding ResourceData
-  const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override { return classnameof(); }
 
   BZ2File();
-  explicit BZ2File(PlainFile* innerFile);
+  explicit BZ2File(SmartPtr<PlainFile>&& innerFile);
   virtual ~BZ2File();
 
-  bool open(const String& filename, const String& mode);
-  bool close();
+  bool open(const String& filename, const String& mode) override;
+  bool close() override;
   int64_t errnu();
   String errstr();
   Array error();
-  virtual bool flush();
-  virtual int64_t readImpl(char * buf, int64_t length);
-  virtual int64_t writeImpl(const char * buf, int64_t length);
-  virtual bool eof();
+  bool flush() override;
+  int64_t readImpl(char * buf, int64_t length) override;
+  int64_t writeImpl(const char * buf, int64_t length) override;
+  bool eof() override;
 
 private:
   BZFILE * m_bzFile;
-  PlainFile * m_innerFile;
+  SmartPtr<PlainFile> m_innerFile;
   bool closeImpl();
 };
 

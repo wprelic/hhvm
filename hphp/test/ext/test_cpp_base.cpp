@@ -15,7 +15,7 @@
 */
 
 #include "hphp/test/ext/test_cpp_base.h"
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/util/logger.h"
 #include "hphp/runtime/base/memory-manager.h"
 #include "hphp/runtime/base/builtin-functions.h"
@@ -24,6 +24,8 @@
 #include "hphp/runtime/ext/std/ext_std_variable.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/server/ip-block-map.h"
+#include "hphp/runtime/server/virtual-host.h"
+#include "hphp/runtime/server/satellite-server.h"
 #include "hphp/system/systemlib.h"
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -35,462 +37,16 @@ TestCppBase::TestCppBase() {
 
 bool TestCppBase::RunTests(const std::string &which) {
   bool ret = true;
-  RUN_TEST(TestString);
-  RUN_TEST(TestArray);
-  RUN_TEST(TestObject);
-  RUN_TEST(TestVariant);
   RUN_TEST(TestIpBlockMap);
+  RUN_TEST(TestSatelliteServer);
+  RUN_TEST(TestVirtualHost);
+  RUN_TEST(TestCollectionHdf);
+  RUN_TEST(TestCollectionIni);
   return ret;
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // building blocks
-
-class Timer {
-public:
-  explicit Timer(const char *name = nullptr) {
-    if (name) m_name = name;
-    gettimeofday(&m_start, 0);
-  }
-
-  int64_t getMicroSeconds() {
-    struct timeval end;
-    gettimeofday(&end, 0);
-    return (end.tv_sec - m_start.tv_sec) * 1000000 +
-      (end.tv_usec - m_start.tv_usec);
-  }
-
-private:
-  std::string m_name;
-  struct timeval m_start;
-};
-
-class SomeClass {
-public:
-  SomeClass() : m_data(0) {}
-  void dump() { printf("data: %d\n", m_data);}
-  int m_data;
-};
-
-///////////////////////////////////////////////////////////////////////////////
-// data types
-
-bool TestCppBase::TestString() {
-  // constructors
-  {
-    VS(String(15).c_str(), "15");
-    VS(String(-15).c_str(), "-15");
-    VS(String(int64_t(12345678912345678LL)).c_str(), "12345678912345678");
-    VS(String(int64_t(-12345678912345678LL)).c_str(), "-12345678912345678");
-    VS(String(5.603).c_str(), "5.603");
-    VS(String("test").c_str(), "test");
-    VS(String(String("test")).c_str(), "test");
-  }
-
-  // informational
-  {
-    VERIFY(String().isNull());
-    VERIFY(!String("").isNull());
-    VERIFY(String().empty());
-    VERIFY(String("").empty());
-    VERIFY(!String("test").empty());
-    VERIFY(String().size() == 0);
-    VERIFY(String().length() == 0);
-    VERIFY(String("").size() == 0);
-    VERIFY(String("").length() == 0);
-    VERIFY(String("test").size() == 4);
-    VERIFY(String("test").length() == 4);
-    VERIFY(!String("2test").isNumeric());
-    VERIFY(!String("2test").isInteger());
-    VERIFY(!String("test").isNumeric());
-    VERIFY(!String("test").isInteger());
-    VERIFY(String("23").isNumeric());
-    VERIFY(String("23").isInteger());
-    VERIFY(String("23.3").isNumeric());
-    VERIFY(!String("23.3").isInteger());
-  }
-
-  // operators
-  {
-    String s;
-    s = "test1";                   VS(s.c_str(), "test1");
-    s = String("test2");           VS(s.c_str(), "test2");
-    s = Variant("test3");          VS(s.c_str(), "test3");
-    s = String("a") + "b";         VS(s.c_str(), "ab");
-    s = String("c") + String("d"); VS(s.c_str(), "cd");
-    s += "efg";                    VS(s.c_str(), "cdefg");
-    s += String("hij");            VS(s.c_str(), "cdefghij");
-  }
-
-  // manipulations
-  {
-    String s = HHVM_FN(strtolower)("Test");
-    VS(s.c_str(), "test");
-  }
-
-  // conversions
-  {
-    VERIFY(!String().toBoolean());
-    VERIFY(String("123").toBoolean());
-    VERIFY(String("123").toByte() == 123);
-    VERIFY(String("32767").toInt16() == 32767);
-    VERIFY(String("1234567890").toInt32() == 1234567890);
-    VERIFY(String("123456789012345678").toInt64() == 123456789012345678LL);
-    VERIFY(String("123.45").toDouble() == 123.45);
-  }
-
-  return Count(true);
-}
-
-static const StaticString s_n0("n0");
-static const StaticString s_n1("n1");
-static const StaticString s_n2("n2");
-static const StaticString s_A("A");
-static const StaticString s_name("name");
-static const StaticString s_1("1");
-
-bool TestCppBase::TestArray() {
-  // Array::Create(), Array constructors and informational
-  {
-    Array arr;
-    VERIFY(arr.empty()); VERIFY(arr.size() == 0); VERIFY(arr.length() == 0);
-    VERIFY(arr.isNull());
-
-    arr = Array::Create();
-    VERIFY(arr.empty()); VERIFY(arr.size() == 0); VERIFY(arr.length() == 0);
-    VERIFY(!arr.isNull());
-
-    arr = Array::Create(0);
-    VERIFY(!arr.empty()); VERIFY(arr.size() == 1); VERIFY(arr.length() == 1);
-    VERIFY(!arr.isNull());
-    VERIFY(arr[0].toInt32() == 0);
-
-    arr = Array::Create("test");
-    VERIFY(!arr.empty()); VERIFY(arr.size() == 1); VERIFY(arr.length() == 1);
-    VERIFY(!arr.isNull());
-    VERIFY(equal(arr[0], String("test")));
-
-    Array arrCopy = arr;
-    arr = Array::Create(arr);
-    VERIFY(!arr.empty()); VERIFY(arr.size() == 1); VERIFY(arr.length() == 1);
-    VERIFY(!arr.isNull());
-    VERIFY(arr[0].toArray().size() == 1);
-    VS(arr[0], arrCopy);
-
-    arr = Array::Create("name", 1);
-    VERIFY(!arr.empty()); VERIFY(arr.size() == 1); VERIFY(arr.length() == 1);
-    VERIFY(!arr.isNull());
-    VERIFY(arr[s_name].toInt32() == 1);
-
-    arr = Array::Create(s_name, "test");
-    VERIFY(!arr.empty()); VERIFY(arr.size() == 1); VERIFY(arr.length() == 1);
-    VERIFY(!arr.isNull());
-    VERIFY(equal(arr[s_name], String("test")));
-
-    arrCopy = arr;
-    arr = Array::Create(s_name, arr);
-    VERIFY(!arr.empty()); VERIFY(arr.size() == 1); VERIFY(arr.length() == 1);
-    VERIFY(!arr.isNull());
-    VS(arr[s_name], arrCopy);
-    VERIFY(arr[s_name].toArray().size() == 1);
-  }
-
-  // iteration
-  {
-    Array arr = make_map_array("n1", "v1", "n2", "v2");
-    int i = 0;
-    for (ArrayIter iter = arr.begin(); iter; ++iter, ++i) {
-      if (i == 0) {
-        VERIFY(equal(iter.first(), String("n1")));
-        VERIFY(equal(iter.second(), String("v1")));
-      } else {
-        VERIFY(equal(iter.first(), String("n2")));
-        VERIFY(equal(iter.second(), String("v2")));
-      }
-    }
-    VERIFY(i == 2);
-  }
-
-  static const StaticString s_Array("Array");
-
-  // conversions
-  {
-    Array arr0;
-    VERIFY(arr0.toBoolean() == false);
-    VERIFY(arr0.toByte() == 0);
-    VERIFY(arr0.toInt16() == 0);
-    VERIFY(arr0.toInt32() == 0);
-    VERIFY(arr0.toInt64() == 0);
-    VERIFY(arr0.toDouble() == 0.0);
-    VERIFY(arr0.toString().empty());
-
-    Array arr1 = Array::Create("test");
-    VERIFY(arr1.toBoolean() == true);
-    VERIFY(arr1.toByte() == 1);
-    VERIFY(arr1.toInt16() == 1);
-    VERIFY(arr1.toInt32() == 1);
-    VERIFY(arr1.toInt64() == 1);
-    VERIFY(arr1.toDouble() == 1.0);
-    VERIFY(arr1.toString() == s_Array);
-  }
-
-  // offset
-  {
-    Array arr;
-    arr.set(0, "v1");
-    arr.set(1, "v2");
-    VS(arr, make_packed_array("v1", "v2"));
-  }
-  {
-    Array arr;
-    arr.set(s_n1, "v1");
-    arr.set(s_n2, "v2");
-    VS(arr, make_map_array("n1", "v1", "n2", "v2"));
-  }
-  {
-    Array arr;
-    arr.lvalAt(0) = String("v1");
-    arr.lvalAt(1) = String("v2");
-    VS(arr, make_packed_array("v1", "v2"));
-  }
-  {
-    Array arr;
-    arr.lvalAt(s_n1) = String("v1");
-    arr.lvalAt(s_n2) = String("v2");
-    VS(arr, make_map_array("n1", "v1", "n2", "v2"));
-  }
-  {
-    Array arr;
-    Variant name = "name";
-    arr.lvalAt(name) = String("value");
-    VS(arr, make_map_array("name", "value"));
-  }
-
-  {
-    Array arr;
-    arr.lvalAt(1) = 10;
-    VS(arr[1], 10);
-    VS(arr[Variant(1.5)], 10);
-    VS(arr[s_1], 10);
-    VS(arr[Variant("1")], 10);
-  }
-  {
-    Array arr;
-    arr.lvalAt(Variant(1.5)) = 10;
-    VS(arr[1], 10);
-    VS(arr[Variant(1.5)], 10);
-    VS(arr[s_1], 10);
-    VS(arr[Variant("1")], 10);
-  }
-  {
-    Array arr;
-    arr.lvalAt(s_1) = 10;
-    VS(arr[1], 10);
-    VS(arr[Variant(1.5)], 10);
-    VS(arr[s_1], 10);
-    VS(arr[Variant("1")], 10);
-  }
-  {
-    Array arr;
-    arr.lvalAt(Variant("1")) = 10;
-    VS(arr[1], 10);
-    VS(arr[Variant(1.5)], 10);
-    VS(arr[s_1], 10);
-    VS(arr[Variant("1")], 10);
-  }
-
-  // membership
-  {
-    Array arr;
-    arr.lvalAt(0) = String("v1");
-    arr.lvalAt(1) = String("v2");
-    VERIFY(arr.exists(0));
-    arr.remove(0);
-    VERIFY(!arr.exists(0));
-    VS(arr, Array::Create(1, "v2"));
-    arr.append("v3");
-    VS(arr, make_map_array(1, "v2", 2, "v3"));
-  }
-  {
-    static const StaticString s_0("0");
-    Array arr;
-    arr.lvalAt(0) = String("v1");
-    VERIFY(arr.exists(0));
-    arr.remove(String(s_0));
-    VERIFY(!arr.exists(0));
-  }
-  {
-    Array arr;
-    arr.lvalAt(0) = String("v1");
-    VERIFY(arr.exists(0));
-    arr.remove(Variant("0"));
-    VERIFY(!arr.exists(0));
-  }
-  {
-    Array arr;
-    arr.lvalAt(0) = String("v1");
-    VERIFY(arr.exists(0));
-    arr.remove(Variant(Variant("0")));
-    VERIFY(!arr.exists(0));
-  }
-  {
-    Array arr;
-    arr.lvalAt(0) = String("v1");
-    VERIFY(arr.exists(0));
-    arr.remove(Variant(Variant(0.5)));
-    VERIFY(!arr.exists(0));
-  }
-  {
-    Array arr;
-    arr.lvalAt(Variant()) = 123;
-    VERIFY(arr.exists(empty_string_ref));
-    arr.remove(Variant());
-    VERIFY(!arr.exists(empty_string_ref));
-  }
-  {
-    Array arr;
-    arr.lvalAt(s_n1) = String("v1");
-    arr.lvalAt(s_n2) = String("v2");
-    VERIFY(arr.exists(s_n1));
-    arr.remove(s_n1);
-    VERIFY(!arr.exists(s_n1));
-    VS(arr, Array::Create(s_n2, "v2"));
-    arr.append("v3");
-    VS(arr, make_map_array("n2", "v2", 0, "v3"));
-  }
-  {
-    Array arr;
-    arr.lvalAt() = String("test");
-    VS(arr, make_packed_array("test"));
-  }
-  {
-    Array arr;
-    arr.lvalAt(s_name) = String("value");
-    VERIFY(arr.exists(s_name));
-  }
-  {
-    Array arr;
-    arr.lvalAt(1) = String("value");
-    VERIFY(arr.exists(1));
-    VERIFY(arr.exists(s_1));
-    VERIFY(arr.exists(Variant("1")));
-    VERIFY(arr.exists(Variant(1)));
-    VERIFY(arr.exists(Variant(1.5)));
-  }
-  {
-    Array arr;
-    arr.lvalAt(s_1) = String("value");
-    VERIFY(arr.exists(1));
-    VERIFY(arr.exists(s_1));
-    VERIFY(arr.exists(Variant("1")));
-    VERIFY(arr.exists(Variant(1)));
-    VERIFY(arr.exists(Variant(1.5)));
-  }
-  {
-    Array arr;
-    arr.lvalAt(Variant(1.5)) = String("value");
-    VERIFY(arr.exists(1));
-    VERIFY(arr.exists(s_1));
-    VERIFY(arr.exists(Variant("1")));
-    VERIFY(arr.exists(Variant(1)));
-    VERIFY(arr.exists(Variant(1.5)));
-  }
-  {
-    Array arr;
-    arr.lvalAt(Variant("1")) = String("value");
-    VERIFY(arr.exists(1));
-    VERIFY(arr.exists(s_1));
-    VERIFY(arr.exists(Variant("1")));
-    VERIFY(arr.exists(Variant(1)));
-    VERIFY(arr.exists(Variant(1.5)));
-  }
-
-  // merge
-  {
-    Array arr = Array::Create(0) + Array::Create(1);
-    VS(arr, Array::Create(0));
-    arr += make_packed_array(0, 1);
-    VS(arr, make_packed_array(0, 1));
-
-    arr = Array::Create(0).merge(Array::Create(1));
-    VS(arr, make_packed_array(0, 1));
-    arr = arr.merge(make_packed_array(0, 1));
-    VS(arr, make_packed_array(0, 1, 0, 1));
-
-    arr = Array::Create("s0").merge(Array::Create("s1"));
-    VS(arr, make_packed_array("s0", "s1"));
-
-    arr = Array::Create("n0", "s0") + Array::Create("n1", "s1");
-    VS(arr, make_map_array("n0", "s0", "n1", "s1"));
-    arr += make_map_array("n0", "s0", "n1", "s1");
-    VS(arr, make_map_array("n0", "s0", "n1", "s1"));
-
-    arr = Array::Create("n0", "s0").merge(Array::Create("n1", "s1"));
-    VS(arr, make_map_array("n0", "s0", "n1", "s1"));
-    Array arrX = make_map_array("n0", "s2", "n1", "s3");
-    arr = arr.merge(arrX);
-    VS(arr, make_map_array("n0", "s2", "n1", "s3"));
-  }
-
-  {
-    Array arr = make_map_array(0, "a", 1, "b");
-    VERIFY(arr->isVectorData());
-  }
-  {
-    Array arr = make_map_array(1, "a", 0, "b");
-    VERIFY(!arr->isVectorData());
-  }
-  {
-    Array arr = make_map_array(1, "a", 2, "b");
-    VERIFY(!arr->isVectorData());
-  }
-  {
-    Array arr = make_map_array(1, "a");
-    arr.set(0, "b");
-    VERIFY(!arr->isVectorData());
-  }
-
-  return Count(true);
-}
-
-bool TestCppBase::TestObject() {
-  {
-    String s = "O:1:\"B\":1:{s:3:\"obj\";O:1:\"A\":1:{s:1:\"a\";i:10;}}";
-    Variant v = unserialize_from_string(s);
-    VERIFY(v.isObject());
-    auto o = v.toObject();
-    VS(o->o_getClassName().asString(), "__PHP_Incomplete_Class");
-    auto os = HHVM_FN(serialize)(o);
-    VS(os, "O:1:\"B\":1:{s:3:\"obj\";O:1:\"A\":1:{s:1:\"a\";i:10;}}");
-  }
-  return Count(true);
-}
-
-bool TestCppBase::TestVariant() {
-  // conversions
-  {
-    Variant v("123");
-    VERIFY(v.toInt32() == 123);
-  }
-
-  // references
-  {
-    Variant v1("original");
-    Variant v2 = v1;
-    v2 = String("changed");
-    VERIFY(equal(v1, String("original")));
-  }
-  {
-    Variant v1("original");
-    Variant v2(v1, Variant::StrongBind{});
-    v2 = String("changed");
-    VERIFY(equal(v1, String("changed")));
-  }
-
-  return Count(true);
-}
-
-///////////////////////////////////////////////////////////////////////////////
 
 /* Pull 32bit Big Endian words from an in6_addr */
 static inline long in6addrWord(struct in6_addr addr, char wordNo) {
@@ -598,5 +154,245 @@ bool TestCppBase::TestIpBlockMap() {
   VERIFY(!ibm.isBlocking("test/blah.php",
                          "aaaa:bbbb:cccc:dddd:eee3:4444:3333:2222"));
 
+  return Count(true);
+}
+
+bool TestCppBase::TestSatelliteServer() {
+  IniSetting::Map ini = IniSetting::Map::object;
+  Hdf hdf;
+  hdf.fromString(
+    "Satellites {\n"
+    "  rpc {\n"
+    "    Type = RPCServer\n"
+    "    Port = 9999\n"
+    "    RequestInitDocument = my/rpc/rpc.php\n"
+    "    RequestInitFunction = init_me\n"
+    "    Password = abcd0987\n"
+    "    Passwords {\n"
+    "      * = abcd0987\n"
+    "    }\n"
+    "  }\n"
+    "  ips {\n"
+    "    Type = InternalPageServer\n"
+    "    BlockMainServer = false\n"
+    "  }\n"
+    "}\n"
+  );
+
+
+  std::vector<SatelliteServerInfo> infos;
+  if (hdf["Satellites"].exists()) {
+    for (Hdf c = hdf["Satellites"].firstChild(); c.exists(); c = c.next()) {
+      auto satellite = SatelliteServerInfo(ini, hdf);
+      infos.push_back(satellite);
+      if (satellite.getType() == SatelliteServer::Type::KindOfRPCServer) {
+        RuntimeOption::XboxPassword = satellite.getPassword();
+        RuntimeOption::XboxPasswords = satellite.getPasswords();
+      }
+    }
+  }
+
+  for (auto& info : infos) {
+    auto name = info.getName();
+    if (name == "rpc") {
+      VERIFY(info.getType() == SatelliteServer::Type::KindOfRPCServer);
+      VERIFY(info.getPort() == 9999);
+      VERIFY(info.getThreadCount() == 5);
+      VERIFY(info.getTimeoutSeconds() ==
+        std::chrono::seconds(RuntimeOption::RequestTimeoutSeconds));
+      VERIFY(info.getURLs().size() == 0);
+      VERIFY(info.getMaxRequest() == 500);
+      VERIFY(info.getMaxDuration() == 120);
+      VERIFY(info.getReqInitFunc() == "init_me");
+      VERIFY(info.getReqInitDoc() == "my/rpc/rpc.php");
+      VERIFY(info.getPassword() == "abcd0987");
+      VERIFY(info.getPasswords().size() == 1);
+      VERIFY(info.getPasswords().find("abcd0987") != info.getPasswords().end());
+      VERIFY(info.alwaysReset() == false);
+      VERIFY(RuntimeOption::XboxPassword == "abcd0987");
+    } else if (name == "ips") {
+      VERIFY(info.getType() == SatelliteServer::Type::KindOfInternalPageServer);
+      VERIFY(info.getURLs().size() == 0);
+    }
+  }
+  return Count(true);
+}
+
+bool TestCppBase::TestVirtualHost() {
+  IniSetting::Map ini = IniSetting::Map::object;
+  Hdf hdf;
+  hdf.fromString(
+    "  Server {\n"
+    "    AllowedDirectories.* = /var/www\n"
+    "    AllowedDirectories.* = /usr/bin\n"
+    "  }\n"
+    "  VirtualHost {\n"
+    "    flibtest {\n"
+    "      Prefix = flibtest.\n"
+    "      PathTranslation = flib/_bin\n"
+    "      ServerName = flibtest.facebook.com\n"
+    "    }\n"
+    "    upload {\n"
+    "      Prefix = upload.\n"
+    "      ServerVariables {\n"
+    "        TFBENV = 8{\n"
+    "      }\n"
+    "      overwrite {\n"
+    "        Server {\n"
+    "          AllowedDirectories.* = /var/www\n"
+    "          AllowedDirectories.* = /mnt\n"
+    "          AllowedDirectories.* = /tmp\n"
+    "          AllowedDirectories.* = /var/tmp/tao\n"
+    "        }\n"
+    "        MaxPostSize = 100MB\n"
+    "        UploadMaxFileSize = 100MB\n"
+    "        RequestTimeoutSeconds = 120\n"
+    "      }\n"
+    "      PathTranslation = html\n"
+    "    }\n"
+    "    default {\n"
+    "      LogFilters {\n"
+    "        * {\n"
+    "          url = /method/searchme\n"
+    "          params {\n"
+    "            * = q\n"
+    "            * = s\n"
+    "            * = atoken\n"
+    "            * = otoken\n"
+    "          }\n"
+    "        value = REMOVED\n"
+    "        }\n"
+    "      }\n"
+    "      RewriteRules {\n"
+    "        common {\n"
+    "          pattern = /html/common/\n"
+    "          to = http://3v4l.org\n"
+    "          qsa = true\n"
+    "          redirect = 301\n"
+    "        }\n"
+    "      }\n"
+    "      PathTranslation = htm\n"
+    "    }\n"
+    "  }\n"
+  );
+
+  // reset RuntimeOption::AllowedDirectories to empty because if the INI
+  // version of this test is run at the same time, we don't want to append
+  // the same directories to it. We want to start fresh.
+  RuntimeOption::AllowedDirectories.clear();
+  std::vector<VirtualHost> hosts;
+  RuntimeOption::AllowedDirectories =
+    Config::GetVector(ini, hdf["Server.AllowedDirectories"]);
+  if (hdf["VirtualHost"].exists()) {
+    for (Hdf c = hdf["VirtualHost"].firstChild(); c.exists(); c = c.next()) {
+      if (c.getName() == "default") {
+        VirtualHost::GetDefault().init(ini, c);
+        VirtualHost::GetDefault().
+          addAllowedDirectories(RuntimeOption::AllowedDirectories);
+      } else {
+        auto host = VirtualHost(ini, c);
+        host.addAllowedDirectories(RuntimeOption::AllowedDirectories);
+        hosts.push_back(host);
+      }
+    }
+    for (unsigned int i = 0; i < hosts.size(); i++) {
+      if (!hosts[i].valid()) {
+        throw std::runtime_error("virtual host missing prefix or pattern");
+      }
+    }
+  }
+
+  for (auto& host : hosts) {
+    VirtualHost::SetCurrent(&host);
+    auto name = host.getName();
+    if (name == "flibtest") {
+      VERIFY(host.getPathTranslation() == "flib/_bin/"); // the / is added
+      VERIFY(host.getDocumentRoot() ==
+             RuntimeOption::SourceRoot + "flib/_bin");
+      VERIFY(host.getServerVars().size() == 0);
+      VERIFY(VirtualHost::GetAllowedDirectories().size() == 2);
+      VERIFY(host.valid() == true);
+      VERIFY(host.hasLogFilter() == false);
+    } else if (name == "upload") {
+      VERIFY(host.getPathTranslation() == "html/"); // the / is added
+      VERIFY(host.getDocumentRoot() ==
+             RuntimeOption::SourceRoot + "html");
+      // SortALlowedDirectories might add something and remove
+      // duplicates. In this case, /var/releases/continuous_www_scripts4
+      // was added and the duplicate /var/www was removed.s
+      VERIFY(VirtualHost::GetAllowedDirectories().size() == 6);
+      VERIFY(host.valid() == true);
+      VERIFY(host.hasLogFilter() == false);
+      VERIFY(VirtualHost::GetMaxPostSize() == 104857600);
+    }
+  }
+
+  VERIFY(VirtualHost::GetDefault().getPathTranslation() == "htm/");
+  VERIFY(VirtualHost::GetDefault().hasLogFilter() == true);
+  String rw("/html/common/");
+  String h("default");
+  bool q = false;
+  int rd = 0;
+  VirtualHost::GetDefault().rewriteURL(h, rw, q, rd);
+  VERIFY(rw.toCppString() == "http://3v4l.org");
+  VERIFY(rd == 301);
+  return Count(true);
+}
+
+bool TestCppBase::TestCollectionHdf() {
+  IniSetting::Map ini = IniSetting::Map::object;
+  Hdf hdf;
+  hdf.fromString(
+    "  Server {\n"
+    "    AllowedDirectories.* = /var/www\n"
+    "    AllowedDirectories.* = /usr/bin\n"
+    "    HighPriorityEndPoints.* = /end\n"
+    "    HighPriorityEndPoints.* = /point\n"
+    "    HighPriorityEndPoints.* = /power\n"
+    "  }\n"
+  );
+  RuntimeOption::AllowedDirectories.clear();
+
+  Config::Bind(RuntimeOption::AllowedDirectories, ini,
+               hdf, "Server.AllowedDirectories");
+  VERIFY(RuntimeOption::AllowedDirectories.size() == 2);
+  std::vector<std::string> ad =
+    Config::GetVector(ini, hdf, "Server.AllowedDirectories",
+                      RuntimeOption::AllowedDirectories);
+  VERIFY(RuntimeOption::AllowedDirectories.size() == 2);
+  VERIFY(ad.size() == 2);
+  Config::Bind(RuntimeOption::ServerHighPriorityEndPoints, ini,
+               hdf, "Server.HighPriorityEndPoints");
+  VERIFY(RuntimeOption::ServerHighPriorityEndPoints.size() == 3);
+  return Count(true);
+}
+
+bool TestCppBase::TestCollectionIni() {
+  std::string inistr =
+    "hhvm.server.allowed_directories[] = /var/www\n"
+    "hhvm.server.allowed_directories[] = /usr/bin\n"
+    "hhvm.server.high_priority_endpoints[] = /end\n"
+    "hhvm.server.high_priority_endpoints[] = /point\n"
+    "hhvm.server.high_priority_endpoints[] = /power\n";
+
+  IniSetting::Map ini = IniSetting::Map::object;
+  Hdf empty;
+
+  RuntimeOption::AllowedDirectories.clear();
+  Config::ParseIniString(inistr, ini);
+  Config::Bind(RuntimeOption::AllowedDirectories, ini, empty,
+               "Server.AllowedDirectories"); // Test converting name
+  VERIFY(RuntimeOption::AllowedDirectories.size() == 2);
+  std::vector<std::string> ad =
+    Config::GetVector(ini, empty, "hhvm.server.allowed_directories",
+                      RuntimeOption::AllowedDirectories, false);
+  // This should still be 2. In other words, Get shouldn't append
+  // values.
+  VERIFY(RuntimeOption::AllowedDirectories.size() == 2);
+  VERIFY(ad.size() == 2);
+  Config::Bind(RuntimeOption::ServerHighPriorityEndPoints, ini, empty,
+               "hhvm.server.high_priority_endpoints",
+                RuntimeOption::ServerHighPriorityEndPoints, false);
+  VERIFY(RuntimeOption::ServerHighPriorityEndPoints.size() == 3);
   return Count(true);
 }

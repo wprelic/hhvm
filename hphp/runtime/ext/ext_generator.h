@@ -19,21 +19,17 @@
 #define incl_HPHP_EXT_GENERATOR_H_
 
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/vm/resumable.h"
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/system/systemlib.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
+// class BaseGeneratorData
 
-FORWARD_DECLARE_CLASS(Continuation);
-FORWARD_DECLARE_CLASS(Generator);
-
-///////////////////////////////////////////////////////////////////////////////
-// class BaseGenerator
-
-class BaseGenerator : public ExtObjectDataFlags<ObjectData::HasClone> {
+class BaseGeneratorData {
 public:
   enum class State : uint8_t {
     Created = 0,  // generator was created but never iterated
@@ -41,8 +37,9 @@ public:
     Running = 2,  // generator is currently being iterated
     Done    = 3   // generator has finished its execution
   };
-
-  static constexpr ptrdiff_t resumableOff() { return -sizeof(Resumable); }
+  static constexpr ptrdiff_t resumableOff() {
+    return -sizeof(Resumable);
+  }
   static constexpr ptrdiff_t arOff() {
     return resumableOff() + Resumable::arOff();
   }
@@ -53,10 +50,8 @@ public:
     return resumableOff() + Resumable::resumeOffsetOff();
   }
   static constexpr ptrdiff_t stateOff() {
-    return whStateOffset();
+    return offsetof(BaseGeneratorData, m_state);
   }
-
-  explicit BaseGenerator(Class* cls) : ExtObjectDataFlags(cls) {}
 
   Resumable* resumable() const {
     return reinterpret_cast<Resumable*>(
@@ -68,17 +63,18 @@ public:
   }
 
   State getState() const {
-    return static_cast<State>(subclass_u8());
+    return m_state;
   }
 
   void setState(State state) {
-    subclass_u8() = static_cast<uint8_t>(state);
+    m_state = state;
   }
 
   void startedCheck() {
     if (getState() == State::Created) {
-      throw_exception(Object(
-        SystemLib::AllocExceptionObject("Need to call next() first")));
+      throw_exception(
+        SystemLib::AllocExceptionObject("Need to call next() first")
+      );
     }
   }
 
@@ -87,12 +83,14 @@ public:
       startedCheck();
     }
     if (getState() == State::Running) {
-      throw_exception(Object(
-        SystemLib::AllocExceptionObject("Generator is already running")));
+      throw_exception(
+        SystemLib::AllocExceptionObject("Generator is already running")
+      );
     }
     if (getState() == State::Done) {
-      throw_exception(Object(
-        SystemLib::AllocExceptionObject("Generator is already finished")));
+      throw_exception(
+        SystemLib::AllocExceptionObject("Generator is already finished")
+      );
     }
     assert(getState() == State::Created || getState() == State::Started);
     setState(State::Running);
@@ -113,28 +111,68 @@ public:
 
     return base + 2;
   }
+
+private:
+  State m_state;
 };
 
-
 ///////////////////////////////////////////////////////////////////////////////
-// class Continuation
-
-class c_Continuation : public BaseGenerator {
+// class GeneratorData
+class GeneratorData final : public BaseGeneratorData {
 public:
-  DECLARE_CLASS_NO_SWEEP(Continuation)
+  ~GeneratorData();
 
-  explicit c_Continuation(Class* cls = c_Continuation::classof())
-    : BaseGenerator(cls) {}
-  ~c_Continuation() {}
-  void t___construct() {}
+  template <bool clone>
+  static ObjectData* Create(const ActRec* fp, size_t numSlots,
+                            jit::TCA resumeAddr, Offset resumeOffset);
+  static GeneratorData* fromObject(ObjectData *obj);
+  static GeneratorData* Clone(ObjectData* obj);
+  static constexpr ptrdiff_t objectOff() {
+    return sizeof(GeneratorData);
+  }
+
+  void yield(Offset resumeOffset, const Cell* key, Cell value);
+  void copyVars(const ActRec *fp);
+  void ret() { done(); }
+  void fail() { done(); }
+  ObjectData* toObject() {
+    return reinterpret_cast<ObjectData*>(
+      reinterpret_cast<char*>(this) + objectOff());
+  }
+
+private:
+  explicit GeneratorData();
+  void done();
+
+public:
+  int64_t m_index;
+  Cell m_key;
+  Cell m_value;
+};
+///////////////////////////////////////////////////////////////////////////////
+// class BaseGenerator
+
+class BaseGenerator : public
+      ExtObjectDataFlags<ObjectData::HasClone> {
+public:
+  explicit BaseGenerator(Class* cls)
+    : ExtObjectDataFlags(cls, HeaderKind::ResumableObj)
+  {}
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 // class Generator
 
-class c_Generator : public c_Continuation {
+class c_Generator final : public BaseGenerator {
 public:
   DECLARE_CLASS_NO_SWEEP(Generator)
+
+  explicit c_Generator(Class* cls = c_Generator::classof())
+    : BaseGenerator(cls)
+  {}
+  ~c_Generator() {
+    data()->~GeneratorData();
+  }
 
   void t___construct();
   Variant t_current();
@@ -147,41 +185,32 @@ public:
   String t_getorigfuncname();
   String t_getcalledclass();
 
-  static c_Generator* Clone(ObjectData* obj);
-
-  template <bool clone>
-  static c_Generator* Create(const ActRec* fp, size_t numSlots,
-                             jit::TCA resumeAddr, Offset resumeOffset) {
-    assert(fp);
-    assert(fp->resumed() == clone);
-    assert(fp->func()->isNonAsyncGenerator());
-    void* obj = Resumable::Create<clone>(fp, numSlots, resumeAddr, resumeOffset,
-                                         sizeof(c_Generator));
-    auto const gen = new (obj) c_Generator();
-    gen->incRefCount();
-    gen->setNoDestruct();
-    gen->setState(State::Created);
-    return gen;
+  GeneratorData *data() {
+    return reinterpret_cast<GeneratorData*>(reinterpret_cast<char*>(
+      static_cast<BaseGenerator*>(this)) - GeneratorData::objectOff());
   }
-
-  void yield(Offset resumeOffset, const Cell* key, const Cell& value);
-  void ret() { done(); }
-  void fail() { done(); }
-
-private:
-  explicit c_Generator(Class* cls = c_Generator::classof());
-  ~c_Generator();
-
-  void copyVars(ActRec *fp);
-  void done();
-
-public:
-  int64_t m_index;
-  Cell m_key;
-  Cell m_value;
 };
+
+template <bool clone>
+ObjectData* GeneratorData::Create(const ActRec* fp, size_t numSlots,
+                                  jit::TCA resumeAddr, Offset resumeOffset) {
+  assert(fp);
+  assert(fp->resumed() == clone);
+  assert(fp->func()->isNonAsyncGenerator());
+  void* genDataPtr = Resumable::Create<clone,
+                       sizeof(GeneratorData) + sizeof(c_Generator)>(
+                       fp, numSlots, resumeAddr, resumeOffset);
+  GeneratorData* genData = new (genDataPtr) GeneratorData();
+  auto const gen = new (genData + 1) c_Generator();
+  assert(gen->hasExactlyOneRef());
+  assert(gen->noDestruct());
+  genData->setState(State::Created);
+  return static_cast<ObjectData*>(gen);
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 }
+
+#include "hphp/runtime/ext/ext_generator_inl.h"
 
 #endif // incl_HPHP_EXT_GENERATOR_H_

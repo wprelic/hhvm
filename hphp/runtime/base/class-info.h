@@ -17,12 +17,13 @@
 #ifndef incl_HPHP_CLASS_INFO_H_
 #define incl_HPHP_CLASS_INFO_H_
 
-#include "hphp/runtime/base/types.h"
 #include <utility>
 #include <vector>
-#include "hphp/runtime/base/complex-types.h"
-#include "hphp/util/mutex.h"
-#include "hphp/util/functional.h"
+
+#include "hphp/runtime/base/types.h"
+#include "hphp/runtime/base/type-array.h"
+#include "hphp/runtime/base/type-string.h"
+#include "hphp/runtime/base/type-variant.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -73,7 +74,8 @@ public:
     HasOptFunction         = (1 << 23), //                  x
     AllowIntercept         = (1 << 24), //                  x      x
     NoProfile              = (1 << 25), //                  x      x
-    ContextSensitive       = (1 << 26), //                  x
+    // Unused                (1 << 26),
+
     NoDefaultSweep         = (1 << 27), //    x
     IsSystem               = (1 << 28), //    x             x
 
@@ -89,20 +91,11 @@ public:
     String name;
     unsigned int valueLen;
     const char *valueText;
-    const void* callback;
 
-    const Variant& getDeferredValue() const;
     Variant getValue() const;
-    bool isDeferred() const { return deferred; }
-    bool isCallback() const { return callback != nullptr; }
     void setValue(const Variant& value);
     void setStaticValue(const Variant& value);
-
-    bool isDynamic() const {
-      return deferred;
-    }
   private:
-    bool deferred;
     Variant value;
     std::string svalue; // serialized, only used by eval
   };
@@ -246,10 +239,9 @@ public:
   static const ClassInfo *FindSystemClassInterfaceOrTrait(const String& name);
 
   /**
-   * Get all statically known system constants, unless explicitly
-   * specified to get the dynamic ones.
+   * Get all statically known system constants
    */
-  static Array GetSystemConstants(bool get_dynamic_constants = false);
+  static Array GetSystemConstants();
   static void InitializeSystemConstants();
 
   /**

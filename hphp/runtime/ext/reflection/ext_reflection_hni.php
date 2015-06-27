@@ -222,17 +222,50 @@ abstract class ReflectionFunctionAbstract implements Reflector {
     return $this->getReturnTypeHint() ?: false;
   }
 
+  /**
+   * ( excerpt from
+   *   http://docs.hhvm.com/manual/en/reflectionclass.getattributes.php )
+   *
+   * Gets all attributes
+   *
+   * @return  array<arraykey, array<int, mixed>>
+   */
   <<__Native>>
   final public function getAttributes(): array;
 
+  /**
+   * ( excerpt from
+   *   http://docs.hhvm.com/manual/en/reflectionclass.getattribute.php )
+   *
+   * Returns all attributes with given key.
+   *
+   * @return  ?array<int, mixed>
+   */
   final public function getAttribute(string $name) {
     return hphp_array_idx($this->getAttributes(), $name, null);
   }
 
+  /**
+   * ( excerpt from
+   *   http://docs.hhvm.com/manual/en/reflectionclass.getattributes.php )
+   *
+   * Gets all attributes
+   *
+   * @return  array<arraykey, array<int, mixed>>
+   */
   public function getAttributesRecursive(): array {
     return $this->getAttributes();
   }
 
+  /**
+   * ( excerpt from
+   *   http://docs.hhvm.com/manual/en/reflectionclass.getattributerecursive.php
+   * )
+   *
+   * Returns all attributes with given key from a class and its parents.
+   *
+   * @return array<arraykey, array<int, mixed>>
+   */
   public function getAttributeRecursive($name) {
     return $this->getAttribute($name);
   }
@@ -302,7 +335,7 @@ abstract class ReflectionFunctionAbstract implements Reflector {
    * Returns whether the function is deprecated.
    */
   public function isDeprecated(): bool {
-    return false; // not supported in HHVM
+    return null !== $this->getAttribute('__Deprecated');
   }
 
   public function getExtension() {
@@ -433,7 +466,7 @@ class ReflectionFunction extends ReflectionFunctionAbstract {
   }
 
   <<__Native>>
-  private function __initClosure(object $closure): void;
+  private function __initClosure(object $closure): bool;
 
   <<__Native>>
   private function __initName(string $name): bool;
@@ -1141,9 +1174,13 @@ class ReflectionClass implements Reflector {
     }
 
     $consts = $this->getConstants();
-    $ret .= "\n  - Constants [" . count($consts) . "] {\n";
+    $abs_consts = $this->getAbstractConstantNames();
+    $ret .= "\n  - Constants [" . (count($consts) + count($abs_consts)) . "] {\n";
     foreach ($consts as $k => $v) {
-      $ret .= '    Constant [ ' . gettype($v) . " $k {" . (string)$v . "}\n";
+      $ret .= '    Constant [ ' . gettype($v) . " $k {" . (string)$v . "} ]\n";
+    }
+    foreach ($abs_consts as $k) {
+      $ret .= '    Abstract Constant [ '. $k ."]\n";
     }
     $ret .= "  }\n";
 
@@ -1450,8 +1487,63 @@ class ReflectionClass implements Reflector {
     return self::$constCache[$clsname] = $this->getOrderedConstants();
   }
 
+  private static $absConstCache = array();
+
+  /**
+   * ( excerpt from
+   *   http://docs.hhvm.com/manual/en/reflectionclass.getabstractconstantnames.php
+   * )
+   *
+   * Returns an array containing the names of abstract constants as both
+   * keys and values.
+   *
+   * @return  array<string, string>
+   */
+  public function getAbstractConstantNames(): array<string, string> {
+    $clsname = $this->getName();
+    $cached = hphp_array_idx(self::$absConstCache, $clsname, null);
+    if (null !== $cached) {
+      return $cached;
+    }
+    return self::$absConstCache[$clsname] = $this->getOrderedAbstractConstants();
+  }
+
+  private static $typeConstCache = array();
+
+  private function getTypeConstantNamesWithCaching(): array<string, string> {
+    $clsname = $this->getName();
+    $cached = hphp_array_idx(self::$typeConstCache, $clsname, null);
+    if (null !== $cached) {
+      return $cached;
+    }
+    return self::$typeConstCache[$clsname] = $this->getOrderedTypeConstants();
+  }
+
+  public function getTypeConstant(string $name): ReflectionTypeConstant {
+    return new ReflectionTypeConstant($this->getName(), $name);
+  }
+
+  public function hasTypeConstant($name): bool {
+    return array_key_exists($name, $this->getTypeConstantNamesWithCaching());
+  }
+
+  public function getTypeConstants(): array<ReflectionTypeConstant> {
+    $ret = array();
+    $class = $this->getName();
+    foreach ($this->getTypeConstantNamesWithCaching() as $name) {
+      $ret[] = new ReflectionTypeConstant($class, $name);
+    }
+    return $ret;
+  }
+
   <<__Native>>
   private function getOrderedConstants(): array<string, mixed>;
+
+  <<__Native>>
+  private function getOrderedAbstractConstants(): array<string, string>;
+
+  <<__Native>>
+  public function getOrderedTypeConstants(): array<string, string>;
 
   /**
    * ( excerpt from
@@ -1735,17 +1827,6 @@ class ReflectionClass implements Reflector {
       : $props_map->toMap()->setAll($dynamic_props);
   }
 
-  private function makeReflectionProperty(
-    string $name,
-    array $prop_info,
-  ): ReflectionProperty {
-    $ret = hphp_create_object_without_constructor(ReflectionProperty::class);
-    $ret->name  = $name;
-    $ret->info  = $prop_info;
-    $ret->class = $this->getName();
-    return $ret;
-  }
-
   /**
    * ( excerpt from http://docs.hhvm.com/manual/en/reflectionclass.getproperty.php
    * )
@@ -1757,12 +1838,15 @@ class ReflectionClass implements Reflector {
    * @return     mixed   A ReflectionProperty.
    */
   public function getProperty($name) {
-    $prop_info = $this->getOrderedPropertyInfos()->get($name);
-    if (!$prop_info) {
-      $class = $this->getName();
+    $class = $this->name;
+    if (!$this->hasProperty($name)) {
       throw new ReflectionException("Property $class::$name does not exist");
     }
-    return $this->makeReflectionProperty($name, $prop_info);
+    if ($this->obj) {
+      return new ReflectionProperty($this->obj, $name);
+    } else {
+      return new ReflectionProperty($this->name, $name);
+    }
   }
 
   /**
@@ -1793,7 +1877,11 @@ class ReflectionClass implements Reflector {
   public function getProperties($filter = 0xFFFF): array<ReflectionProperty> {
     $ret = array();
     foreach ($this->getOrderedPropertyInfos() as $name => $prop_info) {
-      $p = $this->makeReflectionProperty($name, $prop_info);
+      if ($this->obj) {
+        $p = new ReflectionProperty($this->obj, $name);
+      } else {
+        $p = new ReflectionProperty($this->name, $name);
+      }
       if (($filter & ReflectionProperty::IS_PUBLIC)    && $p->isPublic()    ||
           ($filter & ReflectionProperty::IS_PROTECTED) && $p->isProtected() ||
           ($filter & ReflectionProperty::IS_PRIVATE)   && $p->isPrivate()   ||
@@ -2116,4 +2204,98 @@ class ReflectionObject extends ReflectionClass {
     }
     print $str;
   }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// type constant
+
+/**
+ * The ReflectionTypeConstant class reports information about an object.
+ *
+ */
+<<__NativeData('ReflectionConstHandle')>>
+class ReflectionTypeConstant implements Reflector {
+
+  /**
+   * Constructs a new ReflectionTypeConstant.
+   *
+   * @cls        mixed   Classname or object (instance of the class) that
+   *                     contains the type constant.
+   * @name       string  Name of the type constant.
+   */
+  public function __construct(mixed $cls, string $name) {
+    if (!$this->__init($cls, (string) $name)) {
+      $classname = is_object($cls) ? get_class($cls) : $cls;
+      throw new ReflectionException(
+        "Type Constant $classname::$name does not exist");
+    }
+  }
+
+  /**
+   * Get the name of the type constant.
+   *
+   * @return     string   The name of the type constant.
+   */
+  <<__Native>>
+  public function getName(): string;
+
+  /**
+   * Checks if the type constant is abstract
+   *
+   * @return     bool   Returns TRUE on success or FALSE on failure.
+   */
+  <<__Native>>
+  public function isAbstract(): bool;
+
+  /**
+   * Get the type assigned to this type constant as a string
+   *
+   * @return     NULL | string   The assigned type or null if is abstract
+   */
+  public function getAssignedTypeText(): ?string {
+    return $this->getAssignedTypeHint() ?: null;
+  }
+
+  /**
+   * Gets the declaring class for the reflected type constant.
+   *
+   * @return ReflectionClass   A ReflectionClass object of the class that the
+   *                           reflected type constant is part of.
+   */
+  public function getDeclaringClass() {
+    return new ReflectionClass($this->getDeclaringClassname());
+  }
+
+  public function __toString() {
+    $abstract = $this->isAbstract() ? 'abstract ' : '';
+
+    $val = $this->isAbstract() ? '' : " = {$this->getAssignedTypeText()}";
+
+    return "TypeConstant [ {$abstract}const type {$this->getName()}{$val}]\n";
+  }
+
+  // Prevent cloning
+  final public function __clone() {
+    throw new BadMethodCallException(
+      'Trying to clone an uncloneable object of class ReflectionTypeConstant'
+    );
+  }
+
+  public static function export($cls, $name, $ret=false) {
+    $obj = new self($cls, $name);
+    $str = (string)$obj;
+    if ($ret) {
+      return $str;
+    }
+    print $str;
+  }
+
+  <<__Native>>
+  private function __init(mixed $cls_or_obj, string $const): bool;
+
+  <<__Native>>
+  private function getAssignedTypeHint(): string;
+
+  <<__Native>>
+  private function getDeclaringClassname(): string;
 }

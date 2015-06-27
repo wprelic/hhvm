@@ -79,6 +79,8 @@ class PrologueCallersRec : private boost::noncopyable {
   void                      addMainCaller(TCA caller);
   void                      addGuardCaller(TCA caller);
   void                      clearAllCallers();
+  void                      removeMainCaller(TCA caller);
+  void                      removeGuardCaller(TCA caller);
 
  private:
   PrologueCallersVec m_mainCallers;
@@ -166,6 +168,8 @@ class ProfTransRec {
 typedef std::unique_ptr<ProfTransRec> ProfTransRecPtr;
 typedef std::unordered_map<FuncId, TransIDVec> FuncProfTransMap;
 
+using FuncIdSet = hphp_hash_set<FuncId>;
+
 /**
  * ProfData encapsulates the profiling data kept by the JIT.
  */
@@ -192,7 +196,10 @@ public:
   RegionDescPtr           transRegion(TransID id)     const;
   TransKind               transKind(TransID id)       const;
   bool                    isKindProfile(TransID id)   const;
+  // The actual counter value, which starts at JitPGOThreshold and goes down.
   int64_t                 transCounter(TransID id)    const;
+  // The absolute number of times that a translation executed.
+  int64_t                 absTransCounter(TransID id) const;
   int64_t*                transCounterAddr(TransID id);
   TransID                 prologueTransId(const Func* func,
                                           int nArgs)  const;
@@ -217,6 +224,7 @@ public:
   bool                    optimized(FuncId funcId) const;
   void                    setOptimized(SrcKey sk);
   void                    setOptimized(FuncId funcId);
+  void                    clearOptimized(SrcKey sk);
   bool                    profiling(FuncId funcId) const;
   void                    setProfiling(FuncId funcId);
 

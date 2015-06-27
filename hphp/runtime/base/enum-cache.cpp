@@ -55,8 +55,7 @@ void EnumCache::deleteValues(const Class* klass) {
 }
 
 void EnumCache::failLookup(const Variant& msg) {
-  Object e(SystemLib::AllocExceptionObject(msg));
-  throw e;
+  SystemLib::throwExceptionObject(msg);
 }
 
 EnumCache::~EnumCache() {
@@ -71,6 +70,9 @@ const EnumCache::EnumValues* EnumCache::loadEnumValues(const Class* klass,
   Array names;
   auto const consts = klass->constants();
   for (size_t i = 0; i < numConstants; i++) {
+    if (consts[i].isAbstract() || consts[i].isType()) {
+      continue;
+    }
     if (consts[i].m_class == klass) foundOnClass++;
     else if (!recurse) continue;
     Cell value = consts[i].m_val;

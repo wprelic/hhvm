@@ -18,7 +18,11 @@
 #include "hphp/runtime/ext/sqlite3/ext_sqlite3.h"
 #include "hphp/runtime/ext/stream/ext_stream.h"
 #include "hphp/runtime/ext/std/ext_std_function.h"
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/exceptions.h"
+#include "hphp/runtime/base/file.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/native-data.h"
 
@@ -370,11 +374,11 @@ Variant HHVM_METHOD(SQLite3, prepare,
   auto *data = Native::data<SQLite3>(this_);
   data->validate();
   if (!sql.empty()) {
-    ObjectData *ret = ObjectData::newInstance(SQLite3Stmt::getClass());
+    Object ret{SQLite3Stmt::getClass()};
     SQLite3Stmt *stmt = Native::data<SQLite3Stmt>(ret);
-    HHVM_MN(SQLite3Stmt, __construct)(ret, this_, sql);
+    HHVM_MN(SQLite3Stmt, __construct)(ret.get(), this_, sql);
     if (stmt->m_raw_stmt) {
-      return Object(ret);
+      return ret;
     }
   }
   return false;
@@ -408,7 +412,7 @@ Variant HHVM_METHOD(SQLite3, querysingle,
       Object obj_stmt = stmt.toObject();
       assert(obj_stmt.instanceof(SQLite3Stmt::getClass()));
       sqlite3_stmt *pstmt =
-        Native::data<SQLite3Stmt>(obj_stmt.get())->m_raw_stmt;
+        Native::data<SQLite3Stmt>(obj_stmt)->m_raw_stmt;
       switch (sqlite3_step(pstmt)) {
       case SQLITE_ROW: /* Valid Row */
         if (entire_row) {
@@ -444,7 +448,7 @@ bool HHVM_METHOD(SQLite3, createfunction,
   if (name.empty()) {
     return false;
   }
-  if (!f_is_callable(callback)) {
+  if (!is_callable(callback)) {
     raise_warning("Not a valid callback function %s",
                   callback.toString().data());
     return false;
@@ -472,12 +476,12 @@ bool HHVM_METHOD(SQLite3, createaggregate,
   if (name.empty()) {
     return false;
   }
-  if (!f_is_callable(step)) {
+  if (!is_callable(step)) {
     raise_warning("Not a valid callback function %s",
                   step.toString().data());
     return false;
   }
-  if (!f_is_callable(final)) {
+  if (!is_callable(final)) {
     raise_warning("Not a valid callback function %s",
                   final.toString().data());
     return false;
@@ -527,7 +531,7 @@ void HHVM_METHOD(SQLite3Stmt, __construct,
   auto *data = Native::data<SQLite3Stmt>(this_);
   if (!statement.empty()) {
     assert(dbobject.instanceof(SQLite3::getClass()));
-    SQLite3 *db = Native::data<SQLite3>(dbobject.get());
+    const SQLite3 *db = Native::data<SQLite3>(dbobject);
     db->validate();
     data->m_db = dbobject;
 
@@ -679,11 +683,11 @@ Variant HHVM_METHOD(SQLite3Stmt, execute) {
   case SQLITE_DONE: /* Valid but no results */
     {
       sqlite3_reset(data->m_raw_stmt);
-      ObjectData *ret = ObjectData::newInstance(SQLite3Result::getClass());
+      Object ret{SQLite3Result::getClass()};
       SQLite3Result *result = Native::data<SQLite3Result>(ret);
       result->m_stmt_obj = Object(this_);
       result->m_stmt = data;
-      return Object(ret);
+      return ret;
     }
   case SQLITE_ERROR:
     sqlite3_reset(data->m_raw_stmt);
@@ -783,10 +787,10 @@ bool HHVM_METHOD(SQLite3Result, finalize) {
 #define REGISTER_CONSTANT(name)                                                \
   Native::registerConstant<KindOfInt64>(s_##name.get(), k_##name)              \
 
-static class SQLite3Extension : public Extension {
+static class SQLite3Extension final : public Extension {
 public:
   SQLite3Extension() : Extension("sqlite3", "0.7-dev") {}
-  virtual void moduleInit() {
+  void moduleInit() override {
     REGISTER_CONSTANT(SQLITE3_ASSOC);
     REGISTER_CONSTANT(SQLITE3_NUM);
     REGISTER_CONSTANT(SQLITE3_BOTH);

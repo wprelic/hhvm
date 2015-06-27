@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_ICU_NUMFMT_H
 #define incl_HPHP_ICU_NUMFMT_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/unum.h>
@@ -55,7 +55,7 @@ public:
       c_NumberFormatter = Unit::lookupClass(s_NumberFormatter.get());
       assert(c_NumberFormatter);
     }
-    return ObjectData::newInstance(c_NumberFormatter);
+    return Object{c_NumberFormatter};
   }
   static NumberFormatter* Get(ObjectData* obj) {
     return GetData<NumberFormatter>(obj, s_NumberFormatter);

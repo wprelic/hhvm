@@ -17,8 +17,8 @@
 #define incl_HPHP_VM_RUNTIME_H_
 
 #include "hphp/runtime/ext/ext_generator.h"
-#include "hphp/runtime/ext/asio/async_function_wait_handle.h"
-#include "hphp/runtime/ext/asio/async_generator.h"
+#include "hphp/runtime/ext/asio/async-function-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_async-generator.h"
 #include "hphp/runtime/ext/std/ext_std_errorfunc.h"
 #include "hphp/runtime/vm/event-hook.h"
 #include "hphp/runtime/vm/func.h"
@@ -45,6 +45,7 @@ void print_boolean(bool val);
 void raiseWarning(const StringData* sd);
 void raiseNotice(const StringData* sd);
 void raiseArrayIndexNotice(int64_t index);
+void raiseArrayKeyNotice(const StringData* key);
 
 inline Iter*
 frame_iter(const ActRec* fp, int i) {
@@ -81,30 +82,19 @@ frame_afwh(const ActRec* fp) {
   return waitHandle;
 }
 
-inline BaseGenerator*
-frame_base_generator(const ActRec* fp) {
-  assert(fp->func()->isGenerator());
-  auto resumable = frame_resumable(fp);
-  auto obj = (ObjectData*)((char*)resumable - BaseGenerator::resumableOff());
-  assert(obj->getVMClass() == c_AsyncGenerator::classof() ||
-         obj->getVMClass() == c_Generator::classof());
-  return static_cast<BaseGenerator*>(obj);
-}
-
-inline c_Generator*
+inline GeneratorData*
 frame_generator(const ActRec* fp) {
   assert(fp->func()->isNonAsyncGenerator());
-  auto obj = frame_base_generator(fp);
-  assert(obj->getVMClass() == c_Generator::classof());
-  return static_cast<c_Generator*>(obj);
+  auto resumable = frame_resumable(fp);
+  return (GeneratorData*)((char*)resumable - GeneratorData::resumableOff());
 }
 
-inline c_AsyncGenerator*
+inline AsyncGeneratorData*
 frame_async_generator(const ActRec* fp) {
   assert(fp->func()->isAsyncGenerator());
-  auto obj = frame_base_generator(fp);
-  assert(obj->getVMClass() == c_AsyncGenerator::classof());
-  return static_cast<c_AsyncGenerator*>(obj);
+  auto resumable = frame_resumable(fp);
+  return (AsyncGeneratorData*)((char*)resumable -
+    AsyncGeneratorData::resumableOff());
 }
 
 /*
@@ -120,9 +110,9 @@ template<bool unwinding>
 void ALWAYS_INLINE
 frame_free_locals_helper_inl(ActRec* fp, int numLocals) {
   assert(numLocals == fp->m_func->numLocals());
-  assert(!fp->hasInvName());
   // Check if the frame has a VarEnv or if it has extraArgs
-  if (UNLIKELY(fp->m_varEnv != nullptr)) {
+  if (UNLIKELY(fp->func()->attrs() & AttrMayUseVV) &&
+      UNLIKELY(fp->m_varEnv != nullptr)) {
     if (fp->hasVarEnv()) {
       // If there is a VarEnv, free the locals and the VarEnv
       // by calling the detach method.
@@ -178,7 +168,6 @@ frame_free_locals_inl(ActRec* fp, int numLocals, TypedValue* rv) {
 void ALWAYS_INLINE
 frame_free_inl(ActRec* fp, TypedValue* rv) { // For frames with no locals
   assert(0 == fp->m_func->numLocals());
-  assert(!fp->hasInvName());
   assert(fp->m_varEnv == nullptr);
   assert(fp->hasThis());
   decRefObj(fp->getThis());
@@ -186,9 +175,9 @@ frame_free_inl(ActRec* fp, TypedValue* rv) { // For frames with no locals
 }
 
 void ALWAYS_INLINE
-frame_free_locals_unwind(ActRec* fp, int numLocals, const Fault& fault) {
+frame_free_locals_unwind(ActRec* fp, int numLocals, ObjectData* phpException) {
   frame_free_locals_inl_no_hook<true>(fp, numLocals);
-  EventHook::FunctionUnwind(fp, fault);
+  EventHook::FunctionUnwind(fp, phpException);
 }
 
 void ALWAYS_INLINE
@@ -223,10 +212,13 @@ Unit* build_native_func_unit(const HhbcExtFuncInfo* builtinFuncs,
 Unit* build_native_class_unit(const HhbcExtClassInfo* builtinClasses,
                                   ssize_t numBuiltinClasses);
 
+// Create a new class instance, and register it in the live object table if
+// necessary. The initial ref-count of the instance will be greater than zero.
 inline ObjectData*
 newInstance(Class* cls) {
   assert(cls);
   auto* inst = ObjectData::newInstance(cls);
+  assert(inst->getCount() > 0);
   Stats::inc(cls->getDtor() ? Stats::ObjectData_new_dtor_yes
                             : Stats::ObjectData_new_dtor_no);
 
@@ -249,12 +241,10 @@ RefData* lookupStaticFromClosure(ObjectData* closure,
  * be set up before you use those parts of the runtime.
  */
 
-typedef StringData* (*CompileStringAST)(String, String);
 typedef Unit* (*CompileStringFn)(const char*, int, const MD5&, const char*);
 typedef Unit* (*BuildNativeFuncUnitFn)(const HhbcExtFuncInfo*, ssize_t);
 typedef Unit* (*BuildNativeClassUnitFn)(const HhbcExtClassInfo*, ssize_t);
 
-extern CompileStringAST g_hphp_compiler_serialize_code_model_for;
 extern CompileStringFn g_hphp_compiler_parse;
 extern BuildNativeFuncUnitFn g_hphp_build_native_func_unit;
 extern BuildNativeClassUnitFn g_hphp_build_native_class_unit;
@@ -264,22 +254,6 @@ void assertTv(const TypedValue* tv);
 
 // returns the number of things it put on sp
 int init_closure(ActRec* ar, TypedValue* sp);
-
-/*
- * Returns whether the interface named `s' supports any non-object
- * types.
- */
-bool interface_supports_non_objects(const StringData* s);
-
-bool interface_supports_array(const StringData* s);
-bool interface_supports_string(const StringData* s);
-bool interface_supports_int(const StringData* s);
-bool interface_supports_double(const StringData* s);
-
-bool interface_supports_array(std::string const&);
-bool interface_supports_string(std::string const&);
-bool interface_supports_int(std::string const&);
-bool interface_supports_double(std::string const&);
 
 int64_t zero_error_level();
 void restore_error_level(int64_t oldLevel);

@@ -19,6 +19,7 @@
 #include "hphp/runtime/base/apc-string.h"
 #include "hphp/runtime/base/apc-array.h"
 #include "hphp/runtime/base/apc-object.h"
+#include "hphp/runtime/base/apc-collection.h"
 #include "hphp/runtime/base/mixed-array.h"
 #include "hphp/runtime/ext/apc/ext_apc.h"
 
@@ -26,41 +27,35 @@ namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
-APCHandle* APCHandle::Create(const Variant& source,
-                             size_t& size,
-                             bool serialized,
-                             bool inner /* = false */,
-                             bool unserializeObj /* = false */) {
+APCHandle::Pair APCHandle::Create(const Variant& source,
+                                  bool serialized,
+                                  bool inner /* = false */,
+                                  bool unserializeObj /* = false */) {
   auto type = source.getType(); // this gets rid of the ref, if it was one
   switch (type) {
     case KindOfUninit:
     case KindOfNull: {
       auto value = new APCTypedValue(type);
-      size = sizeof(APCTypedValue);
-      return value->getHandle();
+      return {value->getHandle(), sizeof(APCTypedValue)};
     }
     case KindOfBoolean: {
       auto value = new APCTypedValue(type,
           static_cast<int64_t>(source.getBoolean()));
-      size = sizeof(APCTypedValue);
-      return value->getHandle();
+      return {value->getHandle(), sizeof(APCTypedValue)};
     }
     case KindOfInt64: {
       auto value = new APCTypedValue(type, source.getInt64());
-      size = sizeof(APCTypedValue);
-      return value->getHandle();
+      return {value->getHandle(), sizeof(APCTypedValue)};
     }
     case KindOfDouble: {
       auto value = new APCTypedValue(type, source.getDouble());
-      size = sizeof(APCTypedValue);
-      return value->getHandle();
+      return {value->getHandle(), sizeof(APCTypedValue)};
     }
     case KindOfStaticString: {
       if (serialized) goto StringCase;
 
       auto value = new APCTypedValue(type, source.getStringData());
-      size = sizeof(APCTypedValue);
-      return value->getHandle();
+      return {value->getHandle(), sizeof(APCTypedValue)};
     }
 StringCase:
     case KindOfString: {
@@ -68,47 +63,46 @@ StringCase:
       if (serialized) {
         // It is priming, and there might not be the right class definitions
         // for unserialization.
-        return APCObject::MakeShared(apc_reserialize(s), size);
+        return APCObject::MakeSerializedObj(apc_reserialize(s));
       }
 
       auto const st = lookupStaticString(s);
       if (st) {
         APCTypedValue* value = new APCTypedValue(KindOfStaticString, st);
-        size = sizeof(APCTypedValue);
-        return value->getHandle();
+        return {value->getHandle(), sizeof(APCTypedValue)};
       }
 
       assert(!s->isStatic()); // would've been handled above
       if (!inner && apcExtension::UseUncounted) {
         StringData* st = StringData::MakeUncounted(s->slice());
         APCTypedValue* value = new APCTypedValue(st);
-        size = sizeof(APCTypedValue) + st->size();
-        return value->getHandle();
+        return {value->getHandle(), st->size() + sizeof(APCTypedValue)};
       }
-      return APCString::MakeShared(type, s, size);
+      return APCString::MakeSharedString(type, s);
     }
 
     case KindOfArray:
-      return APCArray::MakeShared(source.getArrayData(),
-                                  size,
-                                  inner,
-                                  unserializeObj);
+      return APCArray::MakeSharedArray(source.getArrayData(), inner,
+                                       unserializeObj);
 
     case KindOfObject:
-      return unserializeObj ?
-          APCObject::Construct(source.getObjectData(), size) :
-          APCObject::MakeShared(apc_serialize(source), size);
+      if (source.getObjectData()->isCollection()) {
+        return APCCollection::Make(source.getObjectData(),
+                                   inner,
+                                   unserializeObj);
+      }
+      return unserializeObj ? APCObject::Construct(source.getObjectData()) :
+             APCObject::MakeSerializedObj(apc_serialize(source));
 
     case KindOfResource:
       // TODO Task #2661075: Here and elsewhere in the runtime, we convert
       // Resources to the empty array during various serialization operations,
       // which does not match Zend behavior. We should fix this.
-      size = sizeof(APCArray);
-      return APCArray::MakeShared();
+      return APCArray::MakeSharedEmptyArray();
 
     case KindOfRef:
     case KindOfClass:
-      return nullptr;
+      return {nullptr, 0};
   }
   not_reached();
 }
@@ -161,6 +155,10 @@ void APCHandle::deleteShared() {
       return;
 
     case KindOfObject:
+      if (isAPCCollection()) {
+        APCCollection::Delete(this);
+        return;
+      }
       APCObject::Delete(this);
       return;
 

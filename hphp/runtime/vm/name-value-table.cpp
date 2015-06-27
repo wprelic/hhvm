@@ -19,19 +19,12 @@
 #include <limits>
 #include <folly/Bits.h>
 
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/runtime.h"
 
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
-
-/*
- * Dummy DT for named locals; keep out of conflict with actual DataTypes in
- * base/datatype.h.
- */
-constexpr DataType kNamedLocalDataType = kExtraInvalidDataType;
 
 NameValueTable::NameValueTable() {
   allocate(folly::nextPowTwo(RuntimeOption::EvalVMInitialGlobalTableSize));

@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_INTL_CALENDAR_H
 #define incl_HPHP_INTL_CALENDAR_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/calendar.h>
@@ -51,7 +51,7 @@ class IntlCalendar : public IntlError {
       c_IntlCalendar = Unit::lookupClass(s_IntlCalendar.get());
       assert(c_IntlCalendar);
     }
-    auto ret = ObjectData::newInstance(c_IntlCalendar);
+    Object ret{c_IntlCalendar};
     if (cal) {
       Native::data<IntlCalendar>(ret)->setCalendar(cal);
     }

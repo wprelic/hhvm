@@ -16,7 +16,7 @@
 
 #include "hphp/runtime/base/variable-serializer.h"
 #include "hphp/runtime/base/execution-context.h"
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/comparisons.h"
 #include "hphp/util/exception.h"
 #include "hphp/runtime/base/zend-printf.h"
 #include "hphp/runtime/base/zend-functions.h"
@@ -101,6 +101,9 @@ void VariableSerializer::popObjectInfo() {
   m_objectInfos.pop_back();
 }
 
+__thread int64_t VariableSerializer::serializationSizeLimit =
+  StringData::MaxSize;
+
 void VariableSerializer::popResourceInfo() {
   popObjectInfo();
 }
@@ -110,7 +113,7 @@ String VariableSerializer::serialize(const Variant& v, bool ret,
   StringBuffer buf;
   m_buf = &buf;
   if (ret) {
-    buf.setOutputLimit(RuntimeOption::SerializationSizeLimit);
+    buf.setOutputLimit(serializationSizeLimit);
   } else {
     buf.setOutputLimit(StringData::MaxSize);
   }
@@ -129,7 +132,7 @@ String VariableSerializer::serializeValue(const Variant& v, bool limit) {
   StringBuffer buf;
   m_buf = &buf;
   if (limit) {
-    buf.setOutputLimit(RuntimeOption::SerializationSizeLimit);
+    buf.setOutputLimit(serializationSizeLimit);
   }
   m_valueCount = 1;
   write(v);
@@ -144,9 +147,9 @@ String VariableSerializer::serializeWithLimit(const Variant& v, int limit) {
   }
   StringBuffer buf;
   m_buf = &buf;
-  if (RuntimeOption::SerializationSizeLimit > 0 &&
-      (limit <= 0 || limit > RuntimeOption::SerializationSizeLimit)) {
-    limit = RuntimeOption::SerializationSizeLimit;
+  if (serializationSizeLimit > 0 &&
+      (limit <= 0 || limit > serializationSizeLimit)) {
+    limit = serializationSizeLimit;
   }
   buf.setOutputLimit(limit);
   //Does not need m_valueCount, which is only useful with the unsupported types
@@ -233,7 +236,6 @@ void VariableSerializer::write(double v) {
   case Type::JSON:
     if (!std::isinf(v) && !std::isnan(v)) {
       char *buf;
-      if (v == 0.0) v = 0.0; // so to avoid "-0" output
       vspprintf(&buf, 0, "%.*k", precision, v);
       m_buf->append(buf);
       free(buf);
@@ -251,7 +253,6 @@ void VariableSerializer::write(double v) {
   case Type::DebuggerDump:
     {
       char *buf;
-      if (v == 0.0) v = 0.0; // so to avoid "-0" output
       bool isExport = m_type == Type::VarExport || m_type == Type::PHPOutput;
       vspprintf(&buf, 0, isExport ? "%.*H" : "%.*G", precision, v);
       m_buf->append(buf);
@@ -267,7 +268,6 @@ void VariableSerializer::write(double v) {
   case Type::DebugDump:
     {
       char *buf;
-      if (v == 0.0) v = 0.0; // so to avoid "-0" output
       vspprintf(&buf, 0, "float(%.*G)", precision, v);
       indent();
       m_buf->append(buf);
@@ -287,7 +287,6 @@ void VariableSerializer::write(double v) {
       m_buf->append("INF");
     } else {
       char *buf;
-      if (v == 0.0) v = 0.0; // so to avoid "-0" output
       vspprintf(&buf, 0, "%.*H", serde_precision, v);
       m_buf->append(buf);
       free(buf);
@@ -306,6 +305,26 @@ uint16_t reverse16(uint16_t us) {
     (((us >> 8) & 0xf) << 4) | ((us >> 12) & 0xf);
 }
 
+// Potentially need to escape all control characters (< 32) and also "\/<>&'@%
+static const bool jsonNoEscape[128] = {
+  false, false, false, false, false, false, false, false,
+  false, false, false, false, false, false, false, false,
+  false, false, false, false, false, false, false, false,
+  false, false, false, false, false, false, false, false,
+  true,  true,  false, true,  true,  false, false, false,
+  true,  true,  true,  true,  true,  true,  true,  false,
+  true,  true,  true,  true,  true,  true,  true,  true,
+  true,  true,  true,  true,  false, true,  false, true,
+  false, true,  true,  true,  true,  true,  true,  true,
+  true,  true,  true,  true,  true,  true,  true,  true,
+  true,  true,  true,  true,  true,  true,  true,  true,
+  true,  true,  true,  true,  false, true,  true,  true,
+  true,  true,  true,  true,  true,  true,  true,  true,
+  true,  true,  true,  true,  true,  true,  true,  true,
+  true,  true,  true,  true,  true,  true,  true,  true,
+  true,  true,  true,  true,  true,  true,  true,  true,
+};
+
 static void appendJsonEscape(StringBuffer& sb,
                              const char *s,
                              int len,
@@ -320,7 +339,21 @@ static void appendJsonEscape(StringBuffer& sb,
   auto const start = sb.size();
   sb.append('"');
 
-  UTF8To16Decoder decoder(s, len, options & k_JSON_FB_LOOSE);
+  // Do a fast path for ASCII characters that don't need escaping
+  int pos = 0;
+  do {
+    int c = s[pos];
+    if (UNLIKELY((unsigned char)c >= 128 || !jsonNoEscape[c])) {
+      goto utf8_decode;
+    }
+    sb.append((char)c);
+    pos++;
+  } while (pos < len);
+  sb.append('"');
+  return;
+
+utf8_decode:
+  UTF8To16Decoder decoder(s + pos, len - pos, options & k_JSON_FB_LOOSE);
   for (;;) {
     int c = options & k_JSON_UNESCAPED_UNICODE ? decoder.decodeAsUTF8()
                                                : decoder.decode();
@@ -554,7 +587,7 @@ void VariableSerializer::write(const Object& v) {
     }
     preventOverflow(v, [&v, this]() {
       if (v->isCollection()) {
-        collectionSerialize(v.get(), this);
+        collections::serialize(v.get(), this);
       } else if (v->instanceof(SystemLib::s_ClosureClass)) {
         // We serialize closures as "{}" in JSON mode to be compatible
         // with PHP. And issue a warning in HipHop syntax.
@@ -566,8 +599,8 @@ void VariableSerializer::write(const Object& v) {
         }
         m_buf->append("{}");
       } else {
-        Array props = v->o_toArray(true);
-        pushObjectInfo(v->o_getClassName(), v->o_getId(), 'O');
+        auto props = v->toArray(true);
+        pushObjectInfo(v->getClassName(), v->getId(), 'O');
         props.serialize(this);
         popObjectInfo();
       }
@@ -589,12 +622,14 @@ void VariableSerializer::preventOverflow(const Object& v,
 
 void VariableSerializer::write(const Variant& v, bool isArrayKey /* = false */) {
   setReferenced(v.isReferenced());
-  setRefCount(v.getRefCount());
+  if (m_type == Type::DebugDump) {
+    setRefCount(v.getRefCount());
+  }
   if (!isArrayKey && v.isObject()) {
     write(v.toObject());
     return;
   }
-  v.serialize(this, isArrayKey);
+  serializeVariant(v, this, isArrayKey);
 }
 
 void VariableSerializer::writeNull() {
@@ -870,14 +905,10 @@ void VariableSerializer::writePropertyKey(const String& prop) {
 }
 
 /* key MUST be a non-reference string or int */
-void VariableSerializer::writeArrayKey(Variant key) {
-  auto const keyCell = key.asCell();
+void VariableSerializer::writeArrayKey(const Variant& key) {
+  auto const keyCell = tvAssertCell(key.asTypedValue());
   bool const skey = IS_STRING_TYPE(keyCell->m_type);
 
-  if (skey && m_type == Type::APCSerialize) {
-    write(StrNR(keyCell->m_data.pstr).asString());
-    return;
-  }
   ArrayInfo &info = m_arrayInfos.back();
 
   switch (m_type) {
@@ -920,6 +951,11 @@ void VariableSerializer::writeArrayKey(Variant key) {
     break;
 
   case Type::APCSerialize:
+    if (skey) {
+      write(StrNR(keyCell->m_data.pstr).asString());
+      return;
+    }
+
   case Type::Serialize:
   case Type::DebuggerSerialize:
     write(key);
@@ -929,7 +965,7 @@ void VariableSerializer::writeArrayKey(Variant key) {
     if (!info.first_element) {
       m_buf->append(',');
     }
-    if (m_type == Type::JSON && m_option & k_JSON_PRETTY_PRINT) {
+    if (UNLIKELY(m_option & k_JSON_PRETTY_PRINT)) {
       if (!info.first_element) {
         m_buf->append("\n");
       }
@@ -952,7 +988,7 @@ void VariableSerializer::writeArrayKey(Variant key) {
         m_buf->append('"');
       }
       m_buf->append(':');
-      if (m_type == Type::JSON && m_option & k_JSON_PRETTY_PRINT) {
+      if (UNLIKELY(m_option & k_JSON_PRETTY_PRINT)) {
         m_buf->append(' ');
       }
     }
@@ -977,6 +1013,7 @@ void VariableSerializer::writeCollectionKeylessPrefix() {
   case Type::PrintR:
   case Type::VarExport:
   case Type::PHPOutput:
+  case Type::DebuggerDump:
     indent();
     break;
   case Type::VarDump:
@@ -985,8 +1022,7 @@ void VariableSerializer::writeCollectionKeylessPrefix() {
   case Type::Serialize:
   case Type::DebuggerSerialize:
     break;
-  case Type::JSON:
-  case Type::DebuggerDump: {
+  case Type::JSON: {
     ArrayInfo &info = m_arrayInfos.back();
     if (!info.first_element) {
       m_buf->append(',');
@@ -1006,25 +1042,32 @@ void VariableSerializer::writeCollectionKeylessPrefix() {
 }
 
 void VariableSerializer::writeArrayValue(const Variant& value) {
-  // Do not count referenced values after the first
-  if ((m_type == Type::Serialize || m_type == Type::APCSerialize ||
-       m_type == Type::DebuggerSerialize) &&
-      !(value.isReferenced() &&
-        m_arrayIds->find(value.getRefData()) != m_arrayIds->end())) {
-    m_valueCount++;
-  }
-
-  write(value);
   switch (m_type) {
+  case Type::Serialize:
+  case Type::APCSerialize:
+  case Type::DebuggerSerialize:
+  // Do not count referenced values after the first
+    if (!(value.isReferenced() &&
+          m_arrayIds->find(value.getRefData()) != m_arrayIds->end())) {
+      m_valueCount++;
+    }
+    write(value);
+    break;
+
   case Type::DebuggerDump:
   case Type::PrintR:
+    write(value);
     m_buf->append('\n');
     break;
+
   case Type::VarExport:
   case Type::PHPOutput:
+    write(value);
     m_buf->append(",\n");
     break;
+
   default:
+    write(value);
     break;
   }
 

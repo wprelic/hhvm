@@ -21,20 +21,20 @@ module ShapeMap = Nast.ShapeMap
 module IsGeneric: sig
 
   (* Give back the name and position of a generic if found *)
-  val ty: ty -> string option
+  val ty: locl ty -> string option
 end = struct
 
   exception Found of string
 
   let rec ty (_, x) = ty_ x
   and ty_ = function
-    | Tgeneric ("this", ty) -> ty_opt ty
+    | Tgeneric ("this", Some (_, x)) -> ty x
     | Tgeneric (x, _) -> raise (Found x)
-    | Tanon _
+    | Tanon _ | Taccess _
     | Tany | Tmixed | Tprim _ -> ()
     | Tarray (ty1, ty2) ->
         ty_opt ty1; ty_opt ty2
-    | Tvar _ -> () (* Expansion got rid of Tvars ... *)
+    | Tvar _ -> assert false (* Expansion got rid of Tvars ... *)
     | Toption x -> ty x
     | Tfun fty ->
         List.iter ty (List.map snd fty.ft_params);
@@ -44,11 +44,11 @@ end = struct
           | _ -> ())
     | Tabstract (_, tyl, x) ->
         List.iter ty tyl; ty_opt x
-    | Tapply (_, tyl)
     | Ttuple tyl -> List.iter ty tyl
+    | Tclass (_, tyl)
     | Tunresolved tyl -> List.iter ty tyl
     | Tobject -> ()
-    | Tshape fdm ->
+    | Tshape (_, fdm) ->
         ShapeMap.iter (fun _ v -> ty v) fdm
 
   and ty_opt = function None -> () | Some x -> ty x
@@ -59,10 +59,14 @@ end
 
 let rename env old_name new_name ty_to_rename =
   let rec ty env (r, t) = (match t with
-    | Tgeneric (x, ty) ->
+    | Tgeneric (x, cstr_opt) ->
         let name = if x = old_name then new_name else x in
-        let env, ty = ty_opt env ty in
-        env, (r, Tgeneric (name, ty))
+        let env, cstr_opt = match cstr_opt with
+          | Some (ck, t) ->
+              let env, t = ty env t in
+              env, Some (ck, t)
+          | None -> env, None in
+        env, (r, Tgeneric (name, cstr_opt))
     | Tanon _
     | Tany | Tmixed | Tprim _-> env, (r, t)
     | Tarray (ty1, ty2) ->
@@ -97,12 +101,15 @@ let rename env old_name new_name ty_to_rename =
           ft_ret = ret;
         })
     | Tabstract (id, l, x) ->
-        let env, tyl = tyl env l in
+        let env, l = tyl env l in
         let env, x = ty_opt env x in
         env, (r, Tabstract (id, l, x))
-    | Tapply (id, l) ->
-        let env, l = tyl env l in
-        env, (r, Tapply(id, l))
+    | Tclass (cls, l) ->
+       let env, l = tyl env l in
+       env, (r, Tclass(cls, l))
+    | Taccess (x, ids) ->
+        let env, x = ty env x in
+        env, (r, Taccess(x, ids))
     | Ttuple l ->
         let env, l = tyl env l in
         env, (r, Ttuple l)
@@ -110,12 +117,12 @@ let rename env old_name new_name ty_to_rename =
         let env, l = tyl env l in
         env, (r, Tunresolved l)
     | Tobject -> env, (r, Tobject)
-    | Tshape fdm ->
+    | Tshape (fields_known, fdm) ->
         let env, fdm = ShapeMap.fold (fun k v (env, fdm) ->
           let env, v = ty env v in
           env, ShapeMap.add k v fdm
         ) fdm (env, ShapeMap.empty) in
-        env, (r, Tshape fdm ))
+        env, (r, Tshape (fields_known, fdm) ))
 
   and ty_opt env = function
     | None -> env, None

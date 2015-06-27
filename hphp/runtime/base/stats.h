@@ -47,8 +47,6 @@ namespace Stats {
   STAT(TC_SyncUnwind) \
   STAT(TC_CatchTrace) \
   STAT(TC_CatchSideExit) \
-  STAT(TC_SetMStrGuess_Hit) \
-  STAT(TC_SetMStrGuess_Miss) \
   STAT(TC_DecRef_NZ) \
   STAT(TC_DecRef_Normal_Decl) \
   STAT(TC_DecRef_Normal_Destroy) \
@@ -98,6 +96,11 @@ namespace Stats {
   /* ObjectData construction */ \
   STAT(ObjectData_new_dtor_yes) \
   STAT(ObjectData_new_dtor_no) \
+  STAT(ObjMethod_total) \
+  STAT(ObjMethod_known) \
+  STAT(ObjMethod_methodslot) \
+  STAT(ObjMethod_ifaceslot) \
+  STAT(ObjMethod_cached) \
 
 enum StatCounter {
 #define STAT(name) \

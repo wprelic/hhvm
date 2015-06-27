@@ -210,6 +210,7 @@ class virtual ['a] nast_visitor: ['a] nast_visitor_type = object(this)
    | String s    -> this#on_string acc s
    | This        -> this#on_this acc
    | Id sid      -> this#on_id acc sid
+   | Lplaceholder _sid -> acc
    | Lvar id     -> this#on_lvar acc id
    | Fun_id sid  -> this#on_fun_id acc sid
    | Method_id (expr, pstr) -> this#on_method_id acc expr pstr
@@ -349,8 +350,9 @@ class virtual ['a] nast_visitor: ['a] nast_visitor_type = object(this)
     acc
 
   method on_efun acc f _ = match f.f_body with
-    | UnnamedBody _ -> acc
-    | NamedBody block -> this#on_block acc block
+    | UnnamedBody _ ->
+      failwith "lambdas expected to be named in the context of the surrounding function"
+    | NamedBody { fnb_nast ; _ } -> this#on_block acc fnb_nast
 
   method on_xml acc _ attrl el =
     let acc = List.fold_left begin fun acc (_, e) ->
@@ -361,15 +363,6 @@ class virtual ['a] nast_visitor: ['a] nast_visitor_type = object(this)
 
   method on_assert acc = function
     | AE_assert e -> this#on_expr acc e
-    | AE_invariant (e1, e2, el) ->
-        let acc = this#on_expr acc e1 in
-        let acc = this#on_expr acc e2 in
-        let acc = List.fold_left this#on_expr acc el in
-        acc
-    | AE_invariant_violation (e, el) ->
-        let acc = this#on_expr acc e in
-        let acc = List.fold_left this#on_expr acc el in
-        acc
 
   method on_clone acc e = this#on_expr acc e
 
@@ -397,8 +390,8 @@ end = struct
   let visitor =
     object
       inherit [bool] nast_visitor
-      method on_expr acc _ = acc
-      method on_return _ _ _ = true
+      method! on_expr acc _ = acc
+      method! on_return _ _ _ = true
     end
 
   let block b = visitor#on_block false b
@@ -412,12 +405,12 @@ end
 class loop_visitor =
   object
     inherit [bool] nast_visitor
-    method on_expr acc _ = acc
-    method on_for acc _ _ _ _ = acc
-    method on_foreach acc _ _ _ = acc
-    method on_do acc _ _ = acc
-    method on_while acc _ _ = acc
-    method on_switch acc _ _ = acc
+    method! on_expr acc _ = acc
+    method! on_for acc _ _ _ _ = acc
+    method! on_foreach acc _ _ _ = acc
+    method! on_do acc _ _ = acc
+    method! on_while acc _ _ = acc
+    method! on_switch acc _ _ = acc
   end
 
 (*****************************************************************************)
@@ -439,7 +432,7 @@ end = struct
   let visitor =
     object
       inherit loop_visitor
-      method on_continue _ _ = true
+      method! on_continue _ _ = true
     end
 
   let block b = visitor#on_block false b
@@ -459,7 +452,7 @@ end = struct
   let visitor =
     object
       inherit loop_visitor
-      method on_break _ _ = true
+      method! on_break _ _ = true
     end
 
   let block b = visitor#on_block false b

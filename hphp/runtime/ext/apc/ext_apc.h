@@ -18,7 +18,7 @@
 #ifndef incl_HPHP_EXT_APC_H_
 #define incl_HPHP_EXT_APC_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include <set>
 #include <vector>
 #include "hphp/runtime/server/upload.h"
@@ -26,7 +26,7 @@
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class apcExtension : public Extension {
+class apcExtension final : public Extension {
  public:
   apcExtension() : Extension("apc", "4.0.2") {}
 

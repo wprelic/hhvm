@@ -17,6 +17,7 @@
 
 #include "hphp/runtime/ext/ipc/ext_ipc.h"
 #include "hphp/runtime/ext/std/ext_std_variable.h"
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/variable-unserializer.h"
 #include "hphp/system/constants.h"
 #include "hphp/util/lock.h"
@@ -24,6 +25,7 @@
 #include <folly/String.h>
 
 #include <memory>
+#include <set>
 
 #include <sys/types.h>
 #include <sys/ipc.h>
@@ -31,37 +33,32 @@
 #include <sys/sem.h>
 #include <sys/shm.h>
 
-/* these are missing from cygwin ipc headers */
 #ifdef __CYGWIN__
-struct msgbuf {
-    long mtype;
-    char mtext[1];
-};
+/* These is missing from cygwin ipc headers. */
 #define MSG_EXCEPT 02000
 #endif
 
-#if defined(__APPLE__) || defined(__FreeBSD__)
-# include <sys/msgbuf.h>
-#include <set>
-# define MSGBUF_MTYPE(b) (b)->msg_magic
-# ifdef __APPLE__
-#  define MSGBUF_MTEXT(b) (b)->msg_bufc
-# else
-#  define MSGBUF_MTEXT(b) (b)->msg_ptr
-# endif
+#if defined(__APPLE__) || defined(__CYGWIN__)
+/* OS X defines msgbuf, but it is defined with extra fields and some weird
+ * types. It turns out that the actual msgsnd() and msgrcv() calls work fine
+ * with the same structure that other OSes use. This is weird, but this is also
+ * what PHP does, so *shrug*. */
+typedef struct {
+    long mtype;
+    char mtext[1];
+} hhvm_msgbuf;
 #else
-# define MSGBUF_MTYPE(b) (b)->mtype
-# define MSGBUF_MTEXT(b) (b)->mtext
+typedef msgbuf hhvm_msgbuf;
 #endif
 
 using HPHP::ScopedMem;
 
 namespace HPHP {
 
-static class SysvmsgExtension : public Extension {
+static class SysvmsgExtension final : public Extension {
 public:
   SysvmsgExtension() : Extension("sysvmsg", NO_EXTENSION_VERSION_YET) {}
-  virtual void moduleInit() {
+  void moduleInit() override {
     HHVM_FE(ftok);
     HHVM_FE(msg_get_queue);
     HHVM_FE(msg_queue_exists);
@@ -75,10 +72,10 @@ public:
   }
 } s_sysvmsg_extension;
 
-static class SysvsemExtension : public Extension {
+static class SysvsemExtension final : public Extension {
 public:
   SysvsemExtension() : Extension("sysvsem", NO_EXTENSION_VERSION_YET) {}
-  virtual void moduleInit() {
+  void moduleInit() override {
     HHVM_FE(sem_acquire);
     HHVM_FE(sem_get);
     HHVM_FE(sem_release);
@@ -88,10 +85,10 @@ public:
   }
 } s_sysvsem_extension;
 
-static class SysvshmExtension : public Extension {
+static class SysvshmExtension final : public Extension {
 public:
   SysvshmExtension() : Extension("sysvshm", NO_EXTENSION_VERSION_YET) {}
-  virtual void moduleInit() {
+  void moduleInit() override {
     HHVM_FE(shm_attach);
     HHVM_FE(shm_detach);
     HHVM_FE(shm_remove);
@@ -148,10 +145,10 @@ Variant HHVM_FUNCTION(msg_get_queue,
       return false;
     }
   }
-  MessageQueue *q = newres<MessageQueue>();
+  auto q = makeSmartPtr<MessageQueue>();
   q->key = key;
   q->id = id;
-  return Resource(q);
+  return Variant(std::move(q));
 }
 
 bool HHVM_FUNCTION(msg_queue_exists,
@@ -161,7 +158,7 @@ bool HHVM_FUNCTION(msg_queue_exists,
 
 bool HHVM_FUNCTION(msg_remove_queue,
                    const Resource& queue) {
-  MessageQueue *q = queue.getTyped<MessageQueue>();
+  auto q = cast<MessageQueue>(queue);
   if (!q) {
     raise_warning("Invalid message queue was specified");
     return false;
@@ -185,7 +182,7 @@ const StaticString
 bool HHVM_FUNCTION(msg_set_queue,
                    const Resource& queue,
                    const Array& data) {
-  MessageQueue *q = queue.getTyped<MessageQueue>();
+  auto q = cast<MessageQueue>(queue);
   if (!q) {
     raise_warning("Invalid message queue was specified");
     return false;
@@ -211,7 +208,7 @@ bool HHVM_FUNCTION(msg_set_queue,
 
 Array HHVM_FUNCTION(msg_stat_queue,
                     const Resource& queue) {
-  MessageQueue *q = queue.getTyped<MessageQueue>();
+  auto q = cast<MessageQueue>(queue);
   if (!q) {
     raise_warning("Invalid message queue was specified");
     return Array();
@@ -243,13 +240,13 @@ bool HHVM_FUNCTION(msg_send,
                    bool serialize /* = true */,
                    bool blocking /* = true */,
                    VRefParam errorcode /* = null */) {
-  MessageQueue *q = queue.getTyped<MessageQueue>();
+  auto q = cast<MessageQueue>(queue);
   if (!q) {
     raise_warning("Invalid message queue was specified");
     return false;
   }
 
-  struct msgbuf *buffer = NULL;
+  hhvm_msgbuf *buffer = nullptr;
   String data;
   if (serialize) {
     data = HHVM_FN(serialize)(message);
@@ -257,10 +254,10 @@ bool HHVM_FUNCTION(msg_send,
     data = message.toString();
   }
   int len = data.length();
-  buffer = (struct msgbuf *)calloc(len + sizeof(struct msgbuf), 1);
+  buffer = (hhvm_msgbuf *)calloc(len + sizeof(hhvm_msgbuf), 1);
   ScopedMem deleter(buffer);
-  MSGBUF_MTYPE(buffer) = msgtype;
-  memcpy(MSGBUF_MTEXT(buffer), data.c_str(), len + 1);
+  buffer->mtype = msgtype;
+  memcpy(buffer->mtext, data.c_str(), len + 1);
 
   int result = msgsnd(q->id, buffer, len, blocking ? 0 : IPC_NOWAIT);
   if (result < 0) {
@@ -281,7 +278,7 @@ bool HHVM_FUNCTION(msg_receive,
                    bool unserialize /* = true */,
                    int64_t flags /* = 0 */,
                    VRefParam errorcode /* = null */) {
-  MessageQueue *q = queue.getTyped<MessageQueue>();
+  auto q = cast<MessageQueue>(queue);
   if (!q) {
     raise_warning("Invalid message queue was specified");
     return false;
@@ -301,22 +298,18 @@ bool HHVM_FUNCTION(msg_receive,
     if (flags & k_MSG_IPC_NOWAIT) realflags |= IPC_NOWAIT;
   }
 
-  struct msgbuf *buffer =
-    (struct msgbuf *)calloc(maxsize + sizeof(struct msgbuf), 1);
+  hhvm_msgbuf *buffer = (hhvm_msgbuf *)calloc(maxsize + sizeof(hhvm_msgbuf), 1);
   ScopedMem deleter(buffer);
 
   int result = msgrcv(q->id, buffer, maxsize, desiredmsgtype, realflags);
   if (result < 0) {
-    int err = errno;
-    raise_warning("Unable to receive message: %s",
-                    folly::errnoStr(err).c_str());
-    errorcode = err;
+    errorcode = errno;
     return false;
   }
 
-  msgtype = (int)MSGBUF_MTYPE(buffer);
+  msgtype = (int)buffer->mtype;
   if (unserialize) {
-    const char *bufText = (const char *)MSGBUF_MTEXT(buffer);
+    const char *bufText = (const char *)buffer->mtext;
     uint bufLen = strlen(bufText);
     VariableUnserializer vu(bufText, bufLen,
                             VariableUnserializer::Type::Serialize);
@@ -329,7 +322,7 @@ bool HHVM_FUNCTION(msg_receive,
       return false;
     }
   } else {
-    message = String((const char *)MSGBUF_MTEXT(buffer));
+    message = String((const char *)buffer->mtext);
   }
 
   return true;
@@ -364,8 +357,7 @@ union semun {
   struct seminfo *__buf;    /* buffer for IPC_INFO */
 };
 
-class Semaphore : public SweepableResourceData {
-public:
+struct Semaphore : SweepableResourceData {
   int key;          // For error reporting.
   int semid;        // Returned by semget()
   int count;        // Acquire count for auto-release.
@@ -373,7 +365,7 @@ public:
 
   CLASSNAME_IS("Semaphore");
   // overriding ResourceData
-  virtual const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override { return classnameof(); }
 
   bool op(bool acquire) {
     struct sembuf sop;
@@ -402,10 +394,6 @@ public:
   }
 
   ~Semaphore() {
-    Semaphore::sweep();
-  }
-
-  void sweep() override {
     /*
      * if count == -1, semaphore has been removed
      * Need better way to handle this
@@ -432,16 +420,19 @@ public:
 
     semop(semid, sop, opcount);
   }
+  DECLARE_RESOURCE_ALLOCATION(Semaphore);
 };
+
+IMPLEMENT_RESOURCE_ALLOCATION(Semaphore)
 
 bool HHVM_FUNCTION(sem_acquire,
                    const Resource& sem_identifier) {
-  return sem_identifier.getTyped<Semaphore>()->op(true);
+  return cast<Semaphore>(sem_identifier)->op(true);
 }
 
 bool HHVM_FUNCTION(sem_release,
                    const Resource& sem_identifier) {
-  return sem_identifier.getTyped<Semaphore>()->op(false);
+  return cast<Semaphore>(sem_identifier)->op(false);
 }
 
 /**
@@ -527,7 +518,7 @@ Variant HHVM_FUNCTION(sem_get,
     }
   }
 
-  Semaphore *sem_ptr = new Semaphore();
+  auto sem_ptr = makeSmartPtr<Semaphore>();
   sem_ptr->key   = key;
   sem_ptr->semid = semid;
   sem_ptr->count = 0;
@@ -541,7 +532,7 @@ Variant HHVM_FUNCTION(sem_get,
  */
 bool HHVM_FUNCTION(sem_remove,
                    const Resource& sem_identifier) {
-  Semaphore *sem_ptr = sem_identifier.getTyped<Semaphore>();
+  auto sem_ptr = cast<Semaphore>(sem_identifier);
 
   union semun un;
   struct semid_ds buf;
@@ -598,8 +589,7 @@ public:
 class shm_set : public std::set<sysvshm_shm*> {
 public:
   ~shm_set() {
-    for (std::set<sysvshm_shm*>::iterator iter = begin(); iter != end();
-         ++iter) {
+    for (auto iter = begin(); iter != end(); ++iter) {
       delete *iter;
     }
   }
@@ -683,7 +673,7 @@ Variant HHVM_FUNCTION(shm_attach,
   long shm_id;
 
   if (shm_size < 1) {
-    raise_warning("Segment size must be greater then zero.");
+    raise_warning("Segment size must be greater than zero.");
     return false;
   }
 
@@ -731,8 +721,7 @@ Variant HHVM_FUNCTION(shm_attach,
 bool HHVM_FUNCTION(shm_detach,
                    int64_t shm_identifier) {
   Lock lock(g_shm_mutex);
-  std::set<sysvshm_shm*>::iterator iter =
-    g_shms.find((sysvshm_shm*)shm_identifier);
+  auto iter = g_shms.find((sysvshm_shm*)shm_identifier);
   if (iter == g_shms.end()) {
     raise_warning("%" PRId64 " is not a SysV shared memory index",
                   shm_identifier);
@@ -746,8 +735,7 @@ bool HHVM_FUNCTION(shm_detach,
 bool HHVM_FUNCTION(shm_remove,
                    int64_t shm_identifier) {
   Lock lock(g_shm_mutex);
-  std::set<sysvshm_shm*>::iterator iter =
-    g_shms.find((sysvshm_shm*)shm_identifier);
+  auto iter = g_shms.find((sysvshm_shm*)shm_identifier);
   if (iter == g_shms.end()) {
     raise_warning("%" PRId64 " is not a SysV shared memory index", shm_identifier);
     return false;
@@ -773,8 +761,7 @@ Variant HHVM_FUNCTION(shm_get_var,
                       int64_t shm_identifier,
                       int64_t variable_key) {
   Lock lock(g_shm_mutex);
-  std::set<sysvshm_shm*>::iterator iter =
-    g_shms.find((sysvshm_shm*)shm_identifier);
+  auto iter = g_shms.find((sysvshm_shm*)shm_identifier);
   if (iter == g_shms.end()) {
     raise_warning("%" PRId64 " is not a SysV shared memory index",
                   shm_identifier);
@@ -796,8 +783,7 @@ bool HHVM_FUNCTION(shm_has_var,
                    int64_t shm_identifier,
                    int64_t variable_key) {
   Lock lock(g_shm_mutex);
-  std::set<sysvshm_shm*>::iterator iter =
-    g_shms.find((sysvshm_shm*)shm_identifier);
+  auto iter = g_shms.find((sysvshm_shm*)shm_identifier);
   if (iter == g_shms.end()) {
     raise_warning("%" PRId64 " is not a SysV shared memory index",
                   shm_identifier);
@@ -813,19 +799,18 @@ bool HHVM_FUNCTION(shm_put_var,
                    int64_t shm_identifier,
                    int64_t variable_key,
                    const Variant& variable) {
+  /* setup string-variable and serialize */
+  String serialized = HHVM_FN(serialize)(variable);
+
   Lock lock(g_shm_mutex);
-  std::set<sysvshm_shm*>::iterator iter =
-    g_shms.find((sysvshm_shm*)shm_identifier);
+  auto iter = g_shms.find((sysvshm_shm*)shm_identifier);
   if (iter == g_shms.end()) {
     raise_warning("%" PRId64 " is not a SysV shared memory index",
                   shm_identifier);
     return false;
   }
+
   sysvshm_shm *shm_list_ptr = *iter;
-
-  /* setup string-variable and serialize */
-  String serialized = HHVM_FN(serialize)(variable);
-
   /* insert serialized variable into shared memory */
   int ret = put_shm_data(shm_list_ptr->ptr, variable_key,
                          (char*)serialized.data(), serialized.size());
@@ -840,8 +825,7 @@ bool HHVM_FUNCTION(shm_remove_var,
                    int64_t shm_identifier,
                    int64_t variable_key) {
   Lock lock(g_shm_mutex);
-  std::set<sysvshm_shm*>::iterator iter =
-    g_shms.find((sysvshm_shm*)shm_identifier);
+  auto iter = g_shms.find((sysvshm_shm*)shm_identifier);
   if (iter == g_shms.end()) {
     raise_warning("%" PRId64 " is not a SysV shared memory index", shm_identifier);
     return false;

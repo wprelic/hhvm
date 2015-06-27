@@ -18,7 +18,7 @@
 #ifndef incl_HPHP_EXT_ARRAY_H_
 #define incl_HPHP_EXT_ARRAY_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/base/array-util.h"
 #include "hphp/runtime/base/zend-collator.h"
 
@@ -83,11 +83,16 @@ Variant array_keys_helper(const Variant& input,
                           const Variant& search_value = uninit_null(),
                           bool strict = false);
 TypedValue* HHVM_FN(array_keys)(ActRec* ar);
+Variant HHVM_FUNCTION(array_map, const Variant& callback,
+                                 const Variant& arr1,
+                                 const Array& _argv = null_array);
 Variant HHVM_FUNCTION(array_merge_recursive,
+                      int64_t numArgs,
                       const Variant& array1,
                       const Variant& array2 = null_variant,
                       const Array& args = null_array);
 Variant HHVM_FUNCTION(array_merge,
+                      int64_t numArgs,
                       const Variant& array1,
                       const Variant& array2 = null_variant,
                       const Array& args = null_array);
@@ -114,10 +119,6 @@ Variant HHVM_FUNCTION(array_push,
 Variant HHVM_FUNCTION(array_rand,
                       const Variant& input,
                       int num_req = 1);
-Variant HHVM_FUNCTION(array_reduce,
-                      const Variant& input,
-                      const Variant& callback,
-                      const Variant& initial = null_variant);
 Variant HHVM_FUNCTION(array_reverse,
                       const Variant& array,
                       bool preserve_keys = false);
@@ -129,7 +130,7 @@ Variant HHVM_FUNCTION(array_shift,
                       VRefParam array);
 Variant HHVM_FUNCTION(array_slice,
                       const Variant& array,
-                      int offset,
+                      int64_t offset,
                       const Variant& length = null_variant,
                       bool preserve_keys = false);
 Variant HHVM_FUNCTION(array_splice,

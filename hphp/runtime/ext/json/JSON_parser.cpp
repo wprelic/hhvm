@@ -31,17 +31,20 @@ SOFTWARE.
 #ifndef HAVE_JSONC
 
 #include "hphp/runtime/ext/json/JSON_parser.h"
+
 #include <vector>
-#include "hphp/runtime/base/complex-types.h"
-#include "hphp/runtime/base/type-conversions.h"
+
 #include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/base/utf8-decode.h"
-#include "hphp/system/systemlib.h"
+#include "hphp/runtime/base/collections.h"
+#include "hphp/runtime/base/string-buffer.h"
+#include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/thread-info.h"
 #include "hphp/runtime/base/thread-init-fini.h"
+#include "hphp/runtime/base/utf8-decode.h"
+#include "hphp/runtime/base/zend-strtod.h"
 #include "hphp/runtime/ext/json/ext_json.h"
 #include "hphp/runtime/ext/ext_collections.h"
-#include "hphp/runtime/base/zend-strtod.h"
+#include "hphp/system/systemlib.h"
 
 #define MAX_LENGTH_OF_LONG 20
 static const char long_min_digits[] = "9223372036854775808";
@@ -165,7 +168,7 @@ namespace HPHP {
     This table maps the 128 ASCII characters into the 32 character classes.
     The remaining Unicode characters should be mapped to S_ETC.
 */
-static const int ascii_class[128] = {
+static const int8_t ascii_class[128] __attribute__((__aligned__(64))) = {
     S_ERR, S_ERR, S_ERR, S_ERR, S_ERR, S_ERR, S_ERR, S_ERR,
     S_ERR, S_WSP, S_WSP, S_ERR, S_ERR, S_WSP, S_ERR, S_ERR,
     S_ERR, S_ERR, S_ERR, S_ERR, S_ERR, S_ERR, S_ERR, S_ERR,
@@ -188,7 +191,7 @@ static const int ascii_class[128] = {
 };
 
 /*<fb>*/
-static const int loose_ascii_class[128] = {
+static const int8_t loose_ascii_class[128] __attribute__((__aligned__(64))) = {
   S_ERR, S_ERR, S_ERR, S_ERR, S_ERR, S_ERR, S_ERR, S_ERR,
   S_ERR, S_WSP, S_WSP, S_ERR, S_ERR, S_WSP, S_ERR, S_ERR,
   S_ERR, S_ERR, S_ERR, S_ERR, S_ERR, S_ERR, S_ERR, S_ERR,
@@ -219,7 +222,7 @@ static const int loose_ascii_class[128] = {
     0 and 29. An action is a negative number between -1 and -9. A JSON text is
     accepted if the end of the text is in state 9 and mode is MODE_DONE.
 */
-static const int state_transition_table[30][31] = {
+static const int8_t state_transition_table[30][32] __attribute__((__aligned__(64))) = {
 /* 0*/ { 0, 0,-8,-1,-6,-1,-1,-1, 3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
 /* 1*/ { 1, 1,-1,-9,-1,-1,-1,-1, 3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
 /* 2*/ { 2, 2,-8,-1,-6,-5,-1,-1, 3,-1,-1,-1,20,-1,21,22,-1,-1,-1,-1,-1,13,-1,17,-1,-1,10,-1,-1,-1,-1},
@@ -256,7 +259,7 @@ static const int state_transition_table[30][31] = {
 /*
   Alternate "loose" transition table to support unquoted keys.
 */
-static const int loose_state_transition_table[31][31] = {
+static const int8_t loose_state_transition_table[31][32] __attribute__((__aligned__(64))) = {
 /* 0*/ { 0, 0,-8,-1,-6,-1,-1,-1, 3,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1},
 /* 1*/ { 1, 1,-1,-9,-1,-1,-1,-1, 3,-1,-1,-1,-1,-1,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30,30},
 /* 2*/ { 2, 2,-8,-1,-6,-5,-1,-1, 3,-1,-1,-1,20,-1,21,22,-1,-1,-1,-1,-1,13,-1,17,-1,-1,10,-1,-1,-1,-1},
@@ -551,7 +554,7 @@ static void object_set(Variant &var,
   } else {
     if (collections) {
       auto keyTV = make_tv<KindOfString>(key.get());
-      collectionSet(var.getObjectData(), &keyTV, value.asCell());
+      collections::set(var.getObjectData(), &keyTV, value.asCell());
     } else {
       forceToArray(var).set(key, value);
     }
@@ -572,7 +575,7 @@ static void attach_zval(json_parser *json,
 
   if (up_mode == MODE_ARRAY) {
     if (collections) {
-      collectionAppend(root.getObjectData(), child.asCell());
+      collections::append(root.getObjectData(), child.asCell());
     } else {
       root.toArrRef().append(child);
     }
@@ -609,11 +612,14 @@ bool JSON_parser(Variant &z, const char *p, int length, bool const assoc,
   bool const stable_maps = options & k_JSON_FB_STABLE_MAPS;
   bool const collections = stable_maps || (options & k_JSON_FB_COLLECTIONS);
   int qchr = 0;
-  int const *byte_class;
+  int8_t const *byte_class;
+  int8_t const (*next_state_table)[32];
   if (loose) {
     byte_class = loose_ascii_class;
+    next_state_table = loose_state_transition_table;
   } else {
     byte_class = ascii_class;
+    next_state_table = state_transition_table;
   }
   /*</fb>*/
 
@@ -663,11 +669,7 @@ bool JSON_parser(Variant &z, const char *p, int length, bool const assoc,
     */
 
     /*<fb>*/
-    if (loose) {
-      s = loose_state_transition_table[the_state][c];
-    } else {
-      s = state_transition_table[the_state][c];
-    }
+    s = next_state_table[the_state][c];
 
     if (s == -4) {
       if (b != qchr) {
@@ -715,7 +717,7 @@ bool JSON_parser(Variant &z, const char *p, int length, bool const assoc,
           /*<fb>*/
           if (collections) {
             // stable_maps is meaningless
-            top = newobj<c_Map>();
+            top = makeSmartPtr<c_Map>();
           } else {
           /*</fb>*/
             if (!assoc) {
@@ -786,7 +788,7 @@ bool JSON_parser(Variant &z, const char *p, int length, bool const assoc,
           }
           /*<fb>*/
           if (collections) {
-            top = newobj<c_Vector>();
+            top = makeSmartPtr<c_Vector>();
           } else {
             top = Array::Create();
           }
@@ -806,7 +808,7 @@ bool JSON_parser(Variant &z, const char *p, int length, bool const assoc,
             json_create_zval(mval, *buf, type, options);
             auto& top = the_json->the_zstack[the_json->the_top];
             if (collections) {
-              collectionAppend(top.getObjectData(), mval.asCell());
+              collections::append(top.getObjectData(), mval.asCell());
             } else {
               top.toArrRef().append(mval);
             }
@@ -877,7 +879,7 @@ bool JSON_parser(Variant &z, const char *p, int length, bool const assoc,
             if (type != -1) {
               auto& top = the_json->the_zstack[the_json->the_top];
               if (collections) {
-                collectionAppend(top.getObjectData(), mval.asCell());
+                collections::append(top.getObjectData(), mval.asCell());
               } else {
                 top.toArrRef().append(mval);
               }

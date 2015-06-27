@@ -15,14 +15,16 @@
 */
 
 #include "hphp/runtime/server/source-root-info.h"
-#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/comparisons.h"
+#include "hphp/runtime/base/config.h"
+#include "hphp/runtime/base/php-globals.h"
 #include "hphp/runtime/base/preg.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/string-util.h"
+#include "hphp/runtime/base/tv-arith.h"
+#include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/server/http-request-handler.h"
 #include "hphp/runtime/server/transport.h"
-#include "hphp/runtime/debugger/debugger.h"
-#include "hphp/runtime/base/tv-arith.h"
-#include "hphp/runtime/base/php-globals.h"
-#include "hphp/runtime/base/config.h"
 
 using std::map;
 
@@ -53,7 +55,7 @@ SourceRootInfo::SourceRootInfo(Transport* transport)
   Variant matches;
   Variant r = preg_match(String(RuntimeOption::SandboxPattern.c_str(),
                                 RuntimeOption::SandboxPattern.size(),
-                                CopyString), host, matches);
+                                CopyString), host, &matches);
   if (!same(r, 1)) {
     m_sandboxCond = SandboxCondition::Off;
     return;
@@ -131,25 +133,23 @@ void SourceRootInfo::createFromUserConfig() {
   std::string confFileName = std::string(homePath.c_str()) +
     RuntimeOption::SandboxConfFile;
   IniSetting::Map ini = IniSetting::Map::object;
-  Hdf config, serverVars;
+  Hdf config;
   String sp, lp, alp, userOverride;
   try {
     Config::ParseConfigFile(confFileName, ini, config);
-    userOverride = Config::Get(ini, config["user_override"]);
-    Hdf sboxConf = config[m_sandbox.c_str()];
-    if (sboxConf.exists()) {
-      sp = Config::Get(ini, sboxConf["path"]);
-      lp = Config::Get(ini, sboxConf["log"]);
-      alp = Config::Get(ini, sboxConf["accesslog"]);
-      serverVars = sboxConf["ServerVars"];
-    }
+    userOverride = Config::Get(ini, config, "user_override");
+    sp = Config::Get(ini, config, (m_sandbox + ".path").c_str());
+    lp = Config::Get(ini, config, (m_sandbox + ".log").c_str());
+    alp = Config::Get(ini, config, (m_sandbox + ".accesslog").c_str());
   } catch (HdfException &e) {
     Logger::Error("%s ignored: %s", confFileName.c_str(),
                   e.getMessage().c_str());
   }
-  if (serverVars.exists()) {
-    for (Hdf hdf = serverVars.firstChild(); hdf.exists(); hdf = hdf.next()) {
-      m_serverVars.set(String(hdf.getName()), String(Config::GetString(ini, hdf)));
+  if (config[(m_sandbox + ".ServerVars").c_str()]. exists()) {
+    for (Hdf hdf = config[(m_sandbox + ".ServerVars").c_str()].firstChild();
+                   hdf.exists(); hdf = hdf.next()) {
+      m_serverVars.set(String(hdf.getName()),
+                       String(Config::GetString(ini, hdf)));
     }
   }
   if (!userOverride.empty()) {

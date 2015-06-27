@@ -21,8 +21,7 @@
 
 #include "hphp/vixl/a64/simulator-a64.h"
 
-namespace HPHP {
-namespace jit {
+namespace HPHP { namespace jit {
 
 static void setupAfterPrologue(ActRec* fp, void* sp) {
   auto& regs = vmRegsUnsafe();
@@ -48,34 +47,24 @@ static void setupAfterPrologue(ActRec* fp, void* sp) {
   }
 }
 
-TCA fcallHelper(ActRec* ar, void* sp) {
+TCA fcallHelper(ActRec* ar) {
   try {
-    assert(!ar->resumed());
-    TCA tca =
-      mcg->getFuncPrologue((Func*)ar->m_func, ar->numArgs(), ar);
-    if (tca) {
-      return tca;
+    assertx(!ar->resumed());
+    auto const tca = mcg->getFuncPrologue(
+      const_cast<Func*>(ar->m_func),
+      ar->numArgs(),
+      ar
+    );
+    if (tca) return tca;
+
+    VMRegAnchor _(ar);
+    if (doFCall(ar, vmpc())) {
+      return mcg->tx().uniqueStubs.resumeHelperRet;
     }
-    if (!ar->m_func->isClonedClosure()) {
-      /*
-       * If the func is a cloned closure, then the original
-       * closure has already run the prologue, and the prologues
-       * array is just being used as entry points for the
-       * dv funclets. Dont run the prologue again.
-       */
-      VMRegAnchor _(ar);
-      if (g_context->doFCall(ar, vmpc())) {
-        return mcg->tx().uniqueStubs.resumeHelperRet;
-      }
-      // We've been asked to skip the function body
-      // (fb_intercept). frame, stack and pc have
-      // already been fixed - flag that with a negative
-      // return address.
-      return (TCA)-ar->m_savedRip;
-    }
-    setupAfterPrologue(ar, sp);
-    assert(ar == vmRegsUnsafe().fp);
-    return mcg->tx().uniqueStubs.resumeHelper;
+    // We've been asked to skip the function body (fb_intercept). frame,
+    // stack and pc have already been fixed - flag that with a negative
+    // return address.
+    return reinterpret_cast<TCA>(-ar->m_savedRip);
   } catch (...) {
     /*
       The return address is set to __fcallHelperThunk,
@@ -96,19 +85,21 @@ TCA fcallHelper(ActRec* ar, void* sp) {
 }
 
 /*
- * This is used to generate an entry point for the entry
- * to a function, after the prologue has run.
+ * This is used to generate an entry point for the entry to a function, after
+ * the prologue has run.
  */
-TCA funcBodyHelper(ActRec* fp, void* sp) {
+TCA funcBodyHelper(ActRec* fp) {
+  assert_native_stack_aligned();
+  void* const sp = reinterpret_cast<Cell*>(fp) - fp->func()->numSlotsInFrame();
   setupAfterPrologue(fp, sp);
   tl_regState = VMRegState::CLEAN;
-  Func* func = const_cast<Func*>(fp->m_func);
 
-  TCA tca = mcg->getCallArrayPrologue(func);
-
+  auto const func = const_cast<Func*>(fp->m_func);
+  auto tca = mcg->getCallArrayPrologue(func);
   if (!tca) {
     tca = mcg->tx().uniqueStubs.resumeHelper;
   }
+
   tl_regState = VMRegState::DIRTY;
   return tca;
 }
@@ -141,4 +132,4 @@ int64_t decodeCufIterHelper(Iter* it, TypedValue func) {
   return true;
 }
 
-} } // HPHP::jit
+}}

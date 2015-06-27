@@ -64,30 +64,52 @@ namespace HPHP { namespace jit {
  */
 template<class T>
 struct TargetProfile {
-  explicit TargetProfile(const TransContext& context,
-                         BCMarker marker,
-                         const StringData* name)
-    : m_link(createLink(context, marker, name))
+  TargetProfile(TransID profTransID,
+                Offset bcOff,
+                const StringData* name,
+                size_t extraSize = 0)
+    : m_link(createLink(profTransID, bcOff, name, extraSize))
+  {}
+
+  TargetProfile(const TransContext& context,
+                BCMarker marker,
+                const StringData* name,
+                size_t extraSize = 0)
+    : TargetProfile(profiling() ? context.transID : marker.profTransID(),
+                    marker.bcOff(),
+                    name,
+                    extraSize)
   {}
 
   /*
    * Access the data we collected during profiling.
    *
    * ReduceFn is used to fold the data from each local RDS slot.  It must have
-   * the signature void(T&, const T&), and should assume the second argument
-   * might be concurrently written to by other threads running in the
-   * translation cache.
+   * the signature void(T&, const T&, Args...), and should assume the second
+   * argument might be concurrently written to by other threads running in the
+   * translation cache. Any arguments passed to data() after reduce will be
+   * forwarded to the reduce function.
+   *
+   * Most callers probably want the second overload, for simplicity. The
+   * two-argument version is for variable-sized T, and the caller must ensure
+   * that out is zero-initialized before calling data().
    *
    * Pre: optimizing()
    */
-  template<class ReduceFn>
-  T data(ReduceFn reduce) const {
-    assert(optimizing());
+  template<class ReduceFn, class... Args>
+  void data(T& out, ReduceFn reduce, Args&&... extraArgs) const {
+    assertx(optimizing());
     auto const hand = handle();
-    auto accum = T{};
-    for (auto& base : RDS::allTLBases()) {
-      reduce(accum, RDS::handleToRef<T>(base, hand));
+    for (auto& base : rds::allTLBases()) {
+      reduce(out, rds::handleToRef<T>(base, hand),
+             std::forward<Args>(extraArgs)...);
     }
+  }
+
+  template<class ReduceFn, class... Args>
+  T data(ReduceFn reduce, Args&&... extraArgs) const {
+    auto accum = T{};
+    data(accum, reduce, std::forward<Args>(extraArgs)...);
     return accum;
   }
 
@@ -108,38 +130,22 @@ struct TargetProfile {
    * Access the handle to the link.  You generally should only need to do this
    * if profiling().
    */
-  RDS::Handle handle() const { return m_link.handle(); }
+  rds::Handle handle() const { return m_link.handle(); }
 
 private:
-  RDS::Link<T> link() {
-    if (!m_link) m_link = createLink();
-    return *m_link;
-  }
+  static rds::Link<T> createLink(TransID profTransID,
+                                 Offset bcOff,
+                                 const StringData* name,
+                                 size_t extraSize) {
+    auto const rdsKey = rds::Profile{profTransID, bcOff, name};
 
-  static RDS::Link<T> createLink(const TransContext& context,
-                                 BCMarker marker,
-                                 const StringData* name) {
     switch (mcg->tx().mode()) {
     case TransKind::Profile:
-      return RDS::bind<T>(
-        RDS::Profile {
-          context.transID,
-          marker.bcOff(),
-          name
-        },
-        RDS::Mode::Local
-      );
+      return rds::bind<T>(rdsKey, rds::Mode::Local, extraSize);
 
     case TransKind::Optimize:
-      if (isValidTransID(marker.m_profTransID)) {
-        return RDS::attach<T>(
-          RDS::Profile {
-            marker.m_profTransID, // transId from profiling translation
-            marker.bcOff(),
-            name
-          }
-        );
-      }
+      if (isValidTransID(profTransID)) return rds::attach<T>(rdsKey);
+
       // fallthrough
     case TransKind::Anchor:
     case TransKind::Prologue:
@@ -147,74 +153,110 @@ private:
     case TransKind::Live:
     case TransKind::Proflogue:
     case TransKind::Invalid:
-      return RDS::Link<T>(RDS::kInvalidHandle);
+      return rds::Link<T>(rds::kInvalidHandle);
     }
     not_reached();
   }
 
 private:
-  RDS::Link<T> const m_link;
+  rds::Link<T> const m_link;
+};
+
+struct ClassProfile {
+  static const size_t kClassProfileSampleSize = 4;
+
+  const Class* sampledClasses[kClassProfileSampleSize];
+
+  bool isMonomorphic() const {
+    return size() == 1;
+  }
+
+  const Class* getClass(size_t i) const {
+    if (i >= kClassProfileSampleSize) return nullptr;
+    return sampledClasses[i];
+  }
+
+  size_t size() const {
+    for (auto i = 0; i < kClassProfileSampleSize; ++i) {
+      auto const cls = sampledClasses[i];
+      if (!cls) return i;
+    }
+    return kClassProfileSampleSize;
+  }
+
+  void reportClass(const Class* cls) {
+    for (auto& myCls : sampledClasses) {
+      // If the current slot is empty, store the class here.
+      if (!myCls) {
+        myCls = cls;
+        break;
+      }
+
+      // If the current slot matches the requested class, give up.
+      if (cls == myCls) {
+        break;
+      }
+    }
+  }
+
+  static void reduce(ClassProfile& a, const ClassProfile& b) {
+    // Racy, but who cares?
+    for (auto const cls : b.sampledClasses) {
+      if (!cls) return;
+      a.reportClass(cls);
+    }
+  }
 };
 
 //////////////////////////////////////////////////////////////////////
 
+struct IncRefProfile {
+  /* The number of times this IncRef made it at least as far as the static
+   * check (meaning it was given a refcounted DataType. */
+  uint16_t tryinc;
+
+  std::string toString() const {
+    return folly::sformat("tryinc: {:4}", tryinc);
+  }
+
+  static void reduce(IncRefProfile& a, const IncRefProfile& b) {
+    a.tryinc += b.tryinc;
+  }
+};
+
 /*
- * DecRefProfile is used to track which DecRef instructions are likely to go to
- * zero. During an optimized translation, the release path will be put in
- * acold if it rarely went to zero during profiling.
+ * DecRefProfile is used to track which types go through DecRef instructions,
+ * and which ones arelikely go to zero.
  */
 struct DecRefProfile {
-  uint16_t decrement;
+  /* The number of times this DecRef was executed. */
+  uint16_t hits;
+
+  /* The number of times this DecRef made it at least as far as the static
+   * check (meaning it was given a refcounted DataType. */
+  uint16_t trydec;
+
+  /* The number of times this DecRef went to zero and called destroy(). */
   uint16_t destroy;
 
-  int hitRate() const {
-    return decrement ? destroy * 100 / decrement : 0;
+  float destroyRate() const {
+    return hits ? float(destroy) / hits : 0.0;
   }
 
   std::string toString() const {
-    return folly::format("decl: {:3}, destroy: {:3} ({:3}%)",
-                         decrement, destroy, hitRate()).str();
+    return folly::sformat("hits: {:4} trydec: {:4}, destroy: {:4} ({:.2%}%)",
+                          hits, trydec, destroy, destroyRate());
   }
 
   static void reduce(DecRefProfile& a, const DecRefProfile& b) {
-    // This is slightly racy but missing a few either way isn't a
-    // disaster. It's already racy at profiling time because the two values
-    // aren't updated atomically.
-    a.decrement += b.decrement;
-    a.destroy   += b.destroy;
+    a.hits    += b.hits;
+    a.trydec  += b.trydec;
+    a.destroy += b.destroy;
   }
 };
 typedef folly::Optional<TargetProfile<DecRefProfile>> OptDecRefProfile;
 
 //////////////////////////////////////////////////////////////////////
-
-/*
- * This records the specific types of values that pass KindOfString guards,
- * which fall into one of three categories: KindOfStaticString, KindOfString
- * with a static _count, or KindOfString with a non-static _count. When a guard
- * only sees KindOfStaticString during profiling, we replace it with a
- * KindOfStaticString guard during optimized translations.
- */
-struct StrProfile {
-  uint32_t staticStr; // m_type == KindOfStaticString
-  uint32_t strStatic; // m_type == KindOfString, _count == StaticValue
-  uint32_t str;       // m_type == KindOfString, _count != StaticValue
-
-  std::string toString() const {
-    return folly::format("StaticStr: {:5}, StrStatic: {:5}, Str: {:5}",
-                         staticStr, strStatic, str).str();
-  }
-
-  size_t total() const {
-    return staticStr + strStatic + str;
-  }
-
-  static void reduce(StrProfile& a, const StrProfile& b) {
-    a.staticStr += b.staticStr;
-    a.strStatic += b.strStatic;
-    a.str += b.str;
-  }
-};
 
 /*
  * Record profiling information about non-packed arrays. This counts the
@@ -225,6 +267,51 @@ struct NonPackedArrayProfile {
   int32_t count;
   static void reduce(NonPackedArrayProfile& a, const NonPackedArrayProfile& b) {
     a.count += b.count;
+  }
+};
+
+struct StructArrayProfile {
+  int32_t nonStructCount;
+  int32_t numShapesSeen;
+  Shape* shape{nullptr}; // Never access this directly. Use getShape instead.
+
+  bool isEmpty() const {
+    return !numShapesSeen;
+  }
+
+  bool isMonomorphic() const {
+    return numShapesSeen == 1;
+  }
+
+  bool isPolymorphic() const {
+    return numShapesSeen > 1;
+  }
+
+  void makePolymorphic() {
+    numShapesSeen = INT_MAX;
+    shape = nullptr;
+  }
+
+  Shape* getShape() const {
+    assertx(isMonomorphic());
+    return shape;
+  }
+
+  static void reduce(StructArrayProfile& a, const StructArrayProfile& b) {
+    a.nonStructCount += b.nonStructCount;
+    if (a.isPolymorphic()) return;
+
+    if (a.isEmpty()) {
+      a.shape = b.shape;
+      a.numShapesSeen = b.numShapesSeen;
+      return;
+    }
+
+    assertx(a.isMonomorphic());
+    if (b.isEmpty()) return;
+    if (b.isMonomorphic() && a.getShape() == b.getShape()) return;
+    a.makePolymorphic();
+    return;
   }
 };
 
@@ -244,6 +331,37 @@ struct ReleaseVVProfile {
     a.released += b.released;
   }
 };
+
+//////////////////////////////////////////////////////////////////////
+
+struct SwitchProfile {
+  SwitchProfile(const SwitchProfile&) = delete;
+  SwitchProfile& operator=(const SwitchProfile&) = delete;
+
+  uint32_t cases[0]; // dynamically sized
+
+  static void reduce(SwitchProfile& a, const SwitchProfile& b, int nCases) {
+    for (uint32_t i = 0; i < nCases; ++i) {
+      a.cases[i] += b.cases[i];
+    }
+  }
+};
+
+struct SwitchCaseCount {
+  int32_t caseIdx;
+  uint32_t count;
+
+  bool operator<(const SwitchCaseCount& b) const { return count > b.count; }
+};
+
+/*
+ * Collect the data for the given SwitchProfile, and return a vector of case
+ * indexes and hit count, sorted in descending order of hit count.
+ */
+std::vector<SwitchCaseCount> sortedSwitchProfile(
+  TargetProfile<SwitchProfile>& profile,
+  int32_t nCases
+);
 
 }}
 

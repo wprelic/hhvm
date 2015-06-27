@@ -538,7 +538,8 @@ struct X64Instr {
 };
 
 //                                    0    1    2    3    4    5     flags
-const X64Instr instr_divsd     { { 0x5E,0xF1,0xF1,0x00,0xF1,0xF1 }, 0x10102 };
+const X64Instr instr_divsd =   { { 0x5E,0xF1,0xF1,0x00,0xF1,0xF1 }, 0x10102 };
+const X64Instr instr_movups =  { { 0x10,0x11,0xF1,0x00,0xF1,0xF1 }, 0x0103  };
 const X64Instr instr_movdqa =  { { 0x6F,0x7F,0xF1,0x00,0xF1,0xF1 }, 0x4103  };
 const X64Instr instr_movdqu =  { { 0x6F,0x7F,0xF1,0x00,0xF1,0xF1 }, 0x8103  };
 const X64Instr instr_movsd =   { { 0x11,0x10,0xF1,0x00,0xF1,0xF1 }, 0x10102 };
@@ -625,6 +626,8 @@ enum class RoundDirection : ssize_t {
   ceil     = 2,
   truncate = 3,
 };
+
+const char* show(RoundDirection);
 
 enum class ComparisonPred : uint8_t {
   // True if...
@@ -932,6 +935,8 @@ public:
   void decl(MemoryRef m) { instrM32(instr_dec, m); }
   void decw(MemoryRef m) { instrM16(instr_dec, m); }
 
+  void movups(RegXMM x, MemoryRef m)        { instrRM(instr_movups, x, m); }
+  void movups(MemoryRef m, RegXMM x)        { instrMR(instr_movups, m, x); }
   void movdqu(RegXMM x, MemoryRef m)        { instrRM(instr_movdqu, x, m); }
   void movdqu(MemoryRef m, RegXMM x)        { instrMR(instr_movdqu, m, x); }
   void movdqa(RegXMM x, RegXMM y)           { instrRR(instr_movdqa, x, y); }
@@ -1123,7 +1128,7 @@ public:
       xorl  (r32(dest), r32(dest));
       return;
     }
-    if (LIKELY(imm.q() > 0 && deltaFits(imm.q(), sz::dword))) {
+    if (LIKELY(imm.q() > 0 && imm.fits(sz::dword))) {
       // This will zero out the high-order bits.
       movl (imm.l(), r32(dest));
       return;
@@ -2205,9 +2210,8 @@ inline void X64Assembler::call(Label& l) { l.call(*this); }
  *   a.patchJmp(...);
  */
 inline CodeBlock& codeBlockChoose(CodeAddress addr) {
-  assert(false && "addr was not part of any known code block");
-  not_reached();
-  return *static_cast<CodeBlock*>(nullptr);
+  always_assert_flog(false,
+                     "address {} was not part of any known code block", addr);
 }
 template<class... Blocks>
 CodeBlock& codeBlockChoose(CodeAddress addr, CodeBlock& a, Blocks&... as) {
@@ -2226,12 +2230,18 @@ struct DecodedInstruction {
   uint8_t* picAddress() const;
   bool setPicAddress(uint8_t* target);
 
+  bool hasOffset() const { return m_offSz != 0; }
+  int32_t offset() const;
+
   bool hasImmediate() const { return m_immSz; }
   int64_t immediate() const;
   bool setImmediate(int64_t value);
   bool isNop() const;
   bool isBranch(bool allowCond = true) const;
   bool isCall() const;
+  bool isJmp() const;
+  bool isLea() const;
+  ConditionCode jccCondCode() const;
   bool shrinkBranch();
   void widenBranch();
   uint8_t getModRm() const;

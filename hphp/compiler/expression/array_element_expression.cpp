@@ -24,8 +24,8 @@
 #include "hphp/compiler/expression/static_member_expression.h"
 #include "hphp/compiler/analysis/function_scope.h"
 #include "hphp/parser/hphp.tab.hpp"
-#include "hphp/runtime/base/complex-types.h"
-#include "hphp/runtime/base/builtin-functions.h"
+
+#include "hphp/runtime/base/execution-context.h"
 
 using namespace HPHP;
 
@@ -145,7 +145,7 @@ bool ArrayElementExpression::appendClass(ExpressionPtr cls,
       m_variable->is(Expression::KindOfDynamicVariable)) {
     StaticMemberExpressionPtr sme(
       new StaticMemberExpression(
-        m_variable->getScope(), m_variable->getLocation(),
+        m_variable->getScope(), m_variable->getRange(),
         cls, m_variable));
     sme->onParse(ar, file);
     m_variable = sme;
@@ -293,7 +293,7 @@ void ArrayElementExpression::outputCodeModel(CodeGenerator &cg) {
     cg.printPropertyHeader("operation");
     cg.printValue(PHP_ARRAY_ELEMENT);
     cg.printPropertyHeader("sourceLocation");
-    cg.printLocation(this->getLocation());
+    cg.printLocation(this);
     cg.printObjectFooter();
   } else {
     cg.printObjectHeader("UnaryOpExpression", 3);
@@ -302,7 +302,7 @@ void ArrayElementExpression::outputCodeModel(CodeGenerator &cg) {
     cg.printPropertyHeader("operation");
     cg.printValue(PHP_ARRAY_APPEND_POINT_OP);
     cg.printPropertyHeader("sourceLocation");
-    cg.printLocation(this->getLocation());
+    cg.printLocation(this);
     cg.printObjectFooter();
   }
 }

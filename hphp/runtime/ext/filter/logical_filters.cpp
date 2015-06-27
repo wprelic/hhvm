@@ -14,18 +14,24 @@
    | license@php.net so we can mail you a copy immediately.               |
    +----------------------------------------------------------------------+
 */
+
 #include "hphp/runtime/ext/filter/logical_filters.h"
-#include "hphp/runtime/ext/filter/ext_filter.h"
-#include "hphp/runtime/ext/filter/sanitizing_filters.h"
+
+#include <arpa/inet.h>
+#include <pcre.h>
+
+#include "hphp/runtime/base/array-init.h"
+#include "hphp/runtime/base/builtin-functions.h"
+#include "hphp/runtime/base/preg.h"
+#include "hphp/runtime/base/string-buffer.h"
+#include "hphp/runtime/base/zend-functions.h"
 #include "hphp/runtime/base/zend-php-config.h"
 #include "hphp/runtime/base/zend-url.h"
-#include "hphp/runtime/base/complex-types.h"
-#include "hphp/runtime/base/preg.h"
+#include "hphp/runtime/ext/filter/ext_filter.h"
+#include "hphp/runtime/ext/filter/sanitizing_filters.h"
 #include "hphp/runtime/ext/std/ext_std_function.h"
 #include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/runtime/ext/url/ext_url.h"
-#include <arpa/inet.h>
-#include <pcre.h>
 
 #define FORMAT_IPV4  4
 #define FORMAT_IPV6  6
@@ -772,7 +778,7 @@ Variant php_filter_validate_mac(PHP_INPUT_FILTER_PARAM_DECL) {
 }
 
 Variant php_filter_callback(PHP_INPUT_FILTER_PARAM_DECL) {
-  if (!HHVM_FN(is_callable)(option_array)) {
+  if (!is_callable(option_array)) {
     raise_warning("First argument is expected to be a valid callback");
     return init_null();
   }

@@ -67,18 +67,14 @@ public:
   mutable std::atomic<char**> subpat_names;
 };
 
-class PCREglobals {
-public:
+struct PCREglobals {
   PCREglobals();
   ~PCREglobals();
-  void cleanupOnRequestEnd(const pcre_cache_entry* ent);
-  void onSessionExit();
+
   // pcre ini_settings
-  int64_t m_preg_backtrace_limit;
-  int64_t m_preg_recursion_limit;
-  pcre_jit_stack *m_jit_stack;
-private:
-  smart::vector<const pcre_cache_entry*> m_overflow;
+  int64_t preg_backtrace_limit;
+  int64_t preg_recursion_limit;
+  pcre_jit_stack* jit_stack;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -110,19 +106,11 @@ void pcre_dump_cache(const std::string& filename);
 Variant preg_grep(const String& pattern, const Array& input, int flags = 0);
 
 Variant preg_match(const String& pattern, const String& subject,
-                   Variant& matches,
+                   Variant* matches = nullptr,
                    int flags = 0, int offset = 0);
 
-Variant preg_match(const String& pattern,
-                   const String& subject,
-                   int flags = 0,
-                   int offset = 0);
-
 Variant preg_match_all(const String& pattern, const String& subject,
-                       Variant& matches,
-                       int flags = 0, int offset = 0);
-
-Variant preg_match_all(const String& pattern, const String& subject,
+                       Variant* matches = nullptr,
                        int flags = 0, int offset = 0);
 
 Variant preg_replace_impl(const Variant& pattern, const Variant& replacement,

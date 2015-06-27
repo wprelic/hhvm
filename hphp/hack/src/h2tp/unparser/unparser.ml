@@ -37,11 +37,9 @@ open Common_exns
 These are todo constructs for which we will choose not to fail but to
     instead return the default which is known to be incorrect or incomplete
 *)
-let ok_todos =
-  let ok = [
-    "mode";
-  ] in
-  List.fold_right SSet.add ok SSet.empty
+let ok_todos = set_of_list [
+  "mode";
+]
 
 (*
   The first argument is the error message to raise and the second argument is
@@ -62,7 +60,7 @@ let u_todo msg pregen_fn =
   (like class definitions)
 *)
 let u_todo_conds todos else_fn =
-  match (List.first (fun (cond, _, _) -> cond) todos) with
+  match (List.find ~f:(fun (cond, _, _) -> cond) todos) with
     | Some (_, msg, fn) -> u_todo msg fn
     | None -> else_fn ()
 
@@ -74,7 +72,7 @@ let u_todo_conds todos else_fn =
   Examples are modes and namespaces. Currently I've introduced mode as an example.
 *)
 type unparse_env = {
-  mutable mode: mode
+  mutable mode: FileInfo.mode
 }
 
 (*
@@ -89,7 +87,7 @@ type fun_common = {
   fc_name            : id;
   fc_params          : fun_param list;
   fc_body            : block;
-  fc_user_attributes : user_attribute SMap.t;
+  fc_user_attributes : user_attribute list;
   fc_fun_kind        : fun_kind;
 }
 
@@ -109,19 +107,19 @@ let is_associative = function
   unparsers for simple and predefined types.
 *)
 let u_of_list_spc u_of_elem elems =
-  List.map u_of_elem elems |>
+  List.map ~f:u_of_elem elems |>
   fun x -> StrWords x
 
 let u_of_list_comma u_of_elem elems =
-  List.map u_of_elem elems |>
+  List.map ~f:u_of_elem elems |>
   fun x -> StrCommaList x
 
 let u_of_list_parens_comma u_of_elem elems =
-  List.map u_of_elem elems |>
+  List.map ~f:u_of_elem elems |>
   fun x -> StrParens (StrCommaList x)
 
 let u_of_list_braces_spc u_of_elem elems =
-  List.map u_of_elem elems |>
+  List.map ~f:u_of_elem elems |>
   fun x -> StrBraces (StrWords x)
 
 let u_of_bool b = Str (if b then "true" else "false")
@@ -142,8 +140,8 @@ let dummy_unparse_fn = fun () -> StrEmpty
 
 let u_file_type =
   function
-  | PhpFile -> Str "<?php"
-  | HhFile -> Str "<?hh"
+  | FileInfo.PhpFile -> Str "<?php"
+  | FileInfo.HhFile -> Str "<?hh"
 
 let u_pos_t _ = StrEmpty
 
@@ -179,7 +177,7 @@ let unparser _env =
         in StrWords [Str "namespace"; u_id id; StrBraces strProgram]
     | NamespaceUse uses ->
         let u_use ((p1, ns), (p2, name)) =
-          let ns_end = List.lst_unsafe (R.split (R.regexp "\\\\") ns) in
+          let ns_end = List.last_exn (R.split (R.regexp "\\\\") ns) in
           let qualifier = if ns_end <> name
                           then [Str "as"; u_id (p2, name)]
                           else [] in
@@ -191,6 +189,7 @@ let unparser _env =
                 t_tparams = v_t_tparams;
                 t_constraint = v_t_constraint;
                 t_kind = v_t_kind;
+                t_user_attributes = v_t_user_attributes;
                 t_namespace = v_t_namespace;
                 t_mode = v_t_mode
               } =
@@ -199,12 +198,15 @@ let unparser _env =
     u_todo "typedef"
       (fun () ->
         u_in_mode v_t_mode (fun () ->
-         let v_t_id = u_id v_t_id in
-         let v_t_tparams = u_of_list_spc u_tparam v_t_tparams in
-         let v_t_constraint = u_tconstraint v_t_constraint in
-         let v_t_kind = u_typedef_kind v_t_kind in
-           StrWords
-             [ v_t_id; v_t_tparams; v_t_constraint; v_t_kind]))
+          u_todo_conds [
+            (v_t_user_attributes <> [], "t_user_attributes",
+              (fun () -> u_of_smap u_user_attribute v_t_user_attributes)) ;
+          ] (fun () ->
+            let v_t_id = u_id v_t_id in
+            let v_t_tparams = u_of_list_spc u_tparam v_t_tparams in
+            let v_t_constraint = u_tconstraint v_t_constraint in
+            let v_t_kind = u_typedef_kind v_t_kind in
+              StrWords [v_t_id; v_t_tparams; v_t_constraint; v_t_kind])))
   and
     u_gconst {
                cst_mode = v_cst_mode;
@@ -244,13 +246,18 @@ let unparser _env =
     | Covariant -> u_todo "Covariant" (fun () -> StrEmpty )
     | Contravariant -> u_todo "Contravariant" (fun () -> StrEmpty )
     | Invariant -> u_todo "Invariant" (fun () -> StrEmpty )
+  and u_constraint_kind =
+    function
+    | Constraint_as -> u_todo "as" (fun () -> StrEmpty)
+    | Constraint_super -> u_todo "super" (fun () -> StrEmpty)
   and u_tparam (v2, v3, v4) =
     u_todo "tparam"
       (fun () ->
          let v1 = Str "tparam"
          and v2 = u_variance v2
          and v3 = u_id v3
-         and v4 = u_of_option u_hint v4
+         and v4 = u_of_option (fun (ck, h) ->
+           StrWords [u_constraint_kind ck; u_hint h]) v4
          in StrWords [ v1; v2; v3; v4 ])
   and u_tconstraint v = u_of_option u_hint v
   and u_typedef_kind =
@@ -285,8 +292,9 @@ let unparser _env =
             (pos, "Namespaces are expected to not be elaborated");
         u_todo_conds [
           (v_c_is_xhp, "c_is_xhp", (fun () -> u_of_bool v_c_is_xhp)) ;
-          (List.not_empty v_c_tparams, "c_tparams", (fun () -> u_of_list_spc u_tparam v_c_tparams)) ;
-          (not (SMap.is_empty v_c_user_attributes), "c_user_attributes", (fun () -> u_of_smap u_user_attribute v_c_user_attributes)) ;
+          (not (List.is_empty v_c_tparams), "c_tparams", (fun () -> u_of_list_spc u_tparam v_c_tparams)) ;
+          (v_c_user_attributes <> [], "c_user_attributes",
+            (fun () -> u_of_smap u_user_attribute v_c_user_attributes)) ;
           (Option.is_some v_c_enum, "c_enum", (fun () -> u_of_option u_enum_ v_c_enum))
         ] (fun () ->
           let u_elt = u_class_elt v_c_kind in
@@ -335,6 +343,10 @@ let unparser _env =
       and declsStr = u_of_list_comma (fun (id, expr) ->
         StrWords [ u_id id; Str "="; u_expr expr]) decls
       in StrStatement [ Str "const" ; hOptionStr; declsStr ]
+    | AbsConst (hOption, name) ->
+      let hOptionStr = u_of_option u_hint hOption
+      and nameStr = u_id name
+      in StrStatement [ Str "abstract const" ; hOptionStr; nameStr ]
     | Attributes v2 ->
         u_todo "Attributes"
           (fun () ->
@@ -343,6 +355,8 @@ let unparser _env =
              in StrWords [ v1; v2 ])
     | ClassUse hint ->
         StrStatement [Str "use"; u_hint hint]
+    | XhpAttrUse hint ->
+        StrStatement [Str "attribute"; u_hint hint]
     | ClassTraitRequire (trait_req_kind, hint) ->
         StrStatement [
           Str "require";
@@ -354,7 +368,11 @@ let unparser _env =
         and hintStr = u_of_option u_hint hintOption
         and varStr = u_of_list_comma u_class_var classVars in
         StrStatement [kindStr; hintStr; varStr]
+    | XhpAttr _ ->
+        u_todo "XhpAttr" (fun () -> StrEmpty)
     | Method m -> u_method_ kind m
+    | TypeConst _ -> u_todo "TypeConst" (fun () -> StrEmpty)
+
   and u_class_attr =
     function
     | CA_name v2 ->
@@ -430,7 +448,7 @@ let unparser _env =
         fc_user_attributes = m_user_attributes;
         fc_fun_kind = m_fun_kind;
       }
-      and is_abstract = class_kind = Cinterface || List.mem Abstract m_kind in
+      and is_abstract = class_kind = Cinterface || List.mem m_kind Abstract in
       StrWords [str_m_kind; u_fun_common v_f_common StrEmpty u_id is_abstract]
   and
     u_fun_param {
@@ -443,7 +461,8 @@ let unparser _env =
                   param_user_attributes = v_param_user_attributes
                 } =
      u_todo_conds [
-      (not (SMap.is_empty v_param_user_attributes), "param_user_attributes", fun () -> u_of_smap u_user_attribute v_param_user_attributes) ;
+       (v_param_user_attributes <> [], "param_user_attributes",
+         fun () -> u_of_smap u_user_attribute v_param_user_attributes);
      ] begin fun () ->
          let str_param_mod = u_of_option u_kind v_param_modifier
          and str_param_hint = u_of_option u_hint v_param_hint
@@ -478,7 +497,7 @@ let unparser _env =
     fc_fun_kind;
   } useStr u_of_name abstract =
     u_todo_conds [(
-      not (SMap.is_empty fc_user_attributes),
+      fc_user_attributes <> [],
       "m_user_attributes",
       (fun () -> u_of_smap u_user_attribute fc_user_attributes)
     )] begin fun () ->
@@ -542,8 +561,8 @@ let unparser _env =
     u_fun_ fun_ = u_fun_with_use fun_ StrEmpty
   and u_fun_kind =
     function
-    | FAsync -> Str "async"
-    | FSync -> StrEmpty
+    | FAsync | FAsyncGenerator -> Str "async"
+    | FSync | FGenerator -> StrEmpty
   and u_hint (v2, v3) = StrList [u_pos_t v2; u_hint_ v3]
   and u_hint_ =
     function
@@ -572,6 +591,7 @@ let unparser _env =
              let v1 = Str "Hshape"
              and v2 = u_of_list_spc u_shape_field v2
              in StrWords [ v1; v2 ])
+    | Haccess _ -> u_todo "Haccess" (fun () -> StrEmpty)
   and u_shape_field_name =
     function
     | SFlit v2 ->
@@ -785,13 +805,17 @@ let unparser _env =
         StrList [hintStr; Str "::"; constStr]
     | Call (funExpr, paramExprs, unpackParamExprs) ->
       let funStr = u_expr_nested funExpr in
-      let paramExprs = match funStr with
+      let paramStr = match funStr with
       | Str "echo" when List.length paramExprs > 1 ->
-          StrList [StrBlank; u_of_list_comma u_expr paramExprs]
-      | _ -> u_of_list_parens_comma u_expr paramExprs in
-      if unpackParamExprs <> [] then
-        u_todo "Call with splat" (fun () -> StrEmpty)
-      else StrList [ funStr; paramExprs]
+        if unpackParamExprs <> [] then
+          u_todo "echo with ... ?" (fun () -> StrEmpty)
+        else StrList [StrBlank; u_of_list_comma u_expr paramExprs]
+      | _ ->
+        let listExprs =
+          (List.map ~f:u_expr paramExprs) @
+            (List.map ~f:(fun e -> StrList [Str "..." ; u_expr e]) unpackParamExprs) in
+        StrParens (StrCommaList listExprs)
+      in StrList [ funStr; paramStr ]
     | Int i -> u_pstring i
     | Float f -> u_pstring f
     | String s -> StrList [Str "'"; u_pstring s; Str "'"]
@@ -825,11 +849,12 @@ let unparser _env =
           u_expr_nested hintExpr;
         ];
     | New (klass, paramExprs, unpackParamExprs) ->
-      let klassStr = u_expr klass
-      and paramStr = u_of_list_parens_comma u_expr paramExprs in
-      if unpackParamExprs <> [] then
-        u_todo "Call with splat" (fun () -> StrEmpty)
-      else StrList [ Str "new"; StrBlank ; klassStr; paramStr]
+      let klassStr = u_expr klass in
+      let listExprs =
+        (List.map ~f:u_expr paramExprs) @
+          (List.map ~f:(fun e -> StrList [Str "..." ; u_expr e]) unpackParamExprs) in
+      let paramStr = StrParens (StrCommaList listExprs) in
+      StrList [ Str "new"; StrBlank ; klassStr; paramStr]
     | Efun (fun_, uselist) ->
       let useStr = match uselist with
         | [] -> StrEmpty
@@ -942,23 +967,28 @@ let unparse_internal program =
     we feed the output of the unparser to the hack formatter which only
     accepts files with hh prefix, so we have to fake it.
   *)
-  StrWords [(u_file_type HhFile); (unparser {mode = Mdecl} program)]
+  StrWords [
+    u_file_type FileInfo.HhFile;
+    unparser {mode = FileInfo.Mdecl} program
+  ]
 
 let unparse :
-    file_type -> Relative_path.t -> program -> string =
+    FileInfo.file_type -> Path.t -> program -> string =
     fun filetype file program ->
   unparse_internal program |>
   to_string |>
   fun s ->
     dn s;
-    let s' = match Format_hack.program file ~no_trailing_commas:true s with
-    | Format_hack.Php_or_decl -> raise Impossible
+    let modes = [Some FileInfo.Mstrict; Some FileInfo.Mpartial] in
+    let formatted = Format_hack.program modes file ~no_trailing_commas:true s in
+    let s' = match formatted with
+    | Format_hack.Disabled_mode -> raise Impossible
     | Format_hack.Internal_error -> raise (FormatterError "")
     | Format_hack.Success s' -> s'
     | Format_hack.Parsing_error error -> raise (FormatterError
       ("parsing error \n" ^ (Errors.to_string (Errors.to_absolute
-      (List.hd error))))) in
+      (List.hd_exn error))))) in
     match filetype with
-     | HhFile -> s'
-     | PhpFile ->  let r = R.regexp "<\\?hh" in
+     | FileInfo.HhFile -> s'
+     | FileInfo.PhpFile ->  let r = R.regexp "<\\?hh" in
                    R.replace_first r "<?php" s'

@@ -53,6 +53,8 @@ namespace {
 //////////////////////////////////////////////////////////////////////
 
 const StaticString s_Closure("Closure");
+const StaticString s_toString("__toString");
+const StaticString s_Stringish("Stringish");
 
 //////////////////////////////////////////////////////////////////////
 
@@ -119,8 +121,10 @@ std::set<Offset> findBasicBlocks(const FuncEmitter& fe) {
     auto const pc = reinterpret_cast<const Op*>(bc + offset);
     auto const nextOff = offset + instrLen(pc);
     auto const atLast = nextOff == fe.past;
+    auto const breaksBB = instrIsNonCallControlFlow(*pc) ||
+      instrFlags(*pc) & TF;
 
-    if (instrIsNonCallControlFlow(*pc) && !atLast) {
+    if (breaksBB && !atLast) {
       markBlock(nextOff);
     }
 
@@ -783,6 +787,26 @@ void parse_methods(ParseUnitState& puState,
   }
 }
 
+void add_stringish(borrowed_ptr<php::Class> cls) {
+  // The runtime adds Stringish to any class providing a __toString() function,
+  // so we mirror that here to make sure analysis of interfaces is correct.
+  if (cls->attrs & AttrInterface && cls->name->isame(s_Stringish.get())) {
+    return;
+  }
+
+  for (auto& iface : cls->interfaceNames) {
+    if (iface->isame(s_Stringish.get())) return;
+  }
+
+  for (auto& func : cls->methods) {
+    if (func->name->isame(s_toString.get())) {
+      FTRACE(2, "Adding Stringish to {}\n", cls->name->data());
+      cls->interfaceNames.push_back(s_Stringish.get());
+      return;
+    }
+  }
+}
+
 std::unique_ptr<php::Class> parse_class(ParseUnitState& puState,
                                         borrowed_ptr<php::Unit> unit,
                                         const PreClassEmitter& pce) {
@@ -808,8 +832,10 @@ std::unique_ptr<php::Class> parse_class(ParseUnitState& puState,
   ret->traitPrecRules    = pce.traitPrecRules();
   ret->traitAliasRules   = pce.traitAliasRules();
   ret->requirements      = pce.requirements();
+  ret->numDeclMethods    = pce.numDeclMethods();
 
   parse_methods(puState, borrow(ret), unit, pce);
+  add_stringish(borrow(ret));
 
   auto& propMap = pce.propMap();
   for (size_t idx = 0; idx < propMap.size(); ++idx) {
@@ -832,9 +858,10 @@ std::unique_ptr<php::Class> parse_class(ParseUnitState& puState,
       php::Const {
         cconst.name(),
         borrow(ret),
-        cconst.val(),
+        cconst.valOption(),
         cconst.phpCode(),
-        cconst.typeConstraint()
+        cconst.typeConstraint(),
+        cconst.isTypeconst()
       }
     );
   }

@@ -8,27 +8,34 @@
  *
  *)
 
-
 open Utils
+
+type config = {
+  global_size: int;
+  heap_size : int;
+}
+
+let default_config =
+  let gig = 1024 * 1024 * 1024 in
+  {global_size = gig; heap_size = 20 * gig}
 
 (*****************************************************************************)
 (* Initializes the shared memory. Must be called before forking. *)
 (*****************************************************************************)
-external init: unit -> unit = "hh_shared_init"
+external hh_shared_init: global_size:int -> heap_size:int -> unit
+= "hh_shared_init"
+
+let init config =
+  hh_shared_init
+    ~global_size:config.global_size
+    ~heap_size:config.heap_size
 
 (*****************************************************************************)
 (* The shared memory garbage collector. It must be called every time we
  * free data (cf hh_shared.c for the underlying C implementation).
  *)
 (*****************************************************************************)
-external collect: unit -> unit = "hh_collect"
-
-(*****************************************************************************)
-(* Must be called after the initialization of the hack server is over.
- * (cf serverInit.ml).
- *)
-(*****************************************************************************)
-external init_done: unit -> unit = "hh_call_after_init"
+external hh_collect: unit -> unit = "hh_collect"
 
 (*****************************************************************************)
 (* Serializes the shared memory and writes it to a file *)
@@ -44,6 +51,57 @@ external load: string -> unit = "hh_load"
 (* The size of the dynamically allocated shared memory section *)
 (*****************************************************************************)
 external heap_size: unit -> int = "hh_heap_size"
+
+(*****************************************************************************)
+(* The number of used slots in our hashtable *)
+(*****************************************************************************)
+external hash_used_slots : unit -> int = "hh_hash_used_slots"
+
+(*****************************************************************************)
+(* The total number of slots in our hashtable *)
+(*****************************************************************************)
+external hash_slots : unit -> int = "hh_hash_slots"
+
+(*****************************************************************************)
+(* The number of used slots in our dependency table *)
+(*****************************************************************************)
+external dep_used_slots : unit -> int = "hh_dep_used_slots"
+
+(*****************************************************************************)
+(* The total number of slots in our dependency table *)
+(*****************************************************************************)
+external dep_slots : unit -> int = "hh_dep_slots"
+
+(*****************************************************************************)
+(* Must be called after the initialization of the hack server is over.
+ * (cf serverInit.ml). *)
+(*****************************************************************************)
+external hh_init_done: unit -> unit = "hh_call_after_init"
+
+let init_done () =
+  hh_init_done ();
+  EventLogger.sharedmem_init_done (heap_size ())
+
+type table_stats = {
+  used_slots : int;
+  slots : int;
+}
+
+let dep_stats () = {
+  used_slots = dep_used_slots ();
+  slots = dep_slots ();
+}
+
+let hash_stats () = {
+  used_slots = hash_used_slots ();
+  slots = hash_slots ();
+}
+
+let collect () =
+  let old_size = heap_size () in
+  hh_collect ();
+  let new_size = heap_size () in
+  EventLogger.sharedmem_gc old_size new_size
 
 (*****************************************************************************)
 (* Module returning the MD5 of the key. It's because the code in C land
@@ -136,7 +194,6 @@ end
 (*****************************************************************************)
 module Raw (Key: Key) (Value: sig type t end) = struct
 
-  external hh_shared_init : unit -> unit               = "hh_shared_init"
   external hh_add         : Key.md5 -> Value.t -> unit = "hh_add"
   external hh_mem         : Key.md5 -> bool            = "hh_mem"
   external hh_get         : Key.md5 -> Value.t         = "hh_get"
@@ -152,7 +209,7 @@ end
  * The "old" representation is the value that was bound to that key in the
  * last round of type-checking.
  * Despite the fact that the same storage is used under the hood, it's good
- * to seperate the two interfaces to make sure we never mix old and new
+ * to separate the two interfaces to make sure we never mix old and new
  * values.
  *)
 (*****************************************************************************)
@@ -216,7 +273,6 @@ end
 module Old : functor (Key : Key) -> functor (Value : Value.Type) -> sig
 
   val get         : Key.old -> Value.t option
-  val find_unsafe : Key.old -> Value.t
   val remove      : Key.old -> unit
   val mem         : Key.old -> bool
 
@@ -238,14 +294,9 @@ end = functor (Key : Key) -> functor (Value: Value.Type) -> struct
 
   let mem key = Raw.hh_mem (Key.md5_old key)
 
-  let remove key = 
+  let remove key =
     if mem key
     then Raw.hh_remove (Key.md5_old key)
-
-  let find_unsafe key = 
-    match get key with 
-    | None -> raise Not_found
-    | Some x -> x
 
   let revive key =
     if mem key
@@ -388,13 +439,12 @@ end
 (*****************************************************************************)
       
 module type CacheType = sig
+  type key
   type value
-  module Key : Key
 
-  val add: Key.t -> value -> unit
-  val get: Key.t -> value option
-  val find: Key.t -> value
-  val remove: Key.t -> unit
+  val add: key -> value -> unit
+  val get: key -> value option
+  val remove: key -> unit
   val clear: unit -> unit
 end
 
@@ -402,7 +452,8 @@ end
 (* Cache keeping the objects the most frequently used. *)
 (*****************************************************************************)
       
-module FreqCache (Key : Key) (Config:ConfigType) = struct
+module FreqCache (Key : Key) (Config:ConfigType) :
+  CacheType with type key := Key.t and type value := Config.value = struct
 
   type value = Config.value
 
@@ -473,11 +524,9 @@ end
 (* An ordered cache keeps the most recently used objects *)
 (*****************************************************************************)
 
-module OrderedCache (Key : Key) (Config:ConfigType) = struct
-  
-  type value = Config.value
+module OrderedCache (Key : Key) (Config:ConfigType):
+  CacheType with type key := Key.t and type value := Config.value = struct
 
-  let iorder = ref 0
   let (cache: (Key.t, Config.value) Hashtbl.t) =
     Hashtbl.create Config.capacity
 
@@ -532,7 +581,6 @@ let invalidate_caches () =
  * much time. The caches keep a deserialized version of the types.
  *)
 (*****************************************************************************)        
-
 module WithCache (UserKeyType : UserKeyType) (Value:Value.Type) = struct
 
   type key = UserKeyType.t
@@ -563,10 +611,6 @@ module WithCache (UserKeyType : UserKeyType) (Value:Value.Type) = struct
     L2.add x y;
     New.add x y
 
-  let force_get = function
-    | Some x -> x
-    | None -> raise Not_found
-        
   let get x = 
     let x = Key.make Value.prefix x in
     match L1.get x with

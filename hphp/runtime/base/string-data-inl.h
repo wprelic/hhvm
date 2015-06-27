@@ -16,8 +16,6 @@
 #ifndef incl_HPHP_RUNTIME_BASE_STRING_DATA_INL_H_
 #define incl_HPHP_RUNTIME_BASE_STRING_DATA_INL_H_
 
-#include "hphp/runtime/base/cap-code.h"
-
 namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
@@ -33,12 +31,12 @@ inline StringData* StringData::Make(const char* data) {
   return Make(data, CopyString);
 }
 
-inline StringData* StringData::Make(const char* data, CopyStringMode) {
-  return Make(data, strlen(data), CopyString);
+inline StringData* StringData::Make(const std::string& data) {
+  return Make(data.data(), data.length(), CopyString);
 }
 
-inline StringData* StringData::Make(const StringData* s, CopyStringMode) {
-  return Make(s->slice(), CopyString);
+inline StringData* StringData::Make(const char* data, CopyStringMode) {
+  return Make(data, strlen(data), CopyString);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -54,11 +52,6 @@ inline StringData* StringData::Make(char* data, AttachStringMode) {
 //////////////////////////////////////////////////////////////////////
 // Concat creation
 
-inline StringData* StringData::Make(const StringData* s1,
-                                    const StringData* s2) {
-  return Make(s1->slice(), s2->slice());
-}
-
 inline StringData* StringData::Make(const StringData* s1, StringSlice s2) {
   return Make(s1->slice(), s2);
 }
@@ -69,13 +62,12 @@ inline StringData* StringData::Make(const StringData* s1, const char* lit2) {
 
 //////////////////////////////////////////////////////////////////////
 
-inline void StringData::setRefCount(RefCount n) { m_count = n; }
 inline bool StringData::isStatic() const {
-  return m_count == StaticValue;
+  return m_hdr.count == StaticValue;
 }
 
 inline bool StringData::isUncounted() const {
-  return m_count == UncountedValue;
+  return m_hdr.count == UncountedValue;
 }
 
 inline StringSlice StringData::slice() const {
@@ -98,8 +90,7 @@ inline void StringData::setSize(int len) {
   assert(len >= 0 && len <= capacity() && !isImmutable());
   assert(!hasMultipleRefs());
   m_data[len] = 0;
-  m_len = len;
-  m_hash = 0;
+  m_lenAndHash = len;
   assert(checkSane());
 }
 
@@ -109,20 +100,23 @@ inline void StringData::checkStack() const {
 
 inline const char* StringData::data() const {
   // TODO: t1800106: re-enable this assert
-  //assert(m_data[size()] == 0); // all strings must be null-terminated
+  // assert(m_data[size()] == 0); // all strings must be null-terminated
   return m_data;
 }
 
-inline char* StringData::mutableData() const { return m_data; }
+inline char* StringData::mutableData() const {
+  assert(!isImmutable());
+  return m_data;
+}
+
 inline int StringData::size() const { return m_len; }
 inline bool StringData::empty() const { return size() == 0; }
 inline uint32_t StringData::capacity() const {
-  assert(m_kind == HeaderKind::String);
-  return packedCodeToCap(m_capCode - (HeaderKind::String << 24));
+  return m_hdr.aux.decode();
 }
 
 inline size_t StringData::heapSize() const {
-  return isFlat() ? sizeof(StringData) + capacity() :
+  return isFlat() ? sizeof(StringData) + 1 + capacity() :
          sizeof(StringData) + sizeof(SharedPayload);
 }
 
@@ -161,13 +155,12 @@ inline strhash_t StringData::hash() const {
 
 inline bool StringData::same(const StringData* s) const {
   assert(s);
-  size_t len = m_len;
-  if (len != s->m_len) return false;
-  // The underlying buffer and its length are 32-bit aligned, ensured by
+  if (m_len != s->m_len) return false;
+  // The underlying buffer and its length are 8-byte aligned, ensured by
   // StringData layout, smart_malloc, or malloc. So compare words.
-  assert(uintptr_t(data()) % 4 == 0);
-  assert(uintptr_t(s->data()) % 4 == 0);
-  return wordsame(data(), s->data(), len);
+  assert(uintptr_t(data()) % 8 == 0);
+  assert(uintptr_t(s->data()) % 8 == 0);
+  return wordsame(data(), s->data(), m_len);
 }
 
 inline bool StringData::isame(const StringData* s) const {

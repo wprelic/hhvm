@@ -17,14 +17,14 @@
 #ifndef incl_HPHP_EXT_HHBC_H_
 #define incl_HPHP_EXT_HHBC_H_
 
-#include "hphp/runtime/base/complex-types.h"
+#include "hphp/runtime/base/types.h"
+#include "hphp/runtime/vm/preclass.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 struct ActRec;
-
-class ObjectData;
+struct TypedValue;
 
 struct HhbcExtFuncInfo {
   const char* m_name;
@@ -46,7 +46,7 @@ struct HhbcExtClassInfo {
   ptrdiff_t m_objectDataOffset;
   long long m_methodCount;
   const HhbcExtMethodInfo* m_methods;
-  LowClassPtr* m_clsPtr;
+  LowPtr<Class>* m_clsPtr;
 };
 
 extern const long long hhbc_ext_funcs_count;
@@ -58,4 +58,3 @@ extern const HhbcExtClassInfo hhbc_ext_classes[];
 }
 
 #endif // incl_HPHP_EXT_HHBC_H_
-

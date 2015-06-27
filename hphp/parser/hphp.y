@@ -13,6 +13,11 @@
 #include "hphp/util/text-util.h"
 #include "hphp/util/logger.h"
 
+#define line0 r.line0
+#define char0 r.char0
+#define line1 r.line1
+#define char1 r.char1
+
 #ifdef yyerror
 #undef yyerror
 #endif
@@ -28,8 +33,8 @@
       (Current).first(YYRHSLOC (Rhs, 1));                               \
       (Current).last (YYRHSLOC (Rhs, N));                               \
     } else {                                                            \
-      (Current).line0 = (Current).line1 = YYRHSLOC (Rhs, 0).line1;      \
-      (Current).char0 = (Current).char1 = YYRHSLOC (Rhs, 0).char1;      \
+      (Current).line0 = (Current).line1 = YYRHSLOC (Rhs, 0).line1;\
+      (Current).char0 = (Current).char1 = YYRHSLOC (Rhs, 0).char1;\
     }                                                                   \
   while (0);                                                            \
   _p->setRuleLocation(&Current);
@@ -624,6 +629,7 @@ static int yylex(YYSTYPE *token, HPHP::Location *loc, Parser *_p) {
 %token T_DECLARE
 %token T_ENDDECLARE
 %token T_AS
+%token T_SUPER
 %token T_SWITCH
 %token T_ENDSWITCH
 %token T_CASE
@@ -701,9 +707,6 @@ static int yylex(YYSTYPE *token, HPHP::Location *loc, Parser *_p) {
 
 %token T_COLLECTION
 %token T_SHAPE
-%token T_VARRAY
-%token T_MIARRAY
-%token T_MSARRAY
 %token T_TYPE
 %token T_UNRESOLVED_TYPE
 %token T_NEWTYPE
@@ -774,6 +777,7 @@ top_statement:
 
 ident:
     T_STRING                           { $$ = $1;}
+  | T_SUPER                            { $$ = $1;}
   | T_XHP_ATTRIBUTE                    { $$ = $1;}
   | T_XHP_CATEGORY                     { $$ = $1;}
   | T_XHP_CHILDREN                     { $$ = $1;}
@@ -968,7 +972,7 @@ statement:
   | T_THROW expr ';'                   { _p->onThrow($$, $2);}
   | T_GOTO ident ';'                   { _p->onGoto($$, $2, true);
                                          _p->addGoto($2.text(),
-                                                     _p->getLocation(),
+                                                     _p->getRange(),
                                                      &$$);}
   | expr ';'                           { _p->onExpStatement($$, $1);}
   | yield_expr ';'                     { _p->onExpStatement($$, $1);}
@@ -982,7 +986,7 @@ statement:
   | T_RETURN query_expr ';'            { _p->onReturn($$, &$2); }
   | ident ':'                          { _p->onLabel($$, $1);
                                          _p->addLabel($1.text(),
-                                                      _p->getLocation(),
+                                                      _p->getRange(),
                                                       &$$);
                                          _p->onScopeLabel($$, $1);}
 ;
@@ -1064,7 +1068,7 @@ function_declaration_statement:
 
 enum_declaration_statement:
     T_ENUM
-    ident                              { $2.setText(_p->nsDecl($2.text()));
+    ident                              { $2.setText(_p->nsClassDecl($2.text()));
                                          _p->onClassStart(T_ENUM,$2);}
     ':' hh_type
     hh_opt_constraint
@@ -1072,7 +1076,7 @@ enum_declaration_statement:
 
   | non_empty_user_attributes
     T_ENUM
-    ident                              { $3.setText(_p->nsDecl($3.text()));
+    ident                              { $3.setText(_p->nsClassDecl($3.text()));
                                          _p->onClassStart(T_ENUM,$3);}
     ':' hh_type
     hh_opt_constraint
@@ -1082,7 +1086,7 @@ enum_declaration_statement:
 
 class_declaration_statement:
     class_entry_type
-    class_decl_name                    { $2.setText(_p->nsDecl($2.text()));
+    class_decl_name                    { $2.setText(_p->nsClassDecl($2.text()));
                                          _p->onClassStart($1.num(),$2);}
     extends_from implements_list '{'
     class_statement_list '}'           { Token stmts;
@@ -1100,7 +1104,7 @@ class_declaration_statement:
                                          _p->popTypeScope();}
   | non_empty_user_attributes
     class_entry_type
-    class_decl_name                    { $3.setText(_p->nsDecl($3.text()));
+    class_decl_name                    { $3.setText(_p->nsClassDecl($3.text()));
                                          _p->onClassStart($2.num(),$3);}
     extends_from implements_list '{'
     class_statement_list '}'           { Token stmts;
@@ -1117,7 +1121,7 @@ class_declaration_statement:
                                          _p->popClass();
                                          _p->popTypeScope();}
   | T_INTERFACE
-    interface_decl_name                { $2.setText(_p->nsDecl($2.text()));
+    interface_decl_name                { $2.setText(_p->nsClassDecl($2.text()));
                                          _p->onClassStart(T_INTERFACE,$2);}
     interface_extends_list '{'
     class_statement_list '}'           { _p->onInterface($$,$2,$4,$6,0);
@@ -1125,7 +1129,7 @@ class_declaration_statement:
                                          _p->popTypeScope();}
   | non_empty_user_attributes
     T_INTERFACE
-    interface_decl_name                { $3.setText(_p->nsDecl($3.text()));
+    interface_decl_name                { $3.setText(_p->nsClassDecl($3.text()));
                                          _p->onClassStart(T_INTERFACE,$3);}
     interface_extends_list '{'
     class_statement_list '}'           { _p->onInterface($$,$3,$5,$7,&$1);
@@ -1135,7 +1139,7 @@ class_declaration_statement:
 
 trait_declaration_statement:
     T_TRAIT
-    trait_decl_name                    { $2.setText(_p->nsDecl($2.text()));
+    trait_decl_name                    { $2.setText(_p->nsClassDecl($2.text()));
                                          _p->onClassStart(T_TRAIT, $2);}
     implements_list
     '{' class_statement_list '}'       { Token t_ext;
@@ -1146,7 +1150,7 @@ trait_declaration_statement:
                                          _p->popTypeScope();}
   | non_empty_user_attributes
     T_TRAIT
-    trait_decl_name                    { $3.setText(_p->nsDecl($3.text()));
+    trait_decl_name                    { $3.setText(_p->nsClassDecl($3.text()));
                                          _p->onClassStart(T_TRAIT, $3);}
     implements_list
     '{' class_statement_list '}'       { Token t_ext;
@@ -1498,6 +1502,7 @@ class_statement:
   | class_abstract_constant_declaration ';'
                                        { _p->onClassVariableStart
                                          ($$,NULL,$1,NULL, true);}
+  | class_type_constant_declaration ';' { $$ = $1; }
   | method_modifiers function_loc
     is_reference hh_name_with_typevar '('
                                        { _p->onNewLabelScope(true);
@@ -1574,12 +1579,17 @@ xhp_attribute_stmt:
 ;
 
 xhp_attribute_decl:
-    xhp_attribute_decl_type
+    xhp_nullable_attribute_decl_type
     xhp_label_ws
     xhp_attribute_default
     xhp_attribute_is_required          { xhp_attribute(_p,$$,$1,$2,$3,$4);
                                          $$ = 1;}
   | T_XHP_LABEL                        { $$ = $1; $$ = 0;}
+;
+
+xhp_nullable_attribute_decl_type:
+  '?' xhp_attribute_decl_type          { $$ = $2;}
+  | xhp_attribute_decl_type
 ;
 
 xhp_attribute_decl_type:
@@ -1724,6 +1734,17 @@ class_abstract_constant_declaration:
   | T_ABSTRACT T_CONST hh_name_with_type
                                         { _p->onClassAbstractConstant($$,NULL,$3);}
 ;
+class_type_constant_declaration:
+    T_ABSTRACT class_type_constant
+      hh_opt_constraint                 { Token t;
+                                          _p->onClassTypeConstant($$, $2, t);
+                                          _p->popTypeScope(); }
+  | class_type_constant
+      hh_opt_constraint '=' hh_type     { _p->onClassTypeConstant($$, $1, $4);
+                                          _p->popTypeScope(); }
+class_type_constant:
+    T_CONST T_TYPE hh_name_with_typevar { $$ = $3; }
+;
 
 expr_with_parens:
     '(' expr_with_parens ')'           { $$ = $2;}
@@ -1856,8 +1877,6 @@ expr_no_variable:
   | scalar                             { $$ = $1; }
   | array_literal                      { $$ = $1; }
   | shape_literal                      { $$ = $1; }
-  | map_array_literal                  { $$ = $1; }
-  | varray_literal                     { $$ = $1; }
   | '`' backticks_expr '`'             { _p->onEncapsList($$,'`',$2);}
   | T_PRINT expr                       { UEXP($$,$2,T_PRINT,1);}
   | dim_expr                           { $$ = $1;}
@@ -2047,27 +2066,6 @@ collection_literal:
     '{' collection_init '}'            { Token t;
                                          _p->onName(t,$1,Parser::StringName);
                                          BEXP($$,t,$3,T_COLLECTION);}
-;
-
-map_array_literal:
-    T_MIARRAY '(' map_array_init ')'   { _p->onCheckedArray($$,$3,T_MIARRAY);}
-  | T_MSARRAY '(' map_array_init ')'   { _p->onCheckedArray($$,$3,T_MSARRAY);}
-;
-
-varray_literal:
-    T_VARRAY '(' varray_init ')'       { _p->onCheckedArray($$,$3,T_VARRAY);}
-;
-
-static_map_array_literal:
-    T_MIARRAY '('
-    static_map_array_init ')'          { _p->onCheckedArray($$,$3,T_MIARRAY);}
-  | T_MSARRAY '('
-    static_map_array_init ')'          { _p->onCheckedArray($$,$3,T_MSARRAY);}
-;
-
-static_varray_literal:
-    T_VARRAY '('
-    static_varray_init ')'             { _p->onCheckedArray($$,$3,T_VARRAY);}
 ;
 
 static_collection_literal:
@@ -2420,8 +2418,6 @@ static_expr:
     static_shape_pair_list ')'         { _p->onArray($$,$3,T_ARRAY); }
   | static_class_constant              { $$ = $1;}
   | static_collection_literal          { $$ = $1;}
-  | static_map_array_literal           { $$ = $1;}
-  | static_varray_literal              { $$ = $1;}
   | '(' static_expr ')'                { $$ = $2;}
   | static_expr T_BOOLEAN_OR
     static_expr                        { BEXP($$,$1,$3,T_BOOLEAN_OR);}
@@ -2524,8 +2520,6 @@ common_scalar_ae:
     T_LNUMBER                          { _p->onScalar($$, T_LNUMBER,  $1);}
   | T_DNUMBER                          { _p->onScalar($$, T_DNUMBER,  $1);}
   | T_ONUMBER                          { _p->onScalar($$, T_ONUMBER,  $1);}
-  | T_CONSTANT_ENCAPSED_STRING         { _p->onScalar($$,
-                                         T_CONSTANT_ENCAPSED_STRING,  $1);}
   | T_START_HEREDOC
     T_ENCAPSED_AND_WHITESPACE
     T_END_HEREDOC                      { _p->onScalar($$, T_CONSTANT_ENCAPSED_STRING, $2);}
@@ -2538,8 +2532,19 @@ static_numeric_scalar_ae:
   | T_ONUMBER                          { _p->onScalar($$,T_ONUMBER,$1);}
   | ident                              { constant_ae(_p,$$,$1);}
 ;
+
+static_string_expr_ae:
+    T_CONSTANT_ENCAPSED_STRING         { _p->onScalar($$,
+                                         T_CONSTANT_ENCAPSED_STRING,$1);}
+  | T_CONSTANT_ENCAPSED_STRING '.' static_string_expr_ae
+                                       { _p->onScalar($$,
+                                         T_CONSTANT_ENCAPSED_STRING,
+                                         $1 + $3);}
+;
+
 static_scalar_ae:
-    common_scalar_ae                   { $$ = $1;}
+    common_scalar_ae
+  | static_string_expr_ae              { $$ = $1;}
   | ident                              { constant_ae(_p,$$,$1);}
   | '+' static_numeric_scalar_ae       { UEXP($$,$2,'+',1);}
   | '-' static_numeric_scalar_ae       { UEXP($$,$2,'-',1);}
@@ -2667,10 +2672,26 @@ variable:
   | class_method_call                  { $$ = $1;}
   | dimmable_variable_access           { $$ = $1;}
   | variable object_operator
-    object_property_name            { _p->onObjectProperty($$,$1,$2.num(),$3);}
+    object_property_name            { _p->onObjectProperty(
+                                        $$,
+                                        $1,
+                                        !$2.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $3
+                                      );
+                                    }
   | '(' expr_with_parens ')'
     object_operator
-    object_property_name            { _p->onObjectProperty($$,$2,$4.num(),$5);}
+    object_property_name            { _p->onObjectProperty(
+                                        $$,
+                                        $2,
+                                        !$4.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $5
+                                      );
+                                    }
   | static_class_name
     T_DOUBLE_COLON
     variable_no_objects                { _p->onStaticMember($$,$1,$3);}
@@ -2688,11 +2709,27 @@ dimmable_variable:
   | dimmable_variable_access           { $$ = $1;}
   | variable object_operator
     object_property_name_no_variables
-                                    { _p->onObjectProperty($$,$1,$2.num(),$3);}
+                                    { _p->onObjectProperty(
+                                        $$,
+                                        $1,
+                                        !$2.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $3
+                                      );
+                                    }
   | '(' expr_with_parens ')'
     object_operator
     object_property_name_no_variables
-                                    { _p->onObjectProperty($$,$2,$4.num(),$5);}
+                                    { _p->onObjectProperty(
+                                        $$,
+                                        $2,
+                                        !$4.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $5
+                                      );
+                                    }
   | callable_variable '('
     function_call_parameter_list ')'   { _p->onCall($$,1,$1,$3,NULL);}
   | '(' variable ')'                   { $$ = $2;}
@@ -2769,10 +2806,26 @@ variable_no_calls:
   | dimmable_variable_no_calls_access  { $$ = $1;}
   | variable_no_calls
     object_operator
-    object_property_name            { _p->onObjectProperty($$,$1,$2.num(),$3);}
+    object_property_name            { _p->onObjectProperty(
+                                        $$,
+                                        $1,
+                                        !$2.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $3
+                                      );
+                                    }
   | '(' expr_with_parens ')'
     object_operator
-    object_property_name            { _p->onObjectProperty($$,$2,$4.num(),$5);}
+    object_property_name            { _p->onObjectProperty(
+                                        $$,
+                                        $2,
+                                        !$4.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $5
+                                      );
+                                    }
   | static_class_name
     T_DOUBLE_COLON
     variable_no_objects                { _p->onStaticMember($$,$1,$3);}
@@ -2783,11 +2836,27 @@ dimmable_variable_no_calls:
   | dimmable_variable_no_calls_access  { $$ = $1;}
   | variable_no_calls object_operator
     object_property_name_no_variables
-                                    { _p->onObjectProperty($$,$1,$2.num(),$3);}
+                                    { _p->onObjectProperty(
+                                        $$,
+                                        $1,
+                                        !$2.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $3
+                                      );
+                                    }
   | '(' expr_with_parens ')'
     object_operator
     object_property_name_no_variables
-                                    { _p->onObjectProperty($$,$2,$4.num(),$5);}
+                                    { _p->onObjectProperty(
+                                        $$,
+                                        $2,
+                                        !$4.num()
+                                          ? HPHP::PropAccessType::Normal
+                                          : HPHP::PropAccessType::NullSafe,
+                                        $5
+                                      );
+                                    }
   | '(' variable ')'                   { $$ = $2;}
 ;
 
@@ -2850,49 +2919,6 @@ non_empty_static_collection_init:
   | static_expr                        { _p->onCollectionPair($$,  0,  0,$1);}
 ;
 
-map_array_init:
-    non_empty_map_array_init
-    possible_comma                     { $$ = $1;}
-  |                                    { _p->onEmptyCheckedArray($$);}
-;
-varray_init:
-    non_empty_varray_init
-    possible_comma                     { $$ = $1;}
-  |                                    { _p->onEmptyCheckedArray($$);}
-;
-non_empty_map_array_init:
-    non_empty_map_array_init
-    ',' expr T_DOUBLE_ARROW expr       { _p->onCheckedArrayPair($$,&$1,&$3,$5);}
-  | expr T_DOUBLE_ARROW expr           { _p->onCheckedArrayPair($$,  0,&$1,$3);}
-;
-non_empty_varray_init:
-    non_empty_varray_init ',' expr     { _p->onCheckedArrayPair($$,&$1,  0,$3);}
-  | expr                               { _p->onCheckedArrayPair($$,  0,  0,$1);}
-;
-
-static_map_array_init:
-    non_empty_static_map_array_init
-    possible_comma                     { $$ = $1;}
-  |                                    { _p->onEmptyCheckedArray($$);}
-;
-static_varray_init:
-    non_empty_static_varray_init
-    possible_comma                     { $$ = $1;}
-  |                                    { _p->onEmptyCheckedArray($$);}
-;
-non_empty_static_map_array_init:
-    non_empty_static_map_array_init
-    ',' static_expr T_DOUBLE_ARROW
-    static_expr                        { _p->onCheckedArrayPair($$,&$1,&$3,$5);}
-  | static_expr T_DOUBLE_ARROW
-    static_expr                        { _p->onCheckedArrayPair($$,  0,&$1,$3);}
-;
-non_empty_static_varray_init:
-    non_empty_static_varray_init
-    ',' static_expr                    { _p->onCheckedArrayPair($$,&$1,  0,$3);}
-  | static_expr                        { _p->onCheckedArrayPair($$,  0,  0,$1);}
-;
-
 encaps_list:
     encaps_list encaps_var             { _p->addEncap($$, &$1, $2, -1);}
   | encaps_list
@@ -2908,7 +2934,15 @@ encaps_var:
   | T_VARIABLE '['
     encaps_var_offset ']'              { _p->encapRefDim($$, $1, $3);}
   | T_VARIABLE object_operator
-    ident                              { _p->encapObjProp($$, $1, $2.num(), $3);}
+    ident                              { _p->encapObjProp(
+                                           $$,
+                                           $1,
+                                           !$2.num()
+                                            ? HPHP::PropAccessType::Normal
+                                            : HPHP::PropAccessType::NullSafe,
+                                           $3
+                                         );
+                                       }
   | T_DOLLAR_OPEN_CURLY_BRACES
     expr '}'                           { _p->onDynamicVariable($$, $2, 1);}
   | T_DOLLAR_OPEN_CURLY_BRACES
@@ -2958,12 +2992,22 @@ hh_opt_constraint:
 
 hh_type_alias_statement:
     T_TYPE hh_name_with_typevar
-      '=' hh_type ';'                  { $2.setText(_p->nsDecl($2.text()));
+      '=' hh_type ';'                  { $2.setText(_p->nsClassDecl($2.text()));
                                          _p->onTypedef($$, $2, $4);
                                          _p->popTypeScope(); }
+  | non_empty_user_attributes
+    T_TYPE hh_name_with_typevar
+      '=' hh_type ';'                  { $3.setText(_p->nsClassDecl($3.text()));
+                                         _p->onTypedef($$, $3, $5);
+                                         _p->popTypeScope(); }
   | T_NEWTYPE hh_name_with_typevar
-    hh_opt_constraint '=' hh_type ';'  { $2.setText(_p->nsDecl($2.text()));
+    hh_opt_constraint '=' hh_type ';'  { $2.setText(_p->nsClassDecl($2.text()));
                                          _p->onTypedef($$, $2, $5);
+                                         _p->popTypeScope(); }
+  | non_empty_user_attributes
+    T_NEWTYPE hh_name_with_typevar
+    hh_opt_constraint '=' hh_type ';'  { $3.setText(_p->nsClassDecl($3.text()));
+                                         _p->onTypedef($$, $3, $6);
                                          _p->popTypeScope(); }
 ;
 
@@ -3015,15 +3059,19 @@ hh_opt_return_type:
   | ':' hh_type                        { only_in_hh_syntax(_p); $$ = $2; }
 ;
 
+hh_constraint:
+    T_AS hh_type
+ |  T_SUPER hh_type
+
 hh_typevar_list:
     hh_typevar_list ','
     hh_typevar_variance ident          { _p->addTypeVar($4.text()); }
  |  hh_typevar_variance ident          { _p->addTypeVar($2.text()); }
  |  hh_typevar_list ','
     hh_typevar_variance ident
-    T_AS hh_type                       { _p->addTypeVar($4.text()); }
+    hh_constraint                      { _p->addTypeVar($4.text()); }
  |  hh_typevar_variance ident
-    T_AS hh_type                       { _p->addTypeVar($2.text()); }
+    hh_constraint                      { _p->addTypeVar($2.text()); }
 ;
 
 hh_typevar_variance:
@@ -3036,6 +3084,10 @@ hh_shape_member_type:
     T_CONSTANT_ENCAPSED_STRING
       T_DOUBLE_ARROW
       hh_type                      { validate_shape_keyname($1, _p); }
+ |   '?'
+      T_CONSTANT_ENCAPSED_STRING
+      T_DOUBLE_ARROW
+      hh_type                      { validate_shape_keyname($2, _p); }
  |  class_namespace_string_typeargs
       T_DOUBLE_COLON
       ident
@@ -3061,6 +3113,16 @@ hh_shape_type:
      '(' hh_shape_member_list ')'      { $$.setText("array"); }
 ;
 
+hh_access_type_start:
+    class_namespace_string_typeargs         { $$ = $1; }
+;
+hh_access_type:
+    ident T_DOUBLE_COLON hh_access_type { Token t; t.reset();
+                                          _p->onTypeAnnotation($$, $1, t);
+                                          _p->onTypeList($$, $3); }
+  | ident hh_typeargs_opt               { _p->onTypeAnnotation($$, $1, $2); }
+;
+
 /* extends non_empty_type_decl with some more types */
 hh_type:
     /* double-optional types will be rejected by the typechecker; we
@@ -3079,6 +3141,11 @@ hh_type:
                                          $1.setText("callable");
                                          _p->onTypeAnnotation($$, $1, t); }
   | hh_shape_type                      { $$ = $1; }
+  | hh_access_type_start
+    T_DOUBLE_COLON
+    hh_access_type                     { only_in_hh_syntax(_p);
+                                         _p->onTypeAnnotation($$, $1, $3);
+                                         _p->onTypeSpecialization($$, 'a'); }
   | T_ARRAY T_TYPELIST_LT hh_type
     T_TYPELIST_GT                      { $1.setText("array");
                                          _p->onTypeAnnotation($$, $1, $3); }

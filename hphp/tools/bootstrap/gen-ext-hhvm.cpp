@@ -64,7 +64,9 @@ ObjectData* new_{0:s}_Instance(HPHP::Class* cls) {{
   size_t nProps = cls->numDeclProperties();
   size_t builtinObjSize = sizeof(c_{0:s}) - sizeof(ObjectData);
   size_t size = ObjectData::sizeForNProps(nProps) + builtinObjSize;
-  return new (MM().objMallocLogged(size)) c_{0:s}(cls);
+  auto o = new (MM().objMalloc(size)) c_{0:s}(cls);
+  assert(o->hasExactlyOneRef());
+  return o;
 }})",
     className) << "\n\n";
 }
@@ -85,9 +87,9 @@ void delete_{0:s}(ObjectData* obj, const Class* cls) {{
   auto const builtinSz = sizeof(c_{0:s}) - sizeof(ObjectData);
   auto const size = ObjectData::sizeForNProps(nProps) + builtinSz;
   if (LIKELY(size <= kMaxSmartSize)) {{
-    return MM().smartFreeSizeLogged(ptr, size);
+    return MM().smartFreeSize(ptr, size);
   }}
-  return MM().smartFreeSizeBigLogged(ptr, size);
+  return MM().smartFreeSizeBig(ptr, size);
 }})",
     className) << "\n\n";
 }

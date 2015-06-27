@@ -184,7 +184,7 @@ function array_keys(mixed $input,
  *   together.
  *
  */
-<<__Native, __IsFoldable>>
+<<__Native("NumArgs"), __IsFoldable>>
 function array_merge_recursive(mixed $array1,
                                mixed $array2 = null,
                                ...$argv): mixed;
@@ -204,7 +204,7 @@ function array_merge_recursive(mixed $array1,
  * @return mixed - Returns the resulting array.
  *
  */
-<<__Native, __IsFoldable>>
+<<__Native("NumArgs"), __IsFoldable>>
 function array_merge(mixed $array1, mixed $array2 = null, ...$argv): mixed;
 
 /**
@@ -349,11 +349,9 @@ function array_rand(mixed $input, int $num_req = 1): mixed;
  * @return mixed - Returns the resulting value. If the array is empty and
  *   initial is not passed, array_reduce() returns NULL.
  *
+ * Defined in array_reduce.hhas
  */
-<<__Native>>
-function array_reduce(mixed $input,
-                      mixed $callback,
-                      mixed $initial = null): mixed;
+
 
 /**
  * Takes an input array and returns a new array with the order of the elements
@@ -1368,4 +1366,25 @@ namespace __SystemLib {
    */
   <<__Native>>
   function compact_sl(mixed $varname, ...$argv): array;
+
+  /* array_map() returns an array containing all the elements of arr1 after
+   * applying the callback function to each one. The number of parameters that
+   * the callback function accepts should match the number of arrays passed to
+   * the array_map()
+   * @param mixed $callback - Callback function to run for each element in each
+   * array.
+   * @param mixed $arr1 - An array to run through the callback function.
+   * @return mixed - Returns an array containing all the elements of arr1 after
+   * applying the callback function to each one.
+   *
+   * SystemLib defines the HHAS fast-path for array_map() as taking two args.
+   * First is valid callback, second is valid array.
+   *
+   * If array_map() is called by other means, it dispatches to this version
+   * which allows variadic array counts and deals with bad types.
+   */
+  <<__Native>>
+  function array_map(mixed $callback,
+                     mixed $arr1,
+                     ...$argv): mixed;
 }

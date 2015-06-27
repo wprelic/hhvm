@@ -23,6 +23,8 @@
 #include "hphp/util/asm-x64.h"
 #include "hphp/util/trace.h"
 #include "hphp/util/mutex.h"
+
+#include "hphp/runtime/vm/jit/stack-offsets.h"
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/srckey.h"
 #include "hphp/runtime/vm/tread-hash-map.h"
@@ -50,11 +52,11 @@ struct GrowableVector {
     return m_vec ? m_vec->m_size : 0;
   }
   T& operator[](const size_t idx) {
-    assert(idx < size());
+    assertx(idx < size());
     return m_vec->m_data[idx];
   }
   const T& operator[](const size_t idx) const {
-    assert(idx < size());
+    assertx(idx < size());
     return m_vec->m_data[idx];
   }
   void push_back(const T& datum) {
@@ -75,6 +77,14 @@ struct GrowableVector {
   }
   T* begin() const { return m_vec ? m_vec->m_data : (T*)this; }
   T* end() const { return m_vec ? &m_vec->m_data[m_vec->m_size] : (T*)this; }
+  void setEnd(T* newEnd) {
+    if (newEnd == begin()) {
+      free(m_vec);
+      m_vec = nullptr;
+      return;
+    }
+    m_vec->m_size = newEnd - m_vec->m_data;
+  }
 private:
   struct Impl {
     uint32_t m_size;
@@ -125,6 +135,8 @@ struct IncomingBranch {
     ADDR,
   };
 
+  using Opaque = CompactTaggedPtr<void>::Opaque;
+
   static IncomingBranch jmpFrom(TCA from) {
     return IncomingBranch(Tag::JMP, from);
   }
@@ -134,6 +146,11 @@ struct IncomingBranch {
   static IncomingBranch addr(TCA* from) {
     return IncomingBranch(Tag::ADDR, TCA(from));
   }
+
+  Opaque getOpaque() const {
+    return m_ptr.getOpaque();
+  }
+  explicit IncomingBranch(CompactTaggedPtr<void>::Opaque v) : m_ptr(v) {}
 
   Tag type()        const { return m_ptr.tag(); }
   TCA toSmash()     const { return TCA(m_ptr.ptr()); }
@@ -154,6 +171,58 @@ private:
 
   CompactTaggedPtr<void,Tag> m_ptr;
 };
+
+/*
+ * TransLoc: the location of a translation in the TC
+ *
+ * All offsets are stored relative to the start of the TC, and the sizes of the
+ * cold and frozen regions are encoded in the first four bytes of their
+ * respective regions.
+ */
+struct TransLoc {
+  void setMainStart(TCA newStart);
+  void setColdStart(TCA newStart);
+  void setFrozenStart(TCA newFrozen);
+
+  void setMainSize(size_t size) {
+    assert(size < std::numeric_limits<uint32_t>::max());
+    m_mainLen = (uint32_t)size;
+  }
+
+  bool contains(TCA loc) {
+    return (mainStart() <= loc && loc < mainEnd()) ||
+      (coldStart() <= loc && loc < coldEnd()) ||
+      (frozenStart() <= loc && loc < frozenEnd());
+  }
+
+  TCA mainStart() const;
+  TCA coldStart() const;
+  TCA frozenStart() const;
+
+  TCA coldCodeStart()   const { return coldStart()   + sizeof(uint32_t); }
+  TCA frozenCodeStart() const { return frozenStart() + sizeof(uint32_t); }
+
+  uint32_t coldCodeSize()   const { return coldSize()   - sizeof(uint32_t); }
+  uint32_t frozenCodeSize() const { return frozenSize() - sizeof(uint32_t); }
+
+  TCA mainEnd()   const { return mainStart() + m_mainLen; }
+  TCA coldEnd()   const { return coldStart() + coldSize(); }
+  TCA frozenEnd() const { return frozenStart() + frozenSize(); }
+
+  uint32_t mainSize()   const { return m_mainLen; }
+  uint32_t coldSize()   const { return *(uint32_t*)coldStart(); }
+  uint32_t frozenSize() const { return *(uint32_t*)frozenStart(); }
+
+private:
+  uint32_t m_mainOff {std::numeric_limits<uint32_t>::max()};
+  uint32_t m_mainLen {0};
+
+  uint32_t m_coldOff   {std::numeric_limits<uint32_t>::max()};
+  uint32_t m_frozenOff {std::numeric_limits<uint32_t>::max()};
+};
+
+// Prevent unintentional growth of the SrcDB
+static_assert(sizeof(TransLoc) == 16, "Don't add fields to TransLoc");
 
 /*
  * SrcRec: record of translator output for a given source location.
@@ -186,16 +255,21 @@ struct SrcRec {
   void setFuncInfo(const Func* f);
   void chainFrom(IncomingBranch br);
   void emitFallbackJump(CodeBlock& cb, ConditionCode cc = CC_None);
-  void emitFallbackJumpCustom(CodeBlock& cb, CodeBlock& frozen, SrcKey sk,
-                              TransFlags trflags, ConditionCode cc = CC_None);
-  void newTranslation(TCA newStart,
+  void registerFallbackJump(TCA from, ConditionCode cc = CC_None);
+  void emitFallbackJumpCustom(CodeBlock& cb,
+                              CodeBlock& frozen,
+                              SrcKey sk,
+                              TransFlags trflags,
+                              ConditionCode cc = CC_None);
+  TCA getFallbackTranslation() const;
+  void newTranslation(TransLoc newStart,
                       GrowableVector<IncomingBranch>& inProgressTailBranches);
   void replaceOldTranslations();
   void addDebuggerGuard(TCA dbgGuard, TCA m_dbgBranchGuardSrc);
   bool hasDebuggerGuard() const { return m_dbgBranchGuardSrc != nullptr; }
   const MD5& unitMd5() const { return m_unitMd5; }
 
-  const GrowableVector<TCA>& translations() const {
+  const GrowableVector<TransLoc>& translations() const {
     return m_translations;
   }
 
@@ -208,16 +282,27 @@ struct SrcRec {
    * SrcKey that will continue the tracelet chain.
    */
   void setAnchorTranslation(TCA anc) {
-    assert(!m_anchorTranslation);
-    assert(m_tailFallbackJumps.empty());
+    assertx(!m_anchorTranslation);
+    assertx(m_tailFallbackJumps.empty());
     m_anchorTranslation = anc;
   }
+
+  /*
+   * Returns the VM stack offset the translations in the SrcRec have, in
+   * situations where we need to and can know.
+   *
+   * Pre: this SrcRec is for a non-resumed SrcKey
+   * Pre: setAnchorTranslation has been called
+   */
+  FPInvOffset nonResumedSPOff() const;
 
   const GrowableVector<IncomingBranch>& incomingBranches() const {
     return m_incomingBranches;
   }
 
   void relocate(RelocationInfo& rel);
+
+  void removeIncomingBranch(TCA toSmash);
 
   /*
    * There is an unlikely race in retranslate, where two threads
@@ -238,7 +323,6 @@ struct SrcRec {
   }
 
 private:
-  TCA getFallbackTranslation() const;
   void patchIncomingBranches(TCA newStart);
 
 private:
@@ -258,7 +342,7 @@ private:
   TCA m_anchorTranslation;
   GrowableVector<IncomingBranch> m_tailFallbackJumps;
 
-  GrowableVector<TCA> m_translations;
+  GrowableVector<TransLoc> m_translations;
   GrowableVector<IncomingBranch> m_incomingBranches;
   MD5 m_unitMd5;
   // The branch src for the debug guard, if this has one.

@@ -17,8 +17,7 @@
 #define incl_HPHP_PORTABILITY_H_
 
 #include <folly/Likely.h> // defining LIKELY/UNLIKELY is part of this header
-
-namespace HPHP {
+#include <folly/CPortability.h> // defining FOLLY_DISABLE_ADDRESS_SANITIZER
 
 //////////////////////////////////////////////////////////////////////
 
@@ -90,13 +89,20 @@ namespace HPHP {
     __attribute__((__section__(".text,.text.keep")))
 #endif
 
+#if defined(__APPLE__)
+// OS X has a macro "isset" defined in this header. Force the include so we can
+// make sure the macro gets undef'd. (I think this also applies to BSD, but we
+// can cross that road when we come to it.)
+# include <sys/param.h>
+# ifdef isset
+#  undef isset
+# endif
+#endif
+
 //////////////////////////////////////////////////////////////////////
 
 #if defined(__x86_64__)
 
-# define DECLARE_STACK_POINTER(sp)                \
-    void* sp;                                     \
-    asm volatile("mov %%rsp, %0" : "=r" (sp) ::)
 # if defined(__clang__)
 #  define DECLARE_FRAME_POINTER(fp)               \
     ActRec* fp;                                   \
@@ -110,8 +116,14 @@ namespace HPHP {
 # if defined(__clang__)
 #  error Clang implementation not done for ARM
 # endif
-# define DECLARE_STACK_POINTER(sp) register void*   sp asm("sp");
 # define DECLARE_FRAME_POINTER(fp) register ActRec* fp asm("x29");
+
+#elif defined(__powerpc64__)
+
+# if defined(__clang__)
+#  error Clang implementation not done for PPC64
+# endif
+# define DECLARE_FRAME_POINTER(fp) register ActRec* fp = (ActRec*) __builtin_frame_address(0);
 
 #else
 
@@ -129,6 +141,19 @@ namespace HPHP {
 
 //////////////////////////////////////////////////////////////////////
 
-}
+#if FACEBOOK
+// Linking in libbfd is a gigantic PITA. If you want this yourself in a non-FB
+// build, feel free to define HAVE_LIBBFD and specify the right options to link
+// in libbfd.a in the extra C++ options.
+#define HAVE_LIBBFD 1
+#endif
+
+#ifndef PACKAGE
+// The value doesn't matter, but it must be defined before you include
+// bfd.h
+#define PACKAGE "hhvm"
+#endif
+
+//////////////////////////////////////////////////////////////////////
 
 #endif

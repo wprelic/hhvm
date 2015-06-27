@@ -1,4 +1,5 @@
 #include "hphp/runtime/ext/icu/ext_icu_collator.h"
+#include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/zend-collator.h"
 #include "hphp/runtime/base/zend-qsort.h"
 
@@ -45,7 +46,7 @@ static void HHVM_METHOD(Collator, __construct, const String& locale) {
 static bool HHVM_METHOD(Collator, asort, VRefParam arr, int64_t flag) {
   FETCH_COL(data, this_, false);
   if (!arr.isArray()) {
-    throw_expected_array_exception();
+    throw_expected_array_exception("Collator::asort");
     return false;
   }
   data->clearError();
@@ -295,7 +296,7 @@ static bool HHVM_METHOD(Collator, sort, VRefParam arr,
                         int64_t sort_flag /* = Collator::SORT_REGULAR */) {
   FETCH_COL(data, this_, false);
   if (!arr.isArray()) {
-    throw_expected_array_exception();
+    throw_expected_array_exception("Collator::sort");
     return false;
   }
   data->clearError();

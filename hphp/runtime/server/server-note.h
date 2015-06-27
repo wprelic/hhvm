@@ -16,16 +16,14 @@
 #ifndef incl_HPHP_SERVER_NOTE_H_
 #define incl_HPHP_SERVER_NOTE_H_
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
-class ServerNote  {
-public:
+struct ServerNote  {
   static void Add(const String& name, const String& value);
   static String Get(const String& name);
-
   static void Reset();
 private:
   Array m_notes;

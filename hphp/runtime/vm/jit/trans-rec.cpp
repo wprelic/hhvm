@@ -17,6 +17,9 @@
 #include "hphp/runtime/vm/jit/trans-rec.h"
 
 #include "hphp/runtime/vm/jit/translator-inline.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
+
+#include <unordered_map>
 
 namespace HPHP { namespace jit {
 
@@ -29,8 +32,12 @@ TransRec::TransRec(SrcKey                      _src,
                    TCA                         _afrozenStart,
                    uint32_t                    _afrozenLen,
                    RegionDescPtr               region,
-                   std::vector<TransBCMapping> _bcMapping)
+                   std::vector<TransBCMapping> _bcMapping,
+                   Annotations&&               _annotations,
+                   bool                        _isLLVM,
+                   bool                        _hasLoop)
   : bcMapping(_bcMapping)
+  , annotations(std::move(_annotations))
   , funcName(_src.func()->fullName()->data())
   , src(_src)
   , md5(_src.func()->unit()->md5())
@@ -43,12 +50,14 @@ TransRec::TransRec(SrcKey                      _src,
   , bcStart(_src.offset())
   , id(0)
   , kind(_kind)
+  , isLLVM(_isLLVM)
+  , hasLoop(_hasLoop)
 {
   if (funcName.empty()) funcName = "Pseudo-main";
 
   if (!region) return;
 
-  assert(!region->empty());
+  assertx(!region->empty());
   for (auto& block : region->blocks()) {
     auto sk = block->start();
     blocks.emplace_back(Block{sk.unit()->md5(), sk.offset(),
@@ -56,12 +65,81 @@ TransRec::TransRec(SrcKey                      _src,
   }
 
   auto& firstBlock = *region->blocks().front();
-  auto guardRange = firstBlock.typePreds().equal_range(firstBlock.start());
+  auto guardRange = firstBlock.typePreConditions().equal_range(
+      firstBlock.start());
   for (; guardRange.first != guardRange.second; ++guardRange.first) {
     guards.emplace_back(show(guardRange.first->second));
   }
 }
 
+void
+TransRec::optimizeForMemory() {
+  // Dump large annotations to disk.
+  for (int i = 0 ; i < annotations.size(); ++i) {
+    auto& annotation = annotations[i];
+    if (annotation.second.find_first_of('\n') != std::string::npos ||
+        annotation.second.size() > 72) {
+      auto saved = writeAnnotation(annotation, /* compress */ true);
+      if (saved.length > 0) {
+        // Strip directory name from the file name.
+        size_t pos = saved.fileName.find_last_of('/');
+        if (pos != std::string::npos) {
+          saved.fileName = saved.fileName.substr(pos+1);
+        }
+        auto newAnnotation =
+          folly::sformat(
+            "file:{}:{}:{}",
+            saved.fileName, saved.offset, saved.length);
+        std::swap(annotation.second, newAnnotation);
+      } else {
+        annotation.second = "<unknown: write failed>";
+      }
+    }
+  }
+}
+
+TransRec::SavedAnnotation
+TransRec::writeAnnotation(const Annotation& annotation, bool compress) {
+  static std::unordered_map<std::string, bool> fileWritten;
+  SavedAnnotation saved = {
+    folly::sformat("/tmp/tc_annotations.txt{}", compress ? ".gz" : ""),
+    0,
+    0
+  };
+  auto const fileName = saved.fileName.c_str();
+
+  auto result = fileWritten.find(saved.fileName);
+  if (result == fileWritten.end()) {
+    unlink(fileName);
+    fileWritten[saved.fileName] = true;
+  }
+
+  FILE* file = fopen(fileName, "a");
+  if (!file) return saved;
+  saved.offset = lseek(fileno(file), 0, SEEK_END);
+  if (saved.offset == (off_t)-1) {
+    fclose(file);
+    return saved;
+  }
+  auto const& content = annotation.second;
+  if (compress) {
+    gzFile compressedFile = gzdopen(fileno(file), "a");
+    if (!compressedFile) {
+      fclose(file);
+      return saved;
+    }
+    auto rv = gzputs(compressedFile, content.c_str());
+    if (rv > 0) saved.length = rv;
+    gzclose(compressedFile);
+  } else {
+    if (fputs(content.c_str(), file) >= 0) {
+      saved.length = content.length();
+    }
+    fclose(file);
+  }
+
+  return saved;
+}
 
 std::string
 TransRec::print(uint64_t profCount) const {
@@ -78,7 +156,7 @@ TransRec::print(uint64_t profCount) const {
     "  src.resumed = {}\n"
     "  src.bcStart = {}\n"
     "  src.blocks = {}\n",
-    id, md5, src.getFuncId(),
+    id, md5, src.funcID(),
     funcName.empty() ? "Pseudo-main" : funcName,
     (int32_t)src.resumed(),
     src.offset(),
@@ -100,6 +178,8 @@ TransRec::print(uint64_t profCount) const {
   folly::format(
     &ret,
     "  kind = {} ({})\n"
+    "  isLLVM = {:d}\n"
+    "  hasLoop = {:d}\n"
     "  aStart = {}\n"
     "  aLen = {:#x}\n"
     "  coldStart = {}\n"
@@ -107,9 +187,16 @@ TransRec::print(uint64_t profCount) const {
     "  frozenStart = {}\n"
     "  frozenLen = {:#x}\n",
     static_cast<uint32_t>(kind), show(kind),
+    isLLVM, hasLoop,
     aStart, aLen,
     acoldStart, acoldLen,
     afrozenStart, afrozenLen);
+
+  folly::format(&ret, "  annotations = {}\n", annotations.size());
+  for (auto const& annotation : annotations) {
+    folly::format(&ret, "     [\"{}\"] = {}\n",
+                  annotation.first, annotation.second);
+  }
 
   folly::format(
     &ret,

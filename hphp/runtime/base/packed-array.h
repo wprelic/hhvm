@@ -22,6 +22,7 @@
 
 #include "hphp/runtime/base/typed-value.h"
 #include "hphp/runtime/base/array-common.h"
+#include "hphp/runtime/base/sort-flags.h"
 
 namespace HPHP {
 
@@ -50,13 +51,12 @@ struct MixedArray;
  * details.
  */
 struct PackedArray {
+  static constexpr uint32_t MaxSize = 0xFFFFFFFFul;
   static void Release(ArrayData*);
   static const TypedValue* NvGetInt(const ArrayData*, int64_t ki);
-  static const TypedValue* NvGetIntConverted(const ArrayData*, int64_t ki);
   static const TypedValue* NvGetStr(const ArrayData*, const StringData*);
   static void NvGetKey(const ArrayData*, TypedValue* out, ssize_t pos);
   static ArrayData* SetInt(ArrayData*, int64_t k, Cell v, bool copy);
-  static ArrayData* SetIntConverted(ArrayData*, int64_t k, Cell v, bool copy);
   static ArrayData* SetStr(ArrayData*, StringData* k, Cell v, bool copy);
   static size_t Vsize(const ArrayData*);
   static const Variant& GetValueRef(const ArrayData* ad, ssize_t pos);
@@ -84,11 +84,12 @@ struct PackedArray {
   static ssize_t IterRewind(const ArrayData*, ssize_t pos);
   static constexpr auto ValidMArrayIter = &ArrayCommon::ValidMArrayIter;
   static bool AdvanceMArrayIter(ArrayData*, MArrayIter& fp);
+  static void CopyPackedHelper(const ArrayData* adIn, ArrayData* ad);
   static ArrayData* Copy(const ArrayData* ad);
   static ArrayData* CopyWithStrongIterators(const ArrayData*);
   static ArrayData* NonSmartCopy(const ArrayData*);
   static ArrayData* NonSmartCopyHelper(const ArrayData*);
-  static ArrayData* EscalateForSort(ArrayData*);
+  static ArrayData* EscalateForSort(ArrayData*, SortFunction);
   static void Ksort(ArrayData*, int, bool);
   static void Sort(ArrayData*, int, bool);
   static void Asort(ArrayData*, int, bool);
@@ -127,6 +128,7 @@ struct PackedArray {
   static uint32_t getMaxCapInPlaceFast(uint32_t cap);
 
   static size_t heapSize(const ArrayData*);
+  template<class Marker> static void scan(const ArrayData*, Marker&);
 
 private:
   static ArrayData* Grow(ArrayData*);
@@ -138,25 +140,7 @@ private:
   static ArrayData* CopyAndResizeIfNeededSlow(const ArrayData*);
   static ArrayData* CopyAndResizeIfNeeded(const ArrayData*);
   static ArrayData* ResizeIfNeeded(ArrayData*);
-
-public:
-  enum class Reason : uint8_t {
-    kForeachByRef,
-    kTakeByRef,
-    kSetRef,
-    kAppendRef,
-    kRemoveInt,
-    kRemoveStr,
-    kOutOfOrderIntKey,
-    kGetStr,
-    kSetStr,
-    kNumericString,
-    kPlusNotSupported,
-    kMergeNotSupported,
-    kSortNotSupported
-  };
-  static void downgradeAndWarn(ArrayData* ad, const Reason r);
-  static void warnUsage(const Reason r);
+  static SortFlavor preSort(ArrayData*);
 };
 
 //////////////////////////////////////////////////////////////////////

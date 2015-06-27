@@ -122,12 +122,9 @@ struct UnitEmitter {
 
   /*
    * Merge a scalar array into the Unit.
-   *
-   * When `key' is provided, it should be the serialization of `a'; when not
-   * provided, the array is serialized in the call.
    */
   Id mergeArray(const ArrayData* a);
-  Id mergeArray(const ArrayData* a, const std::string& key);
+  Id mergeArray(const ArrayData* a, const ArrayData::ScalarArrayKey& key);
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -191,11 +188,8 @@ struct UnitEmitter {
    * This should only be called from fe->create(), and just constructs a new
    * Func* and records it as emitted from `fe'.
    */
-  Func* newFunc(const FuncEmitter* fe, Unit& unit, PreClass* preClass,
-                int line1, int line2, Offset base, Offset past,
-                const StringData* name, Attr attrs, bool top,
-                const StringData* docComment, int numParams,
-                bool needsNextClonedClosure);
+  Func* newFunc(const FuncEmitter* fe, Unit& unit, const StringData* name,
+                Attr attrs, int numParams);
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -264,7 +258,7 @@ struct UnitEmitter {
    * Adjacent regions associated with the same source line will be collapsed as
    * this is created.
    */
-  void recordSourceLocation(const Location* sLoc, Offset start);
+  void recordSourceLocation(const Location::Range& sLoc, Offset start);
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -372,12 +366,9 @@ private:
   /*
    * Scalar array tables.
    */
-  struct ArrayVecElm {
-    std::string serialized;
-    const ArrayData* array;
-  };
-  hphp_hash_map<std::string, Id, string_hash> m_array2id;
-  std::vector<ArrayVecElm> m_arrays;
+  hphp_hash_map<ArrayData::ScalarArrayKey, Id,
+                ArrayData::ScalarHash> m_array2id;
+  std::vector<ArrayData*> m_arrays;
 
   /*
    * Type alias table.

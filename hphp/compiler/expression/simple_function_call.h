@@ -34,7 +34,7 @@ public:
                      ExpressionListPtr params, ExpressionPtr cls);
 
   DECLARE_BASE_EXPRESSION_VIRTUAL_FUNCTIONS;
-  ExpressionPtr preOptimize(AnalysisResultConstPtr ar);
+  ExpressionPtr preOptimize(AnalysisResultConstPtr ar) override;
   void deepCopy(SimpleFunctionCallPtr exp);
 
   bool isDefineWithoutImpl(AnalysisResultConstPtr ar);
@@ -52,19 +52,16 @@ public:
   // define(<literal-string>, <scalar>);
   bool isSimpleDefine(StringData **name, TypedValue *value) const;
 
-  virtual int getLocalEffects() const;
+  int getLocalEffects() const override;
 
   // implementing IParseHandler
-  virtual void onParse(AnalysisResultConstPtr ar, FileScopePtr fs);
+  void onParse(AnalysisResultConstPtr ar, FileScopePtr fs) override;
 
-  virtual void beforeCheck(AnalysisResultPtr ar) {}
-
-  void addDependencies(AnalysisResultPtr ar);
   void addLateDependencies(AnalysisResultConstPtr ar);
   void setSafeCall(int flag) { m_safe = flag; }
   void setSafeDefault(ExpressionPtr def) { m_safeDef = def; }
-  virtual ConstructPtr getNthKid(int n) const;
-  virtual void setNthKid(int n, ConstructPtr cp);
+  ConstructPtr getNthKid(int n) const override;
+  void setNthKid(int n, ConstructPtr cp) override;
   static SimpleFunctionCallPtr GetFunctionCallForCallUserFunc(
     AnalysisResultConstPtr ar, SimpleFunctionCallPtr call, int testOnly,
     int firstParam, bool &error);
@@ -76,16 +73,10 @@ public:
   bool isCallToFunction(const char *name) const;
   void resolveNSFallbackFunc(AnalysisResultConstPtr ar, FileScopePtr fs);
 
-  void setOptimizable() {
-    m_optimizable = true;
-  }
-  bool isOptimizable() const {
-    return m_optimizable;
-  }
   void changeToBytecode() {
     m_changedToBytecode = true;
   }
-  virtual bool allowCellByRef() const override {
+  bool hasBeenChangedToBytecode() {
     return m_changedToBytecode;
   }
 
@@ -117,7 +108,6 @@ protected:
   FunType m_type;
   unsigned m_dynamicConstant : 1;
   unsigned m_builtinFunction : 1;
-  unsigned m_invokeFewArgsDecision : 1;
   unsigned m_dynamicInvoke : 1;
   unsigned m_transformed : 1;
   unsigned m_changedToBytecode : 1; // true if it morphed into a bytecode

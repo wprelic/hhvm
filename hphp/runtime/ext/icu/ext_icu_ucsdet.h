@@ -1,7 +1,7 @@
 #ifndef incl_HPHP_ICU_UCSDET_H
 #define incl_HPHP_ICU_UCSDET_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 #include "hphp/runtime/ext/icu/icu.h"
 
 #include <unicode/ucsdet.h>
@@ -89,8 +89,7 @@ class EncodingMatch : public IntlError {
       c_EncodingMatch = Unit::lookupClass(s_EncodingMatch.get());
       assert(c_EncodingMatch);
     }
-    auto ret = ObjectData::newInstance(c_EncodingMatch);
-    assert(ret);
+    Object ret{c_EncodingMatch};
     Native::data<EncodingMatch>(ret)->m_match =
       const_cast<UCharsetMatch*>(match);
     return ret;

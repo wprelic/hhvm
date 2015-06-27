@@ -19,6 +19,7 @@
 
 #include "hphp/runtime/base/resource-data.h"
 #include "hphp/runtime/base/type-string.h"
+#include "hphp/system/constants.h"
 
 extern "C" {
 #include <timelib.h>
@@ -29,7 +30,6 @@ extern "C" {
 namespace HPHP {
 
 class Array;
-template <typename T> class SmartResource;
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -44,7 +44,7 @@ public:
    * Get/set current timezone that controls how local time is interpreted.
    */
   static String CurrentName();            // current timezone's name
-  static SmartResource<TimeZone> Current(); // current timezone
+  static SmartPtr<TimeZone> Current(); // current timezone
   static bool SetCurrent(const String& name);   // returns false if invalid
 
   /**
@@ -54,7 +54,7 @@ public:
   static Array GetAbbreviations();
   static Array GetNamesToCountryCodes();
   static String AbbreviationToName(String abbr, int utcoffset = -1,
-                                   bool isdst = true);
+                                   int isdst = 1);
 
 public:
   /**
@@ -69,7 +69,7 @@ public:
     return result;
   }
   // overriding ResourceData
-  const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override { return classnameof(); }
 
   /**
    * Whether this represents a valid timezone.
@@ -95,7 +95,8 @@ public:
   /**
    * Query transition times for DST.
    */
-  Array transitions() const;
+  Array transitions(int64_t timestamp_begin = k_PHP_INT_MIN,
+                    int64_t timestamp_end = k_PHP_INT_MAX) const;
 
   /**
    * Get information about a timezone
@@ -113,7 +114,7 @@ public:
   /**
    * Make a copy of this timezone object, so it can be changed independently.
    */
-  SmartResource<TimeZone> cloneTimeZone() const;
+  SmartPtr<TimeZone> cloneTimeZone() const;
 
 protected:
   friend class DateTime;

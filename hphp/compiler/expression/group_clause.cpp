@@ -16,7 +16,6 @@
 
 #include "hphp/compiler/expression/group_clause.h"
 #include "hphp/compiler/analysis/code_error.h"
-#include "hphp/runtime/base/complex-types.h"
 
 using namespace HPHP;
 
@@ -88,7 +87,7 @@ void GroupClause::outputCodeModel(CodeGenerator &cg) {
   cg.printPropertyHeader("key");
   m_key->outputCodeModel(cg);
   cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
+  cg.printLocation(this);
   cg.printObjectFooter();
 }
 
@@ -101,4 +100,3 @@ void GroupClause::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
   cg_printf(" by ");
   m_key->outputPHP(cg, ar);
 }
-

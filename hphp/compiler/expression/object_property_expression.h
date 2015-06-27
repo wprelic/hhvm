@@ -18,6 +18,7 @@
 #define incl_HPHP_OBJECT_PROPERTY_EXPRESSION_H_
 
 #include "hphp/compiler/expression/expression.h"
+#include "hphp/parser/parser.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -31,20 +32,22 @@ class ObjectPropertyExpression : public Expression,
                                  public LocalEffectsContainer {
 public:
   ObjectPropertyExpression(EXPRESSION_CONSTRUCTOR_PARAMETERS,
-                           ExpressionPtr object, ExpressionPtr property);
+                           ExpressionPtr object, ExpressionPtr property,
+                           PropAccessType propAccessType);
 
   DECLARE_EXPRESSION_VIRTUAL_FUNCTIONS;
   DECL_AND_IMPL_LOCAL_EFFECTS_METHODS;
 
-  virtual bool isRefable(bool checkError = false) const { return true;}
+  bool isRefable(bool checkError = false) const override { return true;}
 
-  virtual void setContext(Context context);
-  virtual void clearContext(Context context);
+  void setContext(Context context) override;
+  void clearContext(Context context) override;
 
   ExpressionPtr getObject() { return m_object;}
   ExpressionPtr getProperty() { return m_property;}
+  bool isNullSafe() const { return m_nullsafe; }
 
-  bool isTemporary() const;
+  bool isTemporary() const override;
   bool isNonPrivate(AnalysisResultPtr ar);
   bool isValid() const { return m_valid; }
 private:
@@ -53,6 +56,7 @@ private:
 
   unsigned m_valid : 1;
   unsigned m_propSymValid : 1;
+  unsigned m_nullsafe : 1;
 
   Symbol *m_propSym;
   ClassScopeRawPtr m_objectClass;

@@ -32,7 +32,7 @@
 #include "hphp/system/systemlib.h"
 #include "hphp/util/logger.h"
 
-#include <folly/experimental/Singleton.h>
+#include <folly/Singleton.h>
 
 #include <libgen.h> // For dirname(3).
 #include <string>
@@ -72,7 +72,7 @@ void ProcessInit() {
   RuntimeOption::EvalAllowHhas = true;
   Option::WholeProgram = false;
 
-  RDS::requestInit();
+  rds::requestInit();
   string hhas;
   string slib = get_systemlib(&hhas);
 
@@ -173,6 +173,9 @@ void ProcessInit() {
   RuntimeOption::EvalDumpBytecode = db;
   RuntimeOption::EvalAllowHhas = ah;
   Option::WholeProgram = wp;
+
+  void tweak_variant_dtors();
+  tweak_variant_dtors();
 
   folly::SingletonVault::singleton()->registrationComplete();
 }

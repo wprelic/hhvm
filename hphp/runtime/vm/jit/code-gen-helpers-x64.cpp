@@ -16,22 +16,25 @@
 
 #include "hphp/runtime/vm/jit/code-gen-helpers-x64.h"
 
-#include "hphp/util/asm-x64.h"
-#include "hphp/util/ringbuffer.h"
-#include "hphp/util/trace.h"
-
 #include "hphp/runtime/base/arch.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/stats.h"
 #include "hphp/runtime/base/types.h"
 #include "hphp/runtime/vm/jit/back-end.h"
-#include "hphp/runtime/vm/jit/translator-inline.h"
-#include "hphp/runtime/vm/jit/mc-generator.h"
-#include "hphp/runtime/vm/jit/mc-generator-internal.h"
-#include "hphp/runtime/vm/jit/translator.h"
-#include "hphp/runtime/vm/jit/ir-opcode.h"
 #include "hphp/runtime/vm/jit/code-gen-x64.h"
-#include "hphp/runtime/vm/jit/vasm-x64.h"
+#include "hphp/runtime/vm/jit/code-gen-cf.h"
+#include "hphp/runtime/vm/jit/ir-opcode.h"
+#include "hphp/runtime/vm/jit/mc-generator-internal.h"
+#include "hphp/runtime/vm/jit/mc-generator.h"
+#include "hphp/runtime/vm/jit/translator-inline.h"
+#include "hphp/runtime/vm/jit/translator.h"
+#include "hphp/runtime/vm/jit/vasm-emit.h"
+#include "hphp/runtime/vm/jit/vasm-instr.h"
+#include "hphp/runtime/vm/jit/vasm-reg.h"
+
+#include "hphp/util/asm-x64.h"
+#include "hphp/util/ringbuffer.h"
+#include "hphp/util/trace.h"
 
 namespace HPHP { namespace jit { namespace x64 {
 
@@ -57,7 +60,7 @@ TRACE_SET_MOD(hhir);
 void moveToAlign(CodeBlock& cb,
                  const size_t align /* =kJmpTargetAlign */) {
   X64Assembler a { cb };
-  assert(folly::isPowTwo(align));
+  assertx(folly::isPowTwo(align));
   size_t leftInBlock = align - ((align - 1) & uintptr_t(cb.frontier()));
   if (leftInBlock == align) return;
   if (leftInBlock > 2) {
@@ -69,76 +72,10 @@ void moveToAlign(CodeBlock& cb,
   }
 }
 
-void emitEagerSyncPoint(Vout& v, const Op* pc, Vreg vmfp, Vreg vmsp) {
-  v << store{vmfp, rVmTl[RDS::kVmfpOff]};
-  v << store{vmsp, rVmTl[RDS::kVmspOff]};
-  emitImmStoreq(v, intptr_t(pc), rVmTl[RDS::kVmpcOff]);
-}
-
-void emitEagerSyncPoint(Asm& as, const Op* pc, PhysReg vmfp, PhysReg vmsp) {
-  // keep this in sync with vasm code above.
-  as.  storeq(vmfp, rVmTl[RDS::kVmfpOff]);
-  as.  storeq(vmsp, rVmTl[RDS::kVmspOff]);
-  emitImmStoreq(as, intptr_t(pc), rVmTl[RDS::kVmpcOff]);
-}
-
-// emitEagerVMRegSave --
-//   Inline. Saves regs in-place in the TC. This is an unusual need;
-//   you probably want to lazily save these regs via recordCall and
-//   its ilk.
-void emitEagerVMRegSave(Asm& as, RegSaveFlags flags) {
-  bool saveFP = bool(flags & RegSaveFlags::SaveFP);
-  bool savePC = bool(flags & RegSaveFlags::SavePC);
-  assert((flags & ~(RegSaveFlags::SavePC | RegSaveFlags::SaveFP)) ==
-         RegSaveFlags::None);
-
-  Reg64 pcReg = rdi;
-  assert(!kCrossCallRegs.contains(rdi));
-
-  as.   storeq (rVmSp, rVmTl[RDS::kVmspOff]);
-  if (savePC) {
-    // We're going to temporarily abuse rVmSp to hold the current unit.
-    Reg64 rBC = rVmSp;
-    as. push   (rBC);
-    // m_fp -> m_func -> m_unit -> m_bc + pcReg
-    as. loadq  (rVmFp[AROFF(m_func)], rBC);
-    as. loadq  (rBC[Func::unitOff()], rBC);
-    as. loadq  (rBC[Unit::bcOff()], rBC);
-    as. addq   (rBC, pcReg);
-    as. storeq (pcReg, rVmTl[RDS::kVmpcOff]);
-    as. pop    (rBC);
-  }
-  if (saveFP) {
-    as. storeq (rVmFp, rVmTl[RDS::kVmfpOff]);
-  }
-}
-
-// Save vmsp, and optionally vmfp and vmpc. If saving vmpc,
-// the bytecode offset is expected to be in rdi and is clobbered
-void emitEagerVMRegSave(Vout& v, RegSaveFlags flags) {
-  bool saveFP = bool(flags & RegSaveFlags::SaveFP);
-  bool savePC = bool(flags & RegSaveFlags::SavePC);
-  assert((flags & ~(RegSaveFlags::SavePC | RegSaveFlags::SaveFP)) ==
-         RegSaveFlags::None);
-
-  assert(!kCrossCallRegs.contains(rdi));
-
-  v << store{rVmSp, rVmTl[RDS::kVmspOff]};
-  if (savePC) {
-    PhysReg pc{rdi};
-    auto func = v.makeReg();
-    auto unit = v.makeReg();
-    auto bc = v.makeReg();
-    // m_fp -> m_func -> m_unit -> m_bc + pcReg
-    v << load{rVmFp[AROFF(m_func)], func};
-    v << load{func[Func::unitOff()], unit};
-    v << load{unit[Unit::bcOff()], bc};
-    v << addq{bc, pc, pc, v.makeReg()};
-    v << store{pc, rVmTl[RDS::kVmpcOff]};
-  }
-  if (saveFP) {
-    v << store{rVmFp, rVmTl[RDS::kVmfpOff]};
-  }
+void emitEagerSyncPoint(Vout& v, const Op* pc, Vreg rds, Vreg vmfp, Vreg vmsp) {
+  v << store{vmfp, rds[rds::kVmfpOff]};
+  v << store{vmsp, rds[rds::kVmspOff]};
+  emitImmStoreq(v, intptr_t(pc), rds[rds::kVmpcOff]);
 }
 
 void emitGetGContext(Vout& v, Vreg dest) {
@@ -189,6 +126,13 @@ void emitTransCounterInc(Asm& a) {
   emitTransCounterInc(Vauto(a.code()).main());
 }
 
+Vreg emitDecRef(Vout& v, Vreg base) {
+  auto const sf = v.makeReg();
+  v << declm{base[FAST_REFCOUNT_OFFSET], sf};
+  emitAssertFlagsNonNegative(v, sf);
+  return sf;
+}
+
 void emitIncRef(Vout& v, Vreg base) {
   if (RuntimeOption::EvalHHIRGenerateAsserts) {
     emitAssertRefCount(v, base);
@@ -196,10 +140,7 @@ void emitIncRef(Vout& v, Vreg base) {
   // emit incref
   auto const sf = v.makeReg();
   v << inclm{base[FAST_REFCOUNT_OFFSET], sf};
-  if (RuntimeOption::EvalHHIRGenerateAsserts) {
-    // Assert that the ref count is greater than zero
-    emitAssertFlagsNonNegative(v, sf);
-  }
+  emitAssertFlagsNonNegative(v, sf);
 }
 
 void emitIncRef(Asm& as, PhysReg base) {
@@ -225,15 +166,16 @@ void emitIncRefGenericRegSafe(Asm& as, PhysReg base, int disp, PhysReg tmpReg) {
 }
 
 void emitAssertFlagsNonNegative(Vout& v, Vreg sf) {
+  if (!RuntimeOption::EvalHHIRGenerateAsserts) return;
   ifThen(v, CC_NGE, sf, [&](Vout& v) { v << ud2{}; });
 }
 
 void emitAssertRefCount(Vout& v, Vreg base) {
   auto const sf = v.makeReg();
-  v << cmplim{HPHP::StaticValue, base[FAST_REFCOUNT_OFFSET], sf};
+  v << cmplim{StaticValue, base[FAST_REFCOUNT_OFFSET], sf};
   ifThen(v, CC_NLE, sf, [&](Vout& v) {
     auto const sf = v.makeReg();
-    v << cmplim{HPHP::RefCountMaxRealistic, base[FAST_REFCOUNT_OFFSET], sf};
+    v << cmplim{RefCountMaxRealistic, base[FAST_REFCOUNT_OFFSET], sf};
     ifThen(v, CC_NBE, sf, [&](Vout& v) { v << ud2{}; });
   });
 }
@@ -242,8 +184,8 @@ void emitAssertRefCount(Vout& v, Vreg base) {
 // after execution, but might do so in strange ways. Do not count on
 // being able to smash dest to a different register in the future, e.g.
 void emitMovRegReg(Asm& as, PhysReg srcReg, PhysReg dstReg) {
-  assert(srcReg != InvalidReg);
-  assert(dstReg != InvalidReg);
+  assertx(srcReg != InvalidReg);
+  assertx(dstReg != InvalidReg);
 
   if (srcReg == dstReg) return;
 
@@ -277,19 +219,17 @@ void emitLea(Asm& as, MemoryRef mr, PhysReg dst) {
 
 Vreg emitLdObjClass(Vout& v, Vreg objReg, Vreg dstReg) {
   emitLdLowPtr(v, objReg[ObjectData::getVMClassOffset()],
-               dstReg, sizeof(LowClassPtr));
+               dstReg, sizeof(LowPtr<Class>));
   return dstReg;
 }
 
-Vreg emitLdClsCctx(Vout& v, Vreg srcReg, Vreg dstReg) {
-  auto t = v.makeReg();
-  v << copy{srcReg, t};
-  v << decq{t, dstReg, v.makeReg()};
-  return dstReg;
+Vreg emitLdClsCctx(Vout& v, Vreg src, Vreg dst) {
+  v << decq{src, dst, v.makeReg()};
+  return dst;
 }
 
 void emitCall(Asm& a, TCA dest, RegSet args) {
-  // warning: keep this in sync with vasm-x64 call{}
+  // NB: Keep this in sync with Vgen::emit(call) in vasm-x64.cpp.
   if (a.jmpDeltaFits(dest)) {
     a.call(dest);
   } else {
@@ -321,20 +261,23 @@ void emitCall(Vout& v, CppCall target, RegSet args) {
     return;
   case CppCall::Kind::ArrayVirt: {
     auto const addr = reinterpret_cast<intptr_t>(target.arrayTable());
-    always_assert_flog(
-      deltaFits(addr, sz::dword),
-      "deltaFits on ArrayData vtable calls needs to be checked before "
-      "emitting them"
-    );
-    v << loadzbl{rdi[ArrayData::offsetofKind()], eax};
-    v << callm{baseless(rax*8 + addr), args};
+    v << loadzbl{rdi[HeaderKindOffset], eax};
+    if (deltaFits(addr, sz::dword)) {
+      v << callm{baseless(rax*8 + addr), args};
+    } else {
+      auto const base = v.makeReg();
+      v << ldimmq{addr, base};
+      v << callm{Vptr{base, rax, 8, 0}, args};
+    }
+    static_assert(sizeof(HeaderKind) == 1, "");
     return;
   }
   case CppCall::Kind::Destructor:
-    // this movzbl is only needed because callers aren't
-    // required to zero-extend the type.
-    v << movzbl{target.reg(), target.reg()};
-    auto dtor_ptr = lookupDestructor(v, target.reg());
+    // this movzbq is only needed because callers aren't required to
+    // zero-extend the type.
+    auto zextType = v.makeReg();
+    v << movzbq{target.reg(), zextType};
+    auto dtor_ptr = lookupDestructor(v, zextType);
     v << callm{dtor_ptr, args};
     return;
   }
@@ -345,8 +288,9 @@ void emitImmStoreq(Vout& v, Immed64 imm, Vptr ref) {
   if (imm.fits(sz::dword)) {
     v << storeqi{imm.l(), ref};
   } else {
-    v << storeli{int32_t(imm.q()), ref};
-    v << storeli{int32_t(imm.q() >> 32), ref + 4};
+    // An alternative is two 32-bit immediate stores, but that's little-endian
+    // specific and generates larger code on x64 (24 bytes vs. 18 bytes).
+    v << store{v.cns(imm.q()), ref};
   }
 }
 
@@ -360,7 +304,7 @@ void emitImmStoreq(Asm& a, Immed64 imm, MemoryRef ref) {
 }
 
 void emitRB(Vout& v, Trace::RingBufferType t, const char* msg) {
-  if (!Trace::moduleEnabledRelease(Trace::ringbuffer, 1)) {
+  if (!Trace::moduleEnabled(Trace::ringbuffer, 1)) {
     return;
   }
   v << vcall{CppCall::direct(Trace::ringbufferMsg),
@@ -368,95 +312,61 @@ void emitRB(Vout& v, Trace::RingBufferType t, const char* msg) {
              v.makeTuple({})};
 }
 
-void emitTraceCall(CodeBlock& cb, Offset pcOff) {
-  Asm a { cb };
-  // call to a trace function
-  a.    lea    (rip[(int64_t)a.frontier()], rcx);
-  a.    movq   (rVmFp, rdi);
-  a.    movq   (rVmSp, rsi);
-  a.    movq   (pcOff, rdx);
-  // do the call; may use a trampoline
-  emitCall(a, reinterpret_cast<TCA>(traceCallback),
-           RegSet().add(rcx).add(rdi).add(rsi).add(rdx));
-}
-
-void emitTestSurpriseFlags(Asm& a) {
-  static_assert(RequestInjectionData::LastFlag < (1LL << 32),
-                "Translator assumes RequestInjectionFlags fit in 32-bit int");
-  a.testl(-1, rVmTl[RDS::kConditionFlagsOff]);
-}
-
-Vreg emitTestSurpriseFlags(Vout& v) {
-  static_assert(RequestInjectionData::LastFlag < (1LL << 32),
-                "Translator assumes RequestInjectionFlags fit in 32-bit int");
-  auto const sf = v.makeReg();
-  v << testlim{-1, rVmTl[RDS::kConditionFlagsOff], sf};
-  return sf;
-}
-
-void emitCheckSurpriseFlagsEnter(CodeBlock& mainCode, CodeBlock& coldCode,
-                                 Fixup fixup) {
-  // warning: keep this in sync with the vasm version below.
-  Asm a{mainCode}, acold{coldCode};
-
-  emitTestSurpriseFlags(a);
-  a.  jnz(coldCode.frontier());
-
-  acold.  movq  (rVmFp, argNumToRegName[0]);
-  emitCall(acold, mcg->tx().uniqueStubs.functionEnterHelper, argSet(1));
-  mcg->recordSyncPoint(acold.frontier(), fixup.pcOffset, fixup.spOffset);
-  acold.  jmp   (a.frontier());
-}
-
-void emitCheckSurpriseFlagsEnter(Vout& v, Vout& vcold, Fixup fixup) {
-  // warning: keep this in sync with the x64 version above.
+void emitCheckSurpriseFlagsEnter(Vout& v, Vout& vcold, Vreg fp, Vreg rds,
+                                 Fixup fixup, Vlabel catchBlock) {
   auto cold = vcold.makeBlock();
   auto done = v.makeBlock();
-  auto const sf = emitTestSurpriseFlags(v);
-  v << jcc{CC_NZ, sf, {done, cold}};
 
-  vcold = cold;
-  vcold << copy{rVmFp, argNumToRegName[0]};
-  vcold << call{mcg->tx().uniqueStubs.functionEnterHelper, argSet(1)};
-  vcold << syncpoint{Fixup{fixup.pcOffset, fixup.spOffset}};
-  vcold << jmp{done};
+  auto const sf = v.makeReg();
+  v << cmpqm{fp, rds[rds::kSurpriseFlagsOff], sf};
+  v << jcc{CC_NBE, sf, {done, cold}};
+
   v = done;
+  vcold = cold;
+
+  auto const call = CppCall::direct(
+    reinterpret_cast<void(*)()>(mcg->tx().uniqueStubs.functionEnterHelper));
+  auto const args = v.makeVcallArgs({});
+  vcold << vinvoke{call, args, v.makeTuple({}), {done, catchBlock}, fixup};
 }
 
 void emitLdLowPtr(Vout& v, Vptr mem, Vreg reg, size_t size) {
   if (size == 8) {
     v << load{mem, reg};
   } else if (size == 4) {
-    v << loadl{mem, reg};
+    v << loadzlq{mem, reg};
   } else {
     not_implemented();
   }
 }
 
 void emitCmpClass(Vout& v, Vreg sf, const Class* c, Vptr mem) {
-  auto size = sizeof(LowClassPtr);
+  auto size = sizeof(LowPtr<Class>);
   if (size == 8) {
     v << cmpqm{v.cns(c), mem, sf};
   } else if (size == 4) {
-    v << cmplm{v.cns(c), mem, sf};
+    v << cmplm{v.cns(safe_cast<uint32_t>(reinterpret_cast<intptr_t>(c))),
+               mem, sf};
   } else {
     not_implemented();
   }
 }
 
 void emitCmpClass(Vout& v, Vreg sf, Vreg reg, Vptr mem) {
-  auto size = sizeof(LowClassPtr);
+  auto size = sizeof(LowPtr<Class>);
   if (size == 8) {
     v << cmpqm{reg, mem, sf};
   } else if (size == 4) {
-    v << cmplm{reg, mem, sf};
+    auto lowCls = v.makeReg();
+    v << movtql{reg, lowCls};
+    v << cmplm{lowCls, mem, sf};
   } else {
     not_implemented();
   }
 }
 
 void emitCmpClass(Vout& v, Vreg sf, Vreg reg1, Vreg reg2) {
-  auto size = sizeof(LowClassPtr);
+  auto size = sizeof(LowPtr<Class>);
   if (size == 8) {
     v << cmpq{reg1, reg2, sf};
   } else if (size == 4) {
@@ -466,100 +376,56 @@ void emitCmpClass(Vout& v, Vreg sf, Vreg reg1, Vreg reg2) {
   }
 }
 
-void copyTV(Vout& v, Vloc src, Vloc dst) {
+void emitCmpVecLen(Vout& v, Vreg sf, Vptr mem, Immed val) {
+  auto const size = sizeof(Class::veclen_t);
+  if (size == 2) {
+    v << cmpwim{val, mem, sf};
+  } else if (size == 4) {
+    v << cmplim{val, mem, sf};
+  } else {
+    not_implemented();
+  }
+}
+
+void copyTV(Vout& v, Vloc src, Vloc dst, Type destType) {
   auto src_arity = src.numAllocated();
   auto dst_arity = dst.numAllocated();
   if (dst_arity == 2) {
-    assert(src_arity == 2);
+    always_assert(src_arity == 2);
     v << copy2{src.reg(0), src.reg(1), dst.reg(0), dst.reg(1)};
     return;
   }
-  assert(dst_arity == 1);
+  always_assert(dst_arity == 1);
   if (src_arity == 2 && dst.isFullSIMD()) {
     pack2(v, src.reg(0), src.reg(1), dst.reg(0));
     return;
   }
-  assert(src_arity >= 1);
-  v << copy{src.reg(0), dst.reg(0)};
+  always_assert(src_arity >= 1);
+  if (src_arity == 2 && destType <= TBool) {
+    v << movtqb{src.reg(0), dst.reg(0)};
+  } else {
+    v << copy{src.reg(0), dst.reg(0)};
+  }
 }
 
-// move 2 gpr to 1 xmm
+// copy 2 64-bit values into one 128-bit value
 void pack2(Vout& v, Vreg s0, Vreg s1, Vreg d0) {
-  auto t0 = v.makeReg();
-  auto t1 = v.makeReg();
-  v << copy{s0, t0};
-  v << copy{s1, t1};
-  v << unpcklpd{t1, t0, d0}; // s0,s1 -> d0[0],d0[1]
+  auto prep = [&](Vreg r) {
+    if (VregDbl::allowable(r)) return r;
+    auto t = v.makeReg();
+    v << copy{r, t};
+    return t;
+  };
+  // s0 and s1 must be valid VregDbl registers; prep() takes care of it.
+  v << unpcklpd{prep(s1), prep(s0), d0}; // s0,s1 -> d0[0],d0[1]
 }
 
 Vreg zeroExtendIfBool(Vout& v, const SSATmp* src, Vreg reg) {
-  if (!src->isA(Type::Bool)) return reg;
+  if (!src->isA(TBool)) return reg;
   // zero-extend the bool from a byte to a quad
-  // note: movzbl actually extends the value to 64 bits.
   auto extended = v.makeReg();
-  v << movzbl{reg, extended};
+  v << movzbq{reg, extended};
   return extended;
-}
-
-ConditionCode opToConditionCode(Opcode opc) {
-  switch (opc) {
-  case JmpGt:                 return CC_G;
-  case JmpGte:                return CC_GE;
-  case JmpLt:                 return CC_L;
-  case JmpLte:                return CC_LE;
-  case JmpEq:                 return CC_E;
-  case JmpNeq:                return CC_NE;
-  case JmpGtInt:              return CC_G;
-  case JmpGteInt:             return CC_GE;
-  case JmpLtInt:              return CC_L;
-  case JmpLteInt:             return CC_LE;
-  case JmpEqInt:              return CC_E;
-  case JmpNeqInt:             return CC_NE;
-  case JmpSame:               return CC_E;
-  case JmpNSame:              return CC_NE;
-  case JmpInstanceOfBitmask:  return CC_NZ;
-  case JmpNInstanceOfBitmask: return CC_Z;
-  case JmpZero:               return CC_Z;
-  case JmpNZero:              return CC_NZ;
-  case ReqBindJmpGt:                 return CC_G;
-  case ReqBindJmpGte:                return CC_GE;
-  case ReqBindJmpLt:                 return CC_L;
-  case ReqBindJmpLte:                return CC_LE;
-  case ReqBindJmpEq:                 return CC_E;
-  case ReqBindJmpNeq:                return CC_NE;
-  case ReqBindJmpGtInt:              return CC_G;
-  case ReqBindJmpGteInt:             return CC_GE;
-  case ReqBindJmpLtInt:              return CC_L;
-  case ReqBindJmpLteInt:             return CC_LE;
-  case ReqBindJmpEqInt:              return CC_E;
-  case ReqBindJmpNeqInt:             return CC_NE;
-  case ReqBindJmpSame:               return CC_E;
-  case ReqBindJmpNSame:              return CC_NE;
-  case ReqBindJmpInstanceOfBitmask:  return CC_NZ;
-  case ReqBindJmpNInstanceOfBitmask: return CC_Z;
-  case ReqBindJmpZero:               return CC_Z;
-  case ReqBindJmpNZero:              return CC_NZ;
-  case SideExitJmpGt:                 return CC_G;
-  case SideExitJmpGte:                return CC_GE;
-  case SideExitJmpLt:                 return CC_L;
-  case SideExitJmpLte:                return CC_LE;
-  case SideExitJmpEq:                 return CC_E;
-  case SideExitJmpNeq:                return CC_NE;
-  case SideExitJmpGtInt:              return CC_G;
-  case SideExitJmpGteInt:             return CC_GE;
-  case SideExitJmpLtInt:              return CC_L;
-  case SideExitJmpLteInt:             return CC_LE;
-  case SideExitJmpEqInt:              return CC_E;
-  case SideExitJmpNeqInt:             return CC_NE;
-  case SideExitJmpSame:               return CC_E;
-  case SideExitJmpNSame:              return CC_NE;
-  case SideExitJmpInstanceOfBitmask:  return CC_NZ;
-  case SideExitJmpNInstanceOfBitmask: return CC_Z;
-  case SideExitJmpZero:               return CC_Z;
-  case SideExitJmpNZero:              return CC_NZ;
-  default:
-    always_assert(0);
-  }
 }
 
 }}}

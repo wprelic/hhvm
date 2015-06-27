@@ -29,7 +29,6 @@
 #include "hphp/util/string-bag.h"
 #include "hphp/util/thread-local.h"
 
-#include <boost/graph/adjacency_list.hpp>
 #include <tbb/concurrent_hash_map.h>
 #include <atomic>
 #include <map>
@@ -45,7 +44,6 @@ namespace HPHP {
 DECLARE_BOOST_TYPES(ClassScope);
 DECLARE_EXTENDED_BOOST_TYPES(FileScope);
 DECLARE_BOOST_TYPES(FunctionScope);
-DECLARE_BOOST_TYPES(Location);
 DECLARE_BOOST_TYPES(AnalysisResult);
 DECLARE_BOOST_TYPES(ScalarExpression);
 
@@ -159,12 +157,9 @@ public:
   void addSystemFunction(FunctionScopeRawPtr fs);
   void addSystemClass(ClassScopeRawPtr cs);
   void analyzeProgram(bool system = false);
-  void analyzeIncludes();
   void analyzeProgramFinal();
-  void analyzePerfectVirtuals();
   void dump();
 
-  void docJson(const std::string &filename);
   void visitFiles(void (*cb)(AnalysisResultPtr, StatementPtr, void*),
                   void *data);
 
@@ -226,30 +221,9 @@ public:
   void declareUnknownClass(const std::string &name);
   bool declareConst(FileScopePtr fs, const std::string &name);
 
-  /**
-   * Dependencies
-   */
-  void link(FileScopePtr user, FileScopePtr provider);
-  bool addClassDependency(FileScopePtr usingFile,
-                          const std::string &className);
-  bool addFunctionDependency(FileScopePtr usingFile,
-                             const std::string &functionName);
-  bool addIncludeDependency(FileScopePtr usingFile,
-                            const std::string &includeFilename);
-  bool addConstantDependency(FileScopePtr usingFile,
-                             const std::string &constantName);
-
   ClassScopePtr findClass(const std::string &className) const;
   ClassScopePtr findClass(const std::string &className,
                           FindClassBy by);
-
-  /*
-   * Returns: whether the given name is the name of any type aliases
-   * in the whole program.
-   */
-  bool isTypeAliasName(const std::string& name) const {
-    return m_typeAliasNames.count(name);
-  }
 
   /**
    * Find all the redeclared classes by the name, excluding system classes.
@@ -264,7 +238,6 @@ public:
   ClassScopePtrVec findClasses(const std::string &className) const;
   bool classMemberExists(const std::string &name, FindClassBy by) const;
   ClassScopePtr findExactClass(ConstructPtr cs, const std::string &name) const;
-  bool checkClassPresent(ConstructPtr cs, const std::string &name) const;
   FunctionScopePtr findFunction(const std::string &funcName) const ;
   BlockScopeConstPtr findConstantDeclarer(const std::string &constName) const {
     return const_cast<AnalysisResult*>(this)->findConstantDeclarer(constName);
@@ -360,14 +333,6 @@ public:
 
 private:
   BlockScopePtrVec m_ignoredScopes;
-
-  typedef boost::adjacency_list<boost::setS, boost::vecS> Graph;
-  typedef boost::graph_traits<Graph>::vertex_descriptor vertex_descriptor;
-  typedef boost::graph_traits<Graph>::adjacency_iterator adjacency_iterator;
-  Mutex m_depGraphMutex;
-  Graph m_depGraph;
-  typedef std::map<vertex_descriptor, FileScopePtr> VertexToFileScopePtrMap;
-  VertexToFileScopePtrMap m_fileVertMap;
 
   /**
    * Checks whether the file is in one of the on-demand parsing directories.

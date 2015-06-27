@@ -15,7 +15,6 @@
 */
 #include "hphp/runtime/base/static-string-table.h"
 
-#include "hphp/runtime/base/class-info.h"
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/vm/debug/debug.h"
@@ -88,14 +87,14 @@ struct strintern_hash {
       return to_sdata(k)->hash();
     }
     auto const slice = *to_sslice(k);
-    return hash_string_inline(slice.ptr, slice.len);
+    return hash_string(slice.ptr, slice.len);
   }
 };
 
 // The uint32_t is used to hold RDS offsets for constants
 typedef folly::AtomicHashMap<
   StrInternKey,
-  RDS::Link<TypedValue>,
+  rds::Link<TypedValue>,
   strintern_hash,
   strintern_eq
 > StringDataMap;
@@ -125,7 +124,7 @@ StringData** precomputed_chars = precompute_chars();
 StringData* insertStaticString(StringData* sd) {
   auto pair = s_stringDataMap->insert(
     make_intern_key(sd),
-    RDS::Link<TypedValue>(RDS::kInvalidHandle)
+    rds::Link<TypedValue>(rds::kInvalidHandle)
   );
 
   if (!pair.second) {
@@ -228,7 +227,7 @@ StringData* makeStaticString(char c) {
   return precomputed_chars[(uint8_t)c];
 }
 
-RDS::Handle lookupCnsHandle(const StringData* cnsName) {
+rds::Handle lookupCnsHandle(const StringData* cnsName) {
   assert(s_stringDataMap);
   auto const it = s_stringDataMap->find(make_intern_key(cnsName));
   if (it != s_stringDataMap->end()) {
@@ -237,40 +236,53 @@ RDS::Handle lookupCnsHandle(const StringData* cnsName) {
   return 0;
 }
 
-RDS::Handle makeCnsHandle(const StringData* cnsName, bool persistent) {
+rds::Handle makeCnsHandle(const StringData* cnsName, bool persistent) {
   auto const val = lookupCnsHandle(cnsName);
   if (val) return val;
   if (!cnsName->isStatic()) {
     // Its a dynamic constant, that doesn't correspond to
     // an already allocated handle. We'll allocate it in
-    // the request local RDS::s_constants instead.
+    // the request local rds::s_constants instead.
     return 0;
   }
   auto const it = s_stringDataMap->find(make_intern_key(cnsName));
   assert(it != s_stringDataMap->end());
   if (!it->second.bound()) {
-    it->second.bind<kTVSimdAlign>(persistent ? RDS::Mode::Persistent
-                                             : RDS::Mode::Normal);
+    it->second.bind<kTVSimdAlign>(persistent ? rds::Mode::Persistent
+                                             : rds::Mode::Normal);
 
-    RDS::recordRds(it->second.handle(), sizeof(TypedValue),
+    rds::recordRds(it->second.handle(), sizeof(TypedValue),
                    "Cns", cnsName->data());
   }
   return it->second.handle();
 }
+
+std::vector<StringData*> lookupDefinedStaticStrings() {
+  assert(s_stringDataMap);
+  std::vector<StringData*> ret;
+
+  for (auto it = s_stringDataMap->begin();
+       it != s_stringDataMap->end(); ++it) {
+    ret.push_back(const_cast<StringData*>(to_sdata(it->first)));
+  }
+
+  return ret;
+}
+
 
 const StaticString s_user("user");
 const StaticString s_Core("Core");
 
 Array lookupDefinedConstants(bool categorize /*= false */) {
   assert(s_stringDataMap);
-  Array usr(RDS::s_constants());
+  Array usr(rds::s_constants());
   Array sys;
 
   for (auto it = s_stringDataMap->begin();
        it != s_stringDataMap->end(); ++it) {
     if (it->second.bound()) {
       Array *tbl = (categorize &&
-                    RDS::isPersistentHandle(it->second.handle()))
+                    rds::isPersistentHandle(it->second.handle()))
                  ? &sys : &usr;
       auto& tv = *it->second;
       if (tv.m_type != KindOfUninit) {
@@ -278,9 +290,9 @@ Array lookupDefinedConstants(bool categorize /*= false */) {
         tbl->set(key, tvAsVariant(&tv), true);
       } else if (tv.m_data.pref) {
         StrNR key(const_cast<StringData*>(to_sdata(it->first)));
-        ClassInfo::ConstantInfo* ci =
-          (ClassInfo::ConstantInfo*)(void*)tv.m_data.pref;
-        auto cns = ci->getDeferredValue();
+        auto callback =
+          reinterpret_cast<Unit::SystemConstantCallback>(tv.m_data.pref);
+        auto cns = callback();
         if (cns.isInitialized()) {
           tbl->set(key, cns, true);
         }

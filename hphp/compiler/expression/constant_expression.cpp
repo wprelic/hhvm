@@ -102,8 +102,8 @@ bool ConstantExpression::getScalarValue(Variant &value) {
 }
 
 unsigned ConstantExpression::getCanonHash() const {
-  int64_t val = hash_string(toLower(m_name).c_str(), m_name.size());
-  return ~unsigned(val) ^ unsigned(val >> 32);
+  strhash_t val = hash_string_i_unsafe(m_name.c_str(), m_name.size());
+  return static_cast<unsigned>(val);
 }
 
 bool ConstantExpression::canonCompare(ExpressionPtr e) const {
@@ -149,8 +149,6 @@ void ConstantExpression::analyzeProgram(AnalysisResultPtr ar) {
         }
       }
     }
-  } else if (ar->getPhase() == AnalysisResult::AnalyzeFinal && m_dynamic) {
-    getFileScope()->addConstantDependency(ar, m_name);
   }
 }
 
@@ -196,7 +194,7 @@ ExpressionPtr ConstantExpression::preOptimize(AnalysisResultConstPtr ar) {
     }
     ExpressionPtr rep = Clone(value, getScope());
     rep->setComment(getText());
-    rep->setLocation(getLocation());
+    copyLocationTo(rep);
     return replaceValue(rep);
   }
 
@@ -210,7 +208,7 @@ void ConstantExpression::outputCodeModel(CodeGenerator &cg) {
   cg.printPropertyHeader("constantName");
   cg.printValue(m_origName);
   cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
+  cg.printLocation(this);
   cg.printObjectFooter();
 }
 

@@ -97,7 +97,8 @@ void InterfaceStatement::onParse(AnalysisResultConstPtr ar,
   }
 
   ClassScopePtr classScope
-    (new ClassScope(ClassScope::KindOf::Interface, m_name, "", bases,
+    (new ClassScope(scope,
+                    ClassScope::KindOf::Interface, m_name, "", bases,
                     m_docComment, stmt, attrs));
   setBlockScope(classScope);
   scope->addClass(ar, classScope);
@@ -107,14 +108,14 @@ void InterfaceStatement::onParse(AnalysisResultConstPtr ar,
   if (m_stmt) {
     for (int i = 0; i < m_stmt->getCount(); i++) {
       IParseHandlerPtr ph = dynamic_pointer_cast<IParseHandler>((*m_stmt)[i]);
-      ph->onParseRecur(ar, classScope);
+      ph->onParseRecur(ar, scope, classScope);
     }
-    checkArgumentsToPromote(ExpressionListPtr(), T_INTERFACE);
+    checkArgumentsToPromote(scope, ExpressionListPtr(), T_INTERFACE);
   }
 }
 
 void InterfaceStatement::checkArgumentsToPromote(
-    ExpressionListPtr promotedParams, int type) {
+  FileScopeRawPtr scope, ExpressionListPtr promotedParams, int type) {
   if (!m_stmt) {
     return;
   }
@@ -129,7 +130,8 @@ void InterfaceStatement::checkArgumentsToPromote(
             dynamic_pointer_cast<ParameterExpression>((*params)[i]);
           if (param->getModifier() != 0) {
             if (type == T_TRAIT || type == T_INTERFACE) {
-              param->parseTimeFatal(Compiler::InvalidAttribute,
+              param->parseTimeFatal(scope,
+                                    Compiler::InvalidAttribute,
                                     "Constructor parameter promotion "
                                     "not allowed on traits or interfaces");
             }
@@ -195,7 +197,6 @@ void InterfaceStatement::analyzeProgram(AnalysisResultPtr ar) {
   vector<string> bases;
   if (m_base) m_base->getStrings(bases);
   for (unsigned int i = 0; i < bases.size(); i++) {
-    addUserClass(ar, bases[i]);
     ClassScopePtr cls = ar->findClass(bases[i]);
     if (cls) {
       if (!cls->isInterface()) {
@@ -274,7 +275,7 @@ void InterfaceStatement::outputCodeModel(CodeGenerator &cg) {
   cg.printPropertyHeader("block");
   cg.printAsEnclosedBlock(m_stmt);
   cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
+  cg.printLocation(this);
   if (!m_docComment.empty()) {
     cg.printPropertyHeader("comments");
     cg.printValue(m_docComment);
@@ -284,21 +285,6 @@ void InterfaceStatement::outputCodeModel(CodeGenerator &cg) {
 
 ///////////////////////////////////////////////////////////////////////////////
 // code generation functions
-
-void InterfaceStatement::getAllParents(AnalysisResultConstPtr ar,
-                                       std::vector<std::string> &names) {
-  vector<string> bases;
-  if (m_base) {
-    m_base->getStrings(bases);
-    for (unsigned int i = 0; i < bases.size(); i++) {
-      ClassScopePtr cls = ar->findClass(bases[i]);
-      if (cls) {
-        cls->getAllParents(ar, names);
-        names.push_back(cls->getOriginalName());
-      }
-    }
-  }
-}
 
 void InterfaceStatement::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
   ClassScopeRawPtr classScope = getClassScope();

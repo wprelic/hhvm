@@ -27,14 +27,17 @@ class type ['a] hint_visitor_type = object
 
   method on_any    : 'a -> 'a
   method on_mixed  : 'a -> 'a
+  method on_this   : 'a -> 'a
   method on_tuple  : 'a -> Nast.hint list -> 'a
-  method on_abstr  : 'a -> string -> Nast.hint option -> 'a
+  method on_abstr  : 'a -> string -> (Ast.constraint_kind * Nast.hint) option
+                      -> 'a
   method on_array  : 'a -> Nast.hint option -> Nast.hint option -> 'a
   method on_prim   : 'a -> Nast.tprim -> 'a
   method on_option : 'a -> Nast.hint -> 'a
   method on_fun    : 'a -> Nast.hint list -> bool -> Nast.hint -> 'a
   method on_apply  : 'a -> Nast.sid -> Nast.hint list -> 'a
   method on_shape  : 'a -> Nast.hint ShapeMap.t -> 'a
+  method on_access : 'a -> Nast.hint -> Nast.sid list -> 'a
 end
 
 (*****************************************************************************)
@@ -43,29 +46,31 @@ end
 
 class virtual ['a] hint_visitor: ['a] hint_visitor_type = object(this)
 
-  method on_hint acc (p, h) = this#on_hint_ acc h
+  method on_hint acc (_, h) = this#on_hint_ acc h
 
   method on_hint_ acc h = match h with
     | Hany                  -> this#on_any    acc
     | Hmixed                -> this#on_mixed  acc
+    | Hthis                 -> this#on_this   acc
     | Htuple hl             -> this#on_tuple  acc (hl:Nast.hint list)
-    | Habstr (x, hopt)      -> this#on_abstr  acc x hopt
+    | Habstr (x, cstr_opt)  -> this#on_abstr  acc x cstr_opt
     | Harray (hopt1, hopt2) -> this#on_array  acc hopt1 hopt2
     | Hprim p               -> this#on_prim   acc p
     | Hoption h             -> this#on_option acc h
     | Hfun (hl, b, h)       -> this#on_fun    acc hl b h
     | Happly (i, hl)        -> this#on_apply  acc i hl
     | Hshape hm             -> this#on_shape  acc hm
+    | Haccess (h, il)       -> this#on_access acc h il
 
   method on_any acc = acc
   method on_mixed acc = acc
+  method on_this acc = acc
   method on_tuple acc hl =
     List.fold_left this#on_hint acc (hl:Nast.hint list)
 
-  method on_abstr acc s hopt =
-    match hopt with
-      | None -> acc
-      | Some h -> this#on_hint acc h
+  method on_abstr acc _ = function
+    | None -> acc
+    | Some (_ck, h) -> this#on_hint acc h
 
   method on_array acc hopt1 hopt2 =
     let acc = match hopt1 with
@@ -78,16 +83,16 @@ class virtual ['a] hint_visitor: ['a] hint_visitor_type = object(this)
     in
     acc
 
-  method on_prim acc p = acc
+  method on_prim acc _ = acc
 
   method on_option acc h = this#on_hint acc h
 
-  method on_fun acc hl b h =
+  method on_fun acc hl _ h =
     let acc = List.fold_left this#on_hint acc hl in
     let acc = this#on_hint acc h in
     acc
 
-  method on_apply acc id (hl:Nast.hint list) =
+  method on_apply acc _ (hl:Nast.hint list) =
     let acc = List.fold_left this#on_hint acc hl in
     acc
 
@@ -97,37 +102,38 @@ class virtual ['a] hint_visitor: ['a] hint_visitor_type = object(this)
       acc
     end hm acc
 
+  method on_access acc h _ =
+    this#on_hint acc h
+
 end
 
-(* For checking whether hint refers to a construct that cannot ever
- * have instances. To avoid race conditions with typing, only look up
- * class info in the naming heap (and run only after the naming heap is
- * complete) *)
+(* For checking whether hint refers to a construct that cannot ever have
+ * instances. To avoid race conditions, only look up class info after the decl
+ * phase is complete. *)
 module CheckInstantiability = struct
 
   let visitor =
-  object(this)
-    inherit [Env.env] hint_visitor
+  object
+    inherit [Env.env] hint_visitor as super
 
-    method on_apply env (usage_pos, n) hl =
-      let () = (match Naming_heap.ClassHeap.get n with
-        | Some {c_kind = Ast.Cabstract; c_final = true;
-                c_name = (decl_pos, decl_name); _}
-        | Some {c_kind = Ast.Ctrait; c_name = (decl_pos, decl_name); _} ->
-          Errors.uninstantiable_class usage_pos decl_pos decl_name
+    method! on_apply env (usage_pos, n) hl =
+      let () = (match Typing_env.Classes.get n with
+        | Some {tc_kind = Ast.Cabstract; tc_final = true;
+                tc_name; tc_pos; _}
+        | Some {tc_kind = Ast.Ctrait; tc_name; tc_pos; _} ->
+          Errors.uninstantiable_class usage_pos tc_pos tc_name
         | _ -> ()) in
-      let env = List.fold_left this#on_hint env hl in
-      env
+      super#on_apply env (usage_pos, n) hl
 
-    method on_abstr env s hopt =
+    method! on_abstr _env _ _ =
         (* there should be no need to descend into abstract params, as
          * the necessary param checks happen on the declaration of the
          * constraint *)
-      env
+      _env
 
   end
 
-let check env h : Env.env = visitor#on_hint env h
+  let check env h : Env.env = visitor#on_hint env h
 
 end
 
@@ -142,14 +148,15 @@ let check_params_instantiable (env:Env.env) (params:Nast.fun_param list)=
   end) env params
 
 let check_tparams_instantiable (env:Env.env) (tparams:Nast.tparam list) =
-  List.fold_left (begin fun env (_variance, _sid, opt_hint) ->
-    match (opt_hint) with
+  List.fold_left (begin fun env (_variance, _sid, cstr_opt) ->
+    match cstr_opt with
       | None -> env
-      | Some h -> check_instantiable env h
+      | Some (_ck, h) -> check_instantiable env h
   end) env tparams
 
 (* Unpacking a hint for typing *)
 
+(* ensure_instantiable should only be set after the decl phase is done *)
 let rec hint ?(ensure_instantiable=false) env (p, h) =
   let env = if not ensure_instantiable then env
     else check_instantiable env (p, h) in
@@ -161,6 +168,8 @@ and hint_ p env = function
       env, Tany
   | Hmixed ->
       env, Tmixed
+  | Hthis ->
+     env, Tthis
   | Harray (h1, h2) ->
       if Env.is_strict env && h1 = None
       then Errors.generic_array_strict p;
@@ -168,11 +177,18 @@ and hint_ p env = function
       let env, h2 = opt hint env h2 in
       env, Tarray (h1, h2)
   | Hprim p -> env, Tprim p
-  | Habstr (x, hopt) ->
-      let env, ty_opt = opt hint env hopt in
-      env, Tgeneric (x, ty_opt)
+  | Habstr (x, cstr_opt) ->
+      let env, cstr_opt = match cstr_opt with
+        | Some (ck, h) ->
+            let env, h = hint env h in
+            env, Some (ck, h)
+        | None -> env, None in
+      env, Tgeneric (x, cstr_opt)
   | Hoption (_, Hprim Tvoid) ->
-      Errors.nullable_void p;
+      Errors.option_return_only_typehint p `void;
+      env, Tany
+  | Hoption (_, Hprim Tnoreturn) ->
+      Errors.option_return_only_typehint p `noreturn;
       env, Tany
   | Hoption (_, Hmixed) ->
       Errors.option_mixed p;
@@ -191,7 +207,7 @@ and hint_ p env = function
       in
       env, Tfun {
         ft_pos = p;
-        ft_unsafe = false;
+        ft_deprecated = None;
         ft_abstract = false;
         ft_arity = arity;
         ft_tparams = [];
@@ -202,14 +218,25 @@ and hint_ p env = function
   | Happly ((p, "\\tuple"), _) ->
       Errors.tuple_syntax p;
       env, Tany
-  | Happly (((p, c) as id), argl) ->
-      Find_refs.process_class_ref p c None;
-      let env = Env.add_wclass env c in
+  | Happly (((_p, c) as id), argl) ->
+      Typing_hooks.dispatch_class_id_hook id None;
+      Env.add_wclass env c;
       let env, argl = lfold hint env argl in
       env, Tapply (id, argl)
+  | Haccess (root_ty, ids) ->
+      let env, root_ty = hint env root_ty in
+      env, Taccess (root_ty, ids)
   | Htuple hl ->
       let env, tyl = lfold hint env hl in
       env, Ttuple tyl
   | Hshape fdm ->
       let env, fdm = ShapeMap.map_env hint env fdm in
-      env, Tshape fdm
+      (* "fields known" is false, because this shape type comes from type
+       * hint - shapes that contain listed fields can be passed here, but due
+       * to structural subtyping they can also contain other fields, that we
+       * don't know about. *)
+      env, Tshape (false, fdm)
+
+let hint_locl ?(ensure_instantiable=false) env h =
+  let env, h = hint ~ensure_instantiable env h in
+  Typing_phase.localize_with_self env h

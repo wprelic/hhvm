@@ -17,41 +17,25 @@
 #ifndef incl_HPHP_COUNTABLE_H_
 #define incl_HPHP_COUNTABLE_H_
 
-#include <boost/noncopyable.hpp>
-#include <cstdlib>
 #include <cstdint>
-#include <cassert>
-#include <atomic>
-
-#include "hphp/runtime/base/memory-manager.h"
-
-#include "hphp/util/compilation-flags.h"
-#include "hphp/util/compatibility.h"
-#include "hphp/util/trace.h"
-#include "hphp/util/atomic.h"
+#include <cstddef>
+#include "hphp/util/assertions.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 /*
- * RefCount type for m_count field in refcounted objects
- */
-typedef int32_t RefCount;
-
-/*
- * This bit flags a reference count as "static".  If a reference count
+ * The sign bit flags a reference count as static. If a reference count
  * is static, it means we should never increment or decrement it: the
- * object lives across requests and may be accessed by multiple
- * threads.
+ * object lives across requests and may be accessed by multiple threads.
+ * Long lived objects can be static or uncounted; static objects have process
+ * lifetime, while uncounted objects are freed using the treadmill.
+ * Using 8-bit values generates shorter cmp instructions while still being
+ * far enough from 0 to be safe.
  */
-// use values that generate a shorter cmp instruction and are far enough from 0
-#define UNCOUNTED   -128
-#define STATIC      UNCOUNTED + 1
-
-// UNCOUNT and STATIC imply negative values so this bit check is valid
 constexpr size_t UncountedBitPos = 31;
-constexpr int32_t UncountedValue = UNCOUNTED;
-constexpr int32_t StaticValue = STATIC; // implies UncountedValue
+constexpr int32_t UncountedValue = -128;
+constexpr int32_t StaticValue = -127; // implies UncountedValue
 constexpr int32_t RefCountMaxRealistic = (1 << 30) - 1;
 
 static_assert((uint32_t)UncountedValue & (1uL << UncountedBitPos),
@@ -60,14 +44,11 @@ static_assert((uint32_t)StaticValue & (1uL << UncountedBitPos),
               "Check StaticValue and UncountedBitPos");
 
 /*
- * All Refcounted types have their m_count field at the same offset
- * in the object. This offset is chosen to allow a RefData's count
- * field to pack after a TypedValue.
- *
- * Other refcounted types (ArrayData, StringData, and ObjectData)
- * have small fields that are packed into the same space.
+ * Check that the refcount is realistic, and not the static flag
  */
-constexpr size_t FAST_REFCOUNT_OFFSET = 12;
+inline bool check_refcount_ns(int32_t count) {
+  return (uint32_t)count <= (uint32_t)RefCountMaxRealistic;
+}
 
 /*
  * Real count values should always be less than or equal to
@@ -75,74 +56,72 @@ constexpr size_t FAST_REFCOUNT_OFFSET = 12;
  * common malloc freed-memory patterns (e.g. 0x5a5a5a5a and smart
  * allocator's 0x6a6a6a6a).
  */
-inline void assert_refcount_realistic(int32_t count) {
-  assert(count <= StaticValue ||
-         (uint32_t)count <= (uint32_t)RefCountMaxRealistic);
+inline bool check_refcount(int32_t count) {
+  return count <= StaticValue || check_refcount_ns(count);
 }
 
 /*
  * As above, but additionally check for non-zero
  */
-inline void assert_refcount_realistic_nz(int32_t count) {
-  assert(count <= StaticValue ||
-         (uint32_t)count - 1 < (uint32_t)RefCountMaxRealistic);
-}
-
-/*
- * Check that the refcount is realistic, and not the static flag
- */
-inline void assert_refcount_realistic_ns(int32_t count) {
-  assert((uint32_t)count <= (uint32_t)RefCountMaxRealistic);
+inline bool check_refcount_nz(int32_t count) {
+  return count <= StaticValue || check_refcount_ns(count - 1);
 }
 
 /*
  * As above, but additionally check for greater-than-zero
  */
-inline void assert_refcount_realistic_ns_nz(int32_t count) {
-  assert((uint32_t)count - 1 < (uint32_t)RefCountMaxRealistic);
+inline bool check_refcount_ns_nz(int32_t count) {
+  return check_refcount_ns(count - 1);
 }
 
 /**
- * Ref-counted types have a m_count field at FAST_REFCOUNT_OFFSET
+ * Ref-counted types have a count field at FAST_REFCOUNT_OFFSET
  * and define counting methods with these macros.
  */
 #define IMPLEMENT_COUNTABLE_METHODS_NO_STATIC                           \
   RefCount getCount() const {                                           \
-    assert_refcount_realistic(m_count);                                 \
-    return m_count;                                                     \
+    assert(check_refcount(m_hdr.count));                                \
+    return m_hdr.count;                                                 \
   }                                                                     \
                                                                         \
   bool isRefCounted() const {                                           \
-    assert_refcount_realistic(m_count);                                 \
-    return m_count >= 0;                                                \
+    assert(check_refcount(m_hdr.count));                                \
+    return m_hdr.count >= 0;                                            \
   }                                                                     \
                                                                         \
   bool hasMultipleRefs() const {                                        \
-    assert_refcount_realistic(m_count);                                 \
-    return (uint32_t)m_count > 1;                                       \
+    assert(check_refcount(m_hdr.count));                                \
+    return (uint32_t)m_hdr.count > 1;                                   \
   }                                                                     \
                                                                         \
   bool hasExactlyOneRef() const {                                       \
-    assert_refcount_realistic(m_count);                                 \
-    return (uint32_t)m_count == 1;                                      \
+    assert(check_refcount(m_hdr.count));                                \
+    return (uint32_t)m_hdr.count == 1;                                  \
   }                                                                     \
                                                                         \
   void incRefCount() const {                                            \
     assert(!MemoryManager::sweeping());                                 \
-    assert_refcount_realistic(m_count);                                 \
-    if (isRefCounted()) { ++m_count; }                                  \
+    assert(check_refcount(m_hdr.count));                                \
+    if (isRefCounted()) { ++m_hdr.count; }                              \
+  }                                                                     \
+                                                                        \
+  void setRefCount(RefCount count) {                                    \
+    assert(count == StaticValue || !MemoryManager::sweeping());         \
+    assert(check_refcount(m_hdr.count));                                \
+    m_hdr.count = count;                                                \
+    assert(check_refcount(m_hdr.count));                                \
   }                                                                     \
                                                                         \
   RefCount decRefCount() const {                                        \
     assert(!MemoryManager::sweeping());                                 \
-    assert_refcount_realistic_nz(m_count);                              \
-    return isRefCounted() ? --m_count : m_count;                        \
+    assert(check_refcount_nz(m_hdr.count));                             \
+    return isRefCounted() ? --m_hdr.count : m_hdr.count;                \
   }                                                                     \
   ALWAYS_INLINE bool decReleaseCheck() {                                \
     assert(!MemoryManager::sweeping());                                 \
-    assert_refcount_realistic_nz(this->m_count);                        \
-    if (this->m_count == 1) return true;                                \
-    if (this->m_count > 1) --this->m_count;                             \
+    assert(check_refcount_nz(m_hdr.count));                             \
+    if (m_hdr.count == 1) return true;                                  \
+    if (m_hdr.count > 1) --m_hdr.count;                                 \
     return false;                                                       \
   }                                                                     \
   ALWAYS_INLINE void decRefAndRelease() {                               \
@@ -151,87 +130,67 @@ inline void assert_refcount_realistic_ns_nz(int32_t count) {
 
 #define IMPLEMENT_COUNTABLE_METHODS             \
   void setStatic() const {                      \
-    assert_refcount_realistic(m_count);         \
-    m_count = StaticValue;                      \
+    assert(check_refcount(m_hdr.count));        \
+    m_hdr.count = StaticValue;                  \
   }                                             \
   bool isStatic() const {                       \
-    return m_count == StaticValue;              \
+    return m_hdr.count == StaticValue;          \
   }                                             \
   void setUncounted() const {                   \
-    assert_refcount_realistic(m_count);         \
-    m_count = UncountedValue;                   \
+    assert(check_refcount(m_hdr.count));        \
+    m_hdr.count = UncountedValue;               \
   }                                             \
-  bool isUncounted() const {                   \
-    return m_count == UncountedValue;           \
+  bool isUncounted() const {                    \
+    return m_hdr.count == UncountedValue;       \
   }                                             \
   IMPLEMENT_COUNTABLE_METHODS_NO_STATIC
 
 #define IMPLEMENT_COUNTABLENF_METHODS_NO_STATIC         \
   RefCount getCount() const {                           \
-    assert_refcount_realistic_ns(m_count);              \
-    return m_count;                                     \
+    assert(check_refcount_ns(m_hdr.count));             \
+    return m_hdr.count;                                 \
   }                                                     \
                                                         \
   bool isRefCounted() const { return true; }            \
                                                         \
   bool hasMultipleRefs() const {                        \
-    assert_refcount_realistic_ns(m_count);              \
-    return m_count > 1;                                 \
+    assert(check_refcount_ns(m_hdr.count));             \
+    return m_hdr.count > 1;                             \
   }                                                     \
                                                         \
   bool hasExactlyOneRef() const {                       \
-    assert_refcount_realistic(m_count);                 \
-    return m_count == 1;                                \
+    assert(check_refcount(m_hdr.count));                \
+    return m_hdr.count == 1;                            \
   }                                                     \
                                                         \
   void incRefCount() const {                            \
     assert(!MemoryManager::sweeping());                 \
-    assert_refcount_realistic_ns(m_count);              \
-    ++m_count;                                          \
+    assert(check_refcount_ns(m_hdr.count));             \
+    ++m_hdr.count;                                      \
   }                                                     \
                                                         \
   RefCount decRefCount() const {                        \
     assert(!MemoryManager::sweeping());                 \
-    assert_refcount_realistic_ns_nz(m_count);           \
-    return --m_count;                                   \
+    assert(check_refcount_ns_nz(m_hdr.count));          \
+    return --m_hdr.count;                               \
+  }                                                     \
+                                                        \
+  void setRefCount(RefCount count) {                    \
+    assert(!MemoryManager::sweeping());                 \
+    assert(check_refcount_ns(m_hdr.count));             \
+    m_hdr.count = count;                                \
+    assert(check_refcount_ns(m_hdr.count));             \
   }                                                     \
                                                         \
   ALWAYS_INLINE bool decRefAndRelease() {               \
     assert(!MemoryManager::sweeping());                 \
-    assert_refcount_realistic_ns_nz(m_count);           \
-    if (!--m_count) {                                   \
+    assert(check_refcount_ns_nz(m_hdr.count));          \
+    if (!--m_hdr.count) {                               \
       release();                                        \
       return true;                                      \
     }                                                   \
     return false;                                       \
   }
-
-class ObjectData;
-
-/* We only use this to hold objects */
-class CountableHelper : private boost::noncopyable {
-public:
-  explicit CountableHelper(ObjectData* object);
-  ~CountableHelper();
-private:
-  ObjectData *m_object;
-};
-
-/**
- * If an object may be shared by multiple threads but we want to reclaim it
- * when all threads are finished using it, we need to allocate it with the C++
- * new operator (instead of SmartAllocator) and we need to use AtomicSmartPtr
- * instead of SmartPtr.
- */
-class AtomicCountable {
- public:
-  AtomicCountable() : m_count(0) {}
-  RefCount getCount() const { return m_count; }
-  void incAtomicCount() const { ++m_count; }
-  RefCount decAtomicCount() const { return --m_count; }
- protected:
-  mutable std::atomic<RefCount> m_count;
-};
 
 ///////////////////////////////////////////////////////////////////////////////
 }

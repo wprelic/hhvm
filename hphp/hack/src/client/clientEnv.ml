@@ -11,13 +11,11 @@
 
 type client_mode =
 | MODE_LIST_FILES
-| MODE_SHOW_TYPES of string
+| MODE_LIST_MODES
 | MODE_TYPE_AT_POS of string
 | MODE_AUTO_COMPLETE
 | MODE_STATUS
 | MODE_UNSPECIFIED
-| MODE_VERSION
-| MODE_SAVE_STATE of string
 | MODE_SHOW of string
 | MODE_COLORING of string
 | MODE_COVERAGE of string
@@ -31,15 +29,21 @@ type client_mode =
 | MODE_ARGUMENT_INFO of string
 (* TODO figure out why we can't reference FuzzySearchService from here *)
 | MODE_SEARCH of string * string
+| MODE_LINT of string list
+| MODE_LINT_ALL of int
+| MODE_DUMP_SYMBOL_INFO of string
+| MODE_CREATE_CHECKPOINT of string
+| MODE_RETRIEVE_CHECKPOINT of string
+| MODE_DELETE_CHECKPOINT of string
 
 type client_check_env = {
   mode: client_mode;
-  root: Path.path;
+  root: Path.t;
   from: string;
   output_json: bool;
   retry_if_init: bool;
   retries: int;
   timeout: float option;
   autostart: bool;
-  server_options_cmd: string option;
+  no_load: bool;
 }

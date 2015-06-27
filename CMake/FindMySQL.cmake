@@ -17,7 +17,8 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program; if not, write to the Free Software
-# Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+# Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #
 # The MySQL Connector/ODBC is licensed under the terms of the
 # GPL, like most MySQL Connectors. There are special exceptions
@@ -30,8 +31,6 @@
 
 #-------------- FIND MYSQL_INCLUDE_DIR ------------------
 FIND_PATH(MYSQL_INCLUDE_DIR mysql.h
-  $ENV{MYSQL_INCLUDE_DIR}
-  $ENV{MYSQL_DIR}/include
   /usr/include/mysql
   /usr/local/include/mysql
   /opt/mysql/mysql/include
@@ -69,9 +68,6 @@ IF (WIN32)
 ELSE (WIN32)
   FIND_LIBRARY(MYSQL_LIB NAMES mysqlclient_r
     PATHS
-    $ENV{MYSQL_DIR}/libmysql_r/.libs
-    $ENV{MYSQL_DIR}/lib
-    $ENV{MYSQL_DIR}/lib/mysql
     /usr/lib/mysql
     /usr/local/lib/mysql
     /usr/local/mysql/lib
@@ -112,6 +108,6 @@ IF (MYSQL_INCLUDE_DIR AND MYSQL_LIB_DIR)
 
   MESSAGE(STATUS "MySQL Include dir: ${MYSQL_INCLUDE_DIR}  library dir: ${MYSQL_LIB_DIR}")
   MESSAGE(STATUS "MySQL client libraries: ${MYSQL_CLIENT_LIBS}")
-ELSE (MYSQL_INCLUDE_DIR AND MYSQL_LIB_DIR)
+ELSEIF (MySQL_FIND_REQUIRED)
   MESSAGE(FATAL_ERROR "Cannot find MySQL. Include dir: ${MYSQL_INCLUDE_DIR}  library dir: ${MYSQL_LIB_DIR}")
 ENDIF (MYSQL_INCLUDE_DIR AND MYSQL_LIB_DIR)

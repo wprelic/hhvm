@@ -26,5 +26,6 @@ IF (NOT APPLE AND NOT CYGWIN)
 ENDIF (NOT APPLE AND NOT CYGWIN)
 
 option(ENABLE_COTIRE "Speed up the build by precompiling headers" OFF)
-
-option(PACKED_TV "Enable packed tv (typed value) compilation" OFF)
+option(ENABLE_ASYNC_MYSQL "Build the async_mysql extension" ON)
+option(ENABLE_MCROUTER "Build the mcrouter library and extension" ON)
+option(ENABLE_PROXYGEN_SERVER "Build the Proxygen HTTP server" ON)

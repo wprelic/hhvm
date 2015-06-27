@@ -22,6 +22,7 @@
 #include "hphp/zend/zend-string.h"
 #include "hphp/zend/zend-html.h"
 #include "hphp/util/string-vsnprintf.h"
+#include "hphp/parser/parse-time-fatal-exception.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -235,9 +236,11 @@ bool Scanner::tryParseTypeList(TokenStore::iterator& pos) {
       nextLookahead(pos);
     }
     if (!tryParseNSType(pos)) return false;
-    if (pos->t == T_AS) {
+    if (pos->t == T_AS || pos->t == T_SUPER) {
       nextLookahead(pos);
-      if (!tryParseNSType(pos)) return false;
+      if (!tryParseNSType(pos)) {
+        return false;
+      }
     }
     if (pos->t != ',') return true;
     nextLookahead(pos);
@@ -246,6 +249,7 @@ bool Scanner::tryParseTypeList(TokenStore::iterator& pos) {
 
 bool Scanner::tryParseNonEmptyLambdaParams(TokenStore::iterator& pos) {
   for (;; nextLookahead(pos)) {
+    if (pos->t == ')' || pos->t == T_LAMBDA_CP) return true;
     if (pos->t != T_VARIABLE) {
       if (pos->t == T_ELLIPSIS) {
         nextLookahead(pos);
@@ -344,8 +348,6 @@ void Scanner::parseApproxParamDefVal(TokenStore::iterator& pos) {
       case T_NAMESPACE:
       case T_SHAPE:
       case T_ARRAY:
-      case T_MIARRAY:
-      case T_MSARRAY:
       case T_FUNCTION:
       case T_DOUBLE_ARROW:
       case T_DOUBLE_COLON:
@@ -418,6 +420,7 @@ Scanner::tryParseNSType(TokenStore::iterator& pos) {
   for (;;) {
     switch (pos->t) {
       case T_STRING:
+      case T_SUPER:
       case T_XHP_ATTRIBUTE:
       case T_XHP_CATEGORY:
       case T_XHP_CHILDREN:
@@ -452,7 +455,7 @@ Scanner::tryParseNSType(TokenStore::iterator& pos) {
       nextLookahead(pos);
       return true;
     }
-    if (pos->t != T_NS_SEPARATOR) {
+    if (pos->t != T_NS_SEPARATOR && pos->t != T_DOUBLE_COLON) {
       return true;
     }
     nextLookahead(pos);
@@ -642,7 +645,7 @@ void Scanner::warn(const char* fmt, ...) {
   va_end(ap);
 
   Logger::Warning("%s: %s (Line: %d, Char %d)", msg.c_str(),
-                  m_filename.c_str(), m_loc->line0, m_loc->char0);
+                  m_filename.c_str(), m_loc->r.line0, m_loc->r.char0);
 }
 
 void Scanner::incLoc(const char *rawText, int rawLeng, int type) {
@@ -658,12 +661,12 @@ void Scanner::incLoc(const char *rawText, int rawLeng, int type) {
     case Start:
       break; // scanner set to (1, 1, 1, 1) already
     case NoLineFeed:
-      m_loc->line0 = m_loc->line1;
-      m_loc->char0 = m_loc->char1 + 1;
+      m_loc->r.line0 = m_loc->r.line1;
+      m_loc->r.char0 = m_loc->r.char1 + 1;
       break;
     case HadLineFeed:
-      m_loc->line0 = m_loc->line1 + 1;
-      m_loc->char0 = 1;
+      m_loc->r.line0 = m_loc->r.line1 + 1;
+      m_loc->r.char0 = 1;
       break;
   }
   const char *p = rawText;
@@ -672,11 +675,11 @@ void Scanner::incLoc(const char *rawText, int rawLeng, int type) {
       case Start:
         break; // scanner set to (1, 1, 1, 1) already
       case NoLineFeed:
-        m_loc->char1++;
+        m_loc->r.char1++;
         break;
       case HadLineFeed:
-        m_loc->line1++;
-        m_loc->char1 = 1;
+        m_loc->r.line1++;
+        m_loc->r.char1 = 1;
         break;
     }
     m_state = (*p++ == '\n' ? HadLineFeed : NoLineFeed);
@@ -743,6 +746,70 @@ std::string Scanner::escape(const char *str, int len, char quote_type) const {
                 output += ch;
                 output += str[i];
               }
+              break;
+            }
+            case 'u': {
+              // Unicode escape sequence
+              //   "\u{123456}"
+              if (str[i+1] != '{') {
+                // BC for "\u1234" passthrough
+                output += ch;
+                output += str[i];
+                break;
+              }
+
+              bool valid = true;
+              auto start = str + i + 2;
+              auto closebrace = strchr(start, '}');
+              if (closebrace > start) {
+                for (auto p = start; p < closebrace; ++p) {
+                  if (!isxdigit(*p)) {
+                    valid = false;
+                    break;
+                  }
+                }
+              } else {
+                valid = false;
+              }
+
+              auto fatal = [this](const char *msg) {
+                auto loc = getLocation();
+                return ParseTimeFatalException(
+                  loc->file,
+                  loc->r.line0,
+                  "%s", msg);
+              };
+              if (!valid) {
+                throw fatal("Invalid UTF-8 codepoint escape sequence");
+              }
+
+              std::string codepoint(start, closebrace - start);
+              char *end = nullptr;
+              int32_t uchar = strtol(codepoint.c_str(), &end, 16);
+              if ((end && *end) || (uchar > 0x10FFFF)) {
+                throw fatal(
+                  "Invalid UTF-8 codepoint escape sequence: "
+                  "Codepoint too large");
+              }
+              if (uchar <= 0x0007F) {
+                output += (char)uchar;
+              } else if (uchar <= 0x007FF) {
+                output += (char)(0xC0 | ( uchar >> 6         ));
+                output += (char)(0x80 | ( uchar        & 0x3F));
+              } else if (uchar <= 0x00FFFF) {
+                output += (char)(0xE0 | ( uchar >> 12        ));
+                output += (char)(0x80 | ((uchar >>  6) & 0x3F));
+                output += (char)(0x80 | ( uchar        & 0x3F));
+              } else if (uchar <= 0x10FFFF) {
+                output += (char)(0xF0 | ( uchar >> 18        ));
+                output += (char)(0x80 | ((uchar >> 12) & 0x3F));
+                output += (char)(0x80 | ((uchar >>  6) & 0x3F));
+                output += (char)(0x80 | ( uchar        & 0x3F));
+              } else {
+                not_reached();
+                assert(false);
+              }
+              i += codepoint.size() + 2 /* strlen("{}") */;
               break;
             }
             default: {

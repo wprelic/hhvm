@@ -18,6 +18,7 @@
 #include "hphp/runtime/ext/json/ext_json.h"
 #include "hphp/runtime/ext/json/JSON_parser.h"
 #include "hphp/runtime/ext/string/ext_string.h"
+#include "hphp/runtime/base/array-data-defs.h"
 #include "hphp/runtime/base/utf8-decode.h"
 #include "hphp/runtime/base/variable-serializer.h"
 
@@ -242,10 +243,10 @@ const StaticString
   s_JSON_ERROR_INF_OR_NAN("JSON_ERROR_INF_OR_NAN"),
   s_JSON_ERROR_UNSUPPORTED_TYPE("JSON_ERROR_UNSUPPORTED_TYPE");
 
-class JsonExtension : public Extension {
+class JsonExtension final : public Extension {
  public:
   JsonExtension() : Extension("json", "1.2.1") {}
-  virtual void moduleInit() {
+  void moduleInit() override {
     Native::registerConstant<KindOfInt64>(
       s_JSON_HEX_TAG.get(), k_JSON_HEX_TAG
     );

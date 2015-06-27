@@ -1,20 +1,22 @@
 #ifndef HPHP_EXT_STD_H
 #define HPHP_EXT_STD_H
 
-#include "hphp/runtime/base/base-includes.h"
+#include "hphp/runtime/ext/extension.h"
 
 namespace HPHP {
 /////////////////////////////////////////////////////////////////////////////
 
-class StandardExtension : public Extension {
+class StandardExtension final : public Extension {
  public:
   StandardExtension() : Extension("standard") {}
 
   void moduleInit() override {
+    initStandard();
     initErrorFunc();
     initClassobj();
     initNetwork();
     initOptions();
+    initGc();
     initOutput();
     initString();
     initVariable();
@@ -23,17 +25,20 @@ class StandardExtension : public Extension {
     initStreamUserFilters();
     initFile();
     initIntrinsics();
+    initMath();
   }
 
-  void threadInit() {
+  void threadInit() override {
     threadInitMisc();
   }
 
  private:
+  void initStandard();
   void initErrorFunc();
   void initClassobj();
   void initNetwork();
   void initOptions();
+  void initGc();
   void initOutput();
   void initString();
   void initVariable();
@@ -42,6 +47,7 @@ class StandardExtension : public Extension {
   void initStreamUserFilters();
   void initFile();
   void initIntrinsics();
+  void initMath();
 
   void threadInitMisc();
 };

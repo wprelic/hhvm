@@ -16,7 +16,6 @@
 
 #include "hphp/compiler/expression/ordering.h"
 #include "hphp/compiler/analysis/code_error.h"
-#include "hphp/runtime/base/complex-types.h"
 #include "hphp/compiler/code_model_enums.h"
 
 using namespace HPHP;
@@ -91,7 +90,7 @@ void Ordering::outputCodeModel(CodeGenerator &cg) {
   cg.printPropertyHeader("order");
   cg.printValue(m_direction);
   cg.printPropertyHeader("sourceLocation");
-  cg.printLocation(this->getLocation());
+  cg.printLocation(this);
   cg.printObjectFooter();
 }
 
@@ -111,4 +110,3 @@ void Ordering::outputPHP(CodeGenerator &cg, AnalysisResultPtr ar) {
     break;
   }
 }
-

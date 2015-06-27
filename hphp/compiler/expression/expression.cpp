@@ -43,18 +43,28 @@ using namespace HPHP;
 
 ///////////////////////////////////////////////////////////////////////////////
 
-#define DEC_EXPR_NAMES(x,t) #x
+#define DEC_EXPR_NAMES(x,t) #x,
 const char *Expression::Names[] = {
   DECLARE_EXPRESSION_TYPES(DEC_EXPR_NAMES)
 };
+#undef DEC_EXPR_NAMES
 
-#define DEC_EXPR_CLASSES(x,t) Expression::t
+const char* Expression::nameOfKind(Construct::KindOf kind) {
+  assert(kind > Construct::KindOfExpression);
+  auto const idx = static_cast<int32_t>(kind) -
+    static_cast<int32_t>(Construct::KindOfExpression);
+  assert(idx > 0);
+  return Names[idx];
+}
+
+#define DEC_EXPR_CLASSES(x,t) Expression::t,
 Expression::ExprClass Expression::Classes[] = {
   DECLARE_EXPRESSION_TYPES(DEC_EXPR_CLASSES)
 };
+#undef DEC_EXPR_CLASSES
 
 Expression::Expression(EXPRESSION_CONSTRUCTOR_BASE_PARAMETERS)
-    : Construct(scope, loc), m_context(RValue), m_kindOf(kindOf),
+    : Construct(scope, r, kindOf), m_context(RValue),
       m_originalScopeSet(false), m_unused(false), m_canon_id(0), m_error(0),
       m_canonPtr() {
 }
@@ -66,7 +76,7 @@ ExpressionPtr Expression::replaceValue(ExpressionPtr rep) {
       An assignment isRefable, but the rhs may not be. Need this to
       prevent "bad pass by reference" errors.
     */
-    ExpressionListPtr el(new ExpressionList(getScope(), getLocation(),
+    ExpressionListPtr el(new ExpressionList(getScope(), getRange(),
                                             ExpressionList::ListKindWrapped));
     el->addElement(rep);
     rep->clearContext(AssignmentRHS);
@@ -125,8 +135,6 @@ void Expression::setArgNum(int n) {
 void Expression::deepCopy(ExpressionPtr exp) {
   exp->m_actualType = m_actualType;
   exp->m_expectedType = m_expectedType;
-  exp->m_implementedType = m_implementedType;
-  exp->m_assertedType = m_assertedType;
   exp->m_canon_id = 0;
   exp->m_unused = false;
   exp->m_canonPtr.reset();
@@ -144,17 +152,16 @@ bool Expression::hasSubExpr(ExpressionPtr sub) const {
 }
 
 Expression::ExprClass Expression::getExprClass() const {
-  ExprClass cls = Classes[m_kindOf];
+  assert(m_kindOf > Construct::KindOfExpression);
+  auto const idx = static_cast<int32_t>(m_kindOf) -
+    static_cast<int32_t>(Construct::KindOfExpression);
+  assert(idx > 0);
+  ExprClass cls = Classes[idx];
   if (cls == Update) {
     ExpressionPtr k = getStoreVariable();
     if (!k || !(k->hasContext(OprLValue))) cls = Expression::None;
   }
   return cls;
-}
-
-FileScopeRawPtr Expression::getUsedScalarScope(CodeGenerator& cg) {
-  return cg.getLiteralScope() ?
-    cg.getLiteralScope() : getFileScope();
 }
 
 bool Expression::getEffectiveScalar(Variant &v) {
@@ -176,7 +183,7 @@ void Expression::insertElement(ExpressionPtr exp, int index /* = 0 */) {
 
 ExpressionPtr Expression::unneededHelper() {
   ExpressionListPtr elist = ExpressionListPtr
-    (new ExpressionList(getScope(), getLocation(),
+    (new ExpressionList(getScope(), getRange(),
                         ExpressionList::ListKindWrapped));
 
   bool change = false;
@@ -215,7 +222,7 @@ ExpressionPtr Expression::unneeded() {
   if (!getContainedEffects()) {
     getScope()->addUpdates(BlockScope::UseKindCaller);
     return ScalarExpressionPtr
-      (new ScalarExpression(getScope(), getLocation(),
+      (new ScalarExpression(getScope(), getRange(),
                             T_LNUMBER, string("0")));
   }
 
@@ -252,27 +259,11 @@ TypePtr Expression::getType() {
   return Type::Any;
 }
 
-TypePtr Expression::getGenType() {
-  if (m_expectedType) return m_expectedType;
-  if (m_implementedType) return m_implementedType;
-  if (m_actualType) return m_actualType;
-  return Type::Any;
-}
-
-TypePtr Expression::getCPPType() {
-  if (m_implementedType) return m_implementedType;
-  if (m_actualType) return m_actualType;
-  return Type::Variant;
-}
-
 TypePtr Expression::propagateTypes(AnalysisResultConstPtr ar, TypePtr inType) {
   ExpressionPtr e = getCanonTypeInfPtr();
   TypePtr ret = inType;
 
   while (e) {
-    if (e->getAssertedType() && !getAssertedType()) {
-      setAssertedType(e->getAssertedType());
-    }
     TypePtr inferred = Type::Inferred(ar, ret, e->m_actualType);
     if (!inferred) {
       break;
@@ -313,22 +304,16 @@ FunctionScopeRawPtr Expression::getOriginalFunction() {
 void Expression::resetTypes() {
   m_actualType     .reset();
   m_expectedType   .reset();
-  m_implementedType.reset();
 }
 
 TypePtr Expression::checkTypesImpl(AnalysisResultConstPtr ar,
                                    TypePtr expectedType,
-                                   TypePtr actualType, bool coerce) {
+                                   TypePtr actualType) {
   TypePtr ret;
   actualType = propagateTypes(ar, actualType);
   assert(actualType);
-  if (coerce) {
-    ret = Type::Coerce(ar, expectedType, actualType);
-    setTypes(ar, actualType, expectedType);
-  } else {
-    ret = Type::Intersection(ar, actualType, expectedType);
-    setTypes(ar, actualType, ret);
-  }
+  ret = Type::Intersection(ar, actualType, expectedType);
+  setTypes(ar, actualType, ret);
   assert(ret);
   return ret;
 }
@@ -353,11 +338,6 @@ void Expression::setTypes(AnalysisResultConstPtr ar, TypePtr actualType,
       !m_expectedType->isSpecificObject() &&
       m_actualType->isSpecificObject()) {
     m_expectedType.reset();
-  }
-
-  if (m_actualType->isSpecificObject()) {
-    std::const_pointer_cast<AnalysisResult>(ar)->
-      addClassDependency(getFileScope(), m_actualType->getName());
   }
 }
 
@@ -425,40 +405,17 @@ bool Expression::CheckNeeded(ExpressionPtr variable, ExpressionPtr value) {
   return needed;
 }
 
-bool Expression::CheckVarNR(ExpressionPtr value,
-                            TypePtr expectedType /* = TypePtr */) {
-  if (!expectedType) expectedType = value->getExpectedType();
-  return (!value->hasContext(Expression::RefValue) &&
-          expectedType && expectedType->is(Type::KindOfVariant) &&
-          (value->getCPPType()->is(Type::KindOfArray) ||
-           value->getCPPType()->is(Type::KindOfString) ||
-           value->getCPPType()->is(Type::KindOfObject) ||
-           value->getCPPType()->isPrimitive() ||
-           value->isScalar()));
-}
-
 ExpressionPtr Expression::MakeConstant(AnalysisResultConstPtr ar,
                                        BlockScopePtr scope,
-                                       LocationPtr loc,
+                                       const Location::Range& r,
                                        const std::string &value) {
-  ConstantExpressionPtr exp(new ConstantExpression(
-                              scope, loc,
-                              value, false));
+  auto exp = std::make_shared<ConstantExpression>(scope, r, value, false);
   if (value == "true" || value == "false") {
   } else if (value == "null") {
   } else {
     assert(false);
   }
   return exp;
-}
-
-void Expression::CheckPassByReference(AnalysisResultPtr ar,
-                                      ExpressionPtr param) {
-  if (param->hasContext(Expression::RefValue) &&
-      !param->isRefable(true)) {
-    param->setError(Expression::BadPassByRef);
-    Compiler::Error(Compiler::BadPassByReference, param);
-  }
 }
 
 unsigned Expression::getCanonHash() const {
@@ -545,7 +502,6 @@ ExpressionPtr Expression::getCanonTypeInfPtr() const {
   case Type::KindOfArray:
     {
       if (!hasContext(AccessContext)) break;
-      if (m_canonPtr->getAssertedType()) return m_canonPtr;
       if (!is(Expression::KindOfSimpleVariable)) break;
       SimpleVariableConstPtr sv(
         static_pointer_cast<const SimpleVariable>(shared_from_this()));
@@ -559,7 +515,6 @@ ExpressionPtr Expression::getCanonTypeInfPtr() const {
   case Type::KindOfObject:
     {
       if (!hasContext(ObjectContext)) break;
-      if (m_canonPtr->getAssertedType()) return m_canonPtr;
       if (!is(Expression::KindOfSimpleVariable)) break;
       SimpleVariableConstPtr sv(
         static_pointer_cast<const SimpleVariable>(shared_from_this()));
@@ -600,10 +555,7 @@ void Expression::computeLocalExprAltered() {
 
 bool Expression::isArray() const {
   if (is(KindOfUnaryOpExpression)) {
-    return static_cast<const UnaryOpExpression*>(this)->getOp() == T_ARRAY ||
-      static_cast<const UnaryOpExpression*>(this)->getOp() == T_VARRAY ||
-      static_cast<const UnaryOpExpression*>(this)->getOp() == T_MIARRAY ||
-      static_cast<const UnaryOpExpression*>(this)->getOp() == T_MSARRAY;
+    return static_cast<const UnaryOpExpression*>(this)->getOp() == T_ARRAY;
   }
   return false;
 }
@@ -616,187 +568,28 @@ bool Expression::isCollection() const {
   return false;
 }
 
-bool Expression::isUnquotedScalar() const {
-  if (!is(KindOfScalarExpression)) return false;
-  return !((ScalarExpression*)this)->isQuoted();
-}
-
 ExpressionPtr Expression::MakeScalarExpression(AnalysisResultConstPtr ar,
                                                BlockScopePtr scope,
-                                               LocationPtr loc,
+                                               const Location::Range& r,
                                                const Variant& value) {
   if (value.isArray()) {
-    ExpressionListPtr el(new ExpressionList(scope, loc,
-                                            ExpressionList::ListKindParam));
+    auto el = std::make_shared<ExpressionList>(
+      scope, r, ExpressionList::ListKindParam);
 
     for (ArrayIter iter(value.toArray()); iter; ++iter) {
-      ExpressionPtr k(MakeScalarExpression(ar, scope, loc, iter.first()));
-      ExpressionPtr v(MakeScalarExpression(ar, scope, loc, iter.second()));
+      ExpressionPtr k(MakeScalarExpression(ar, scope, r, iter.first()));
+      ExpressionPtr v(MakeScalarExpression(ar, scope, r, iter.second()));
       if (!k || !v) return ExpressionPtr();
-      ArrayPairExpressionPtr ap(
-        new ArrayPairExpression(scope, loc, k, v, false));
+      auto ap = std::make_shared<ArrayPairExpression>(scope, r, k, v, false);
       el->addElement(ap);
     }
     if (!el->getCount()) el.reset();
-    return ExpressionPtr(
-      new UnaryOpExpression(scope, loc, el, T_ARRAY, true));
+    return std::make_shared<UnaryOpExpression>(scope, r, el, T_ARRAY, true);
   } else if (value.isNull()) {
-    return MakeConstant(ar, scope, loc, "null");
+    return MakeConstant(ar, scope, r, "null");
   } else if (value.isBoolean()) {
-    return MakeConstant(ar, scope, loc, value.toBoolean() ? "true" : "false");
+    return MakeConstant(ar, scope, r, value.toBoolean() ? "true" : "false");
   } else {
-    return ScalarExpressionPtr
-      (new ScalarExpression(scope, loc, value));
+    return std::make_shared<ScalarExpression>(scope, r, value);
   }
-}
-
-///////////////////////////////////////////////////////////////////////////////
-
-void Expression::collectCPPTemps(ExpressionPtrVec &collection) {
-  if (isChainRoot()) {
-    collection.push_back(static_pointer_cast<Expression>(shared_from_this()));
-  } else {
-    for (int i = 0; i < getKidCount(); i++) {
-      ExpressionPtr kid = getNthExpr(i);
-      if (kid) kid->collectCPPTemps(collection);
-    }
-  }
-}
-
-void Expression::disableCSE() {
-  ExpressionPtrVec v;
-  collectCPPTemps(v);
-  ExpressionPtrVec::iterator it(v.begin());
-  for (; it != v.end(); ++it) {
-    ExpressionPtr p(*it);
-    p->clearChainRoot();
-  }
-}
-
-bool Expression::hasChainRoots() {
-  ExpressionPtrVec v;
-  collectCPPTemps(v);
-  return !v.empty();
-}
-
-bool Expression::GetCseTempInfo(
-    AnalysisResultPtr ar,
-    ExpressionPtr p,
-    TypePtr &t) {
-  assert(p);
-  switch (p->getKindOf()) {
-  case Expression::KindOfArrayElementExpression:
-    {
-      ArrayElementExpressionPtr ap(
-          static_pointer_cast<ArrayElementExpression>(p));
-      ExpressionPtr var(ap->getVariable());
-
-      TypePtr srcType, dstType;
-      bool needsCast =
-        var->getTypeCastPtrs(ar, srcType, dstType);
-
-      TypePtr testType(needsCast ? dstType : srcType);
-      if (testType) {
-        t = testType;
-        return !testType->is(Type::KindOfArray);
-      }
-
-      return true;
-    }
-    break;
-  default:
-    break;
-  }
-  return true;
-}
-
-ExpressionPtr Expression::getNextCanonCsePtr() const {
-
-  bool dAccessCtx =
-    hasContext(AccessContext);
-  bool dLval =
-    hasContext(LValue);
-  bool dExistCtx =
-    hasContext(ExistContext);
-  bool dUnsetCtx =
-    hasContext(UnsetContext);
-
-  bool dGlobals = false;
-  if (is(KindOfArrayElementExpression)) {
-    ArrayElementExpressionConstPtr a(
-        static_pointer_cast<const ArrayElementExpression>(
-          shared_from_this()));
-    dGlobals = a->isSuperGlobal() || a->isDynamicGlobal();
-  }
-
-  // see rules below - no hope to find CSE candidate
-  if (dExistCtx || dUnsetCtx || dGlobals || (!dAccessCtx && dLval)) {
-    return ExpressionPtr();
-  }
-
-  KindOf dKindOf = getKindOf();
-
-  ExpressionPtr match;
-  ExpressionPtr p(getCanonLVal());
-  for (; p; p = p->getCanonLVal()) {
-    // check if p is a suitable candidate for CSE of
-    // downstream. the rules are:
-    // A) rvals can always be CSE-ed regardless of access context,
-    //    except for unset context, which it never can be CSE-ed for
-    // B) lvals can only be CSE-ed if in AccessContext
-    // C) rvals and lvals cannot be CSE-ed for each other
-    // D) for now, ExistContext is not optimized
-    // E) no CSE for $GLOBALS[...]
-    // F) node types need to match
-
-    bool pLval = p->hasContext(LValue);
-    KindOf pKindOf = p->getKindOf();
-
-    if (dKindOf != pKindOf) continue;
-
-    if (dLval) {
-      assert(dAccessCtx);
-      bool pAccessCtx = p->hasContext(AccessContext);
-      if (pLval && pAccessCtx) {
-        // match found
-        match = p;
-        break;
-      }
-    } else {
-      bool pExistCtx = p->hasContext(ExistContext);
-      bool pUnsetCtx = p->hasContext(UnsetContext);
-      if (!pLval && !pExistCtx && !pUnsetCtx) {
-        // match found
-        match = p;
-        break;
-      }
-    }
-  }
-
-  return match;
-}
-
-ExpressionPtr Expression::getCanonCsePtr() const {
-  ExpressionPtr next(getNextCanonCsePtr());
-  if (next) {
-    if (next->isChainRoot()) return next;
-    return next->getCanonCsePtr();
-  }
-  return ExpressionPtr();
-}
-
-bool Expression::getTypeCastPtrs(
-    AnalysisResultPtr ar, TypePtr &srcType, TypePtr &dstType) {
-  srcType = m_actualType;
-  dstType = m_expectedType;
-  if (m_implementedType && srcType &&
-      !Type::SameType(m_implementedType, srcType)) {
-    srcType = m_implementedType;
-  }
-  if (!srcType && dstType && Type::IsCastNeeded(ar, Type::Variant, dstType)) {
-    srcType = Type::Variant;
-    return true;
-  }
-  return dstType && srcType && ((m_context & LValue) == 0) &&
-      Type::IsCastNeeded(ar, srcType, dstType);
 }
