@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,10 +21,9 @@
 #include "hphp/runtime/base/file-util.h"
 #include "hphp/runtime/base/http-client.h"
 #include "hphp/runtime/base/memory-manager.h"
-#include "hphp/runtime/base/pprof-server.h"
 #include "hphp/runtime/base/program-functions.h"
 #include "hphp/runtime/base/runtime-option.h"
-#include "hphp/runtime/base/thread-init-fini.h"
+#include "hphp/runtime/base/init-fini-node.h"
 #include "hphp/runtime/debugger/debugger.h"
 #include "hphp/runtime/server/admin-request-handler.h"
 #include "hphp/runtime/server/http-request-handler.h"
@@ -34,6 +33,7 @@
 #include "hphp/runtime/server/warmup-request-handler.h"
 #include "hphp/runtime/server/xbox-server.h"
 
+#include "hphp/util/boot_timer.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/process.h"
 #include "hphp/util/ssl-init.h"
@@ -45,7 +45,6 @@
 #include <signal.h>
 
 namespace HPHP {
-extern InitFiniNode *extra_server_init, *extra_server_exit;
 
 using std::string;
 
@@ -97,7 +96,7 @@ HttpServer::HttpServer()
   options.m_serverFD = RuntimeOption::ServerPortFd;
   options.m_sslFD = RuntimeOption::SSLPortFd;
   options.m_takeoverFilename = RuntimeOption::TakeoverFilename;
-  m_pageServer = std::move(serverFactory->createServer(options));
+  m_pageServer = serverFactory->createServer(options);
   m_pageServer->addTakeoverListener(this);
   m_pageServer->addServerEventListener(this);
 
@@ -122,14 +121,14 @@ HttpServer::HttpServer()
   ServerOptions admin_options
     (RuntimeOption::ServerIP, RuntimeOption::AdminServerPort,
      RuntimeOption::AdminThreadCount);
-  m_adminServer = std::move(serverFactory->createServer(admin_options));
+  m_adminServer = serverFactory->createServer(admin_options);
   m_adminServer->setRequestHandlerFactory<AdminRequestHandler>(
     RuntimeOption::RequestTimeoutSeconds);
 
   for (unsigned int i = 0; i < RuntimeOption::SatelliteServerInfos.size();
        i++) {
     auto info = RuntimeOption::SatelliteServerInfos[i];
-    auto satellite(std::move(SatelliteServer::Create(info)));
+    auto satellite(SatelliteServer::Create(info));
     if (satellite) {
       if (info->getType() == SatelliteServer::Type::KindOfDanglingPageServer) {
         m_danglings.push_back(std::move(satellite));
@@ -180,9 +179,7 @@ HttpServer::HttpServer()
 
 // Synchronously stop satellites and start danglings
 void HttpServer::onServerShutdown() {
-  for (InitFiniNode *in = extra_server_exit; in; in = in->next) {
-    in->func();
-  }
+  InitFiniNode::ServerFini();
 
   Eval::Debugger::Stop();
   if (RuntimeOption::EnableDebuggerServer) {
@@ -288,16 +285,6 @@ void HttpServer::runOrExitProcess() {
     }
   }
 
-  if (RuntimeOption::HHProfServerEnabled) {
-    try {
-      HeapProfileServer::Server = std::make_shared<HeapProfileServer>();
-    } catch (FailedToListenException &e) {
-      startupFailure("Unable to start profiling server");
-      not_reached();
-    }
-    Logger::Info("profiling server started");
-  }
-
   if (!Eval::Debugger::StartServer()) {
     startupFailure("Unable to start debugger server");
     not_reached();
@@ -305,14 +292,14 @@ void HttpServer::runOrExitProcess() {
     Logger::Info("debugger server started");
   }
 
-  for (InitFiniNode *in = extra_server_init; in; in = in->next) {
-    in->func();
-  }
+  InitFiniNode::ServerInit();
 
   {
+    BootTimer::mark("servers started");
     Logger::Info("all servers started");
     createPid();
     Lock lock(this);
+    BootTimer::done();
     // continously running until /stop is received on admin server
     while (!m_stopped) {
       wait();
@@ -360,19 +347,20 @@ void HttpServer::waitForServers() {
   if (RuntimeOption::AdminServerPort) {
     m_adminServer->waitForEnd();
   }
-  if (RuntimeOption::HHProfServerEnabled) {
-    HeapProfileServer::Server.reset();
-  }
   // all other servers invoke waitForEnd on stop
 }
 
 static void exit_on_timeout(int sig) {
   signal(sig, SIG_DFL);
   kill(getpid(), SIGKILL);
-  exit(0);
+  // we really shouldn't get here, but who knows.
+  // abort so we catch it as a crash.
+  abort();
 }
 
 void HttpServer::stop(const char* stopReason) {
+  if (m_stopped) return;
+
   if (RuntimeOption::ServerGracefulShutdownWait) {
     signal(SIGALRM, exit_on_timeout);
     alarm(RuntimeOption::ServerGracefulShutdownWait);
@@ -490,8 +478,9 @@ void HttpServer::dropCache() {
 void HttpServer::checkMemory() {
   int64_t used = Process::GetProcessRSS(Process::GetProcessId()) * 1024 * 1024;
   if (RuntimeOption::MaxRSS > 0 && used > RuntimeOption::MaxRSS) {
-    Logger::Error("ResourceLimit.MaxRSS %ld reached %ld used, exiting",
-                  RuntimeOption::MaxRSS, used);
+    Logger::Error(
+      "ResourceLimit.MaxRSS %" PRId64 " reached %" PRId64 " used, exiting",
+      RuntimeOption::MaxRSS, used);
     stop();
   }
 }
@@ -506,6 +495,16 @@ void HttpServer::getSatelliteStats(
     stats->push_back(active);
     stats->push_back(queued);
   }
+}
+
+std::pair<int, int> HttpServer::getSatelliteRequestCount() const {
+  int inflight = 0;
+  int queued = 0;
+  for (const auto& i : m_satellites) {
+    inflight += i->getActiveWorker();
+    queued += i->getQueuedJobs();
+  }
+  return std::make_pair(inflight, queued);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

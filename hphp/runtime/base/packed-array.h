@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,6 +23,7 @@
 #include "hphp/runtime/base/typed-value.h"
 #include "hphp/runtime/base/array-common.h"
 #include "hphp/runtime/base/sort-flags.h"
+#include "hphp/runtime/base/header-kind.h"
 
 namespace HPHP {
 
@@ -38,21 +39,16 @@ struct MixedArray;
 //////////////////////////////////////////////////////////////////////
 
 /*
- * Packed arrays are a specialized array layout for vector-like data.
- * That is, php arrays with zero-based contiguous integer keys, and
- * values of mixed types.
- *
- * Currently the layout of this array kind is set up to match
- * MixedArray, with some of the fields uninitialized.  I.e., packed
- * arrays allocate space for a hashtable that they don't use, in order
- * to make the code path that transitions from packed to mixed
- * cheaper.  (This is a transitional thing---we'd like to further
- * specialize the layout.)  See MixedArray::checkInvariants for
- * details.
+ * Packed arrays are a specialized array layout for vector-like data.  That is,
+ * php arrays with zero-based contiguous integer keys, and values of mixed
+ * types.  The TypedValue's are placed right after the array header.
  */
 struct PackedArray {
   static constexpr uint32_t MaxSize = 0xFFFFFFFFul;
+  static constexpr uint32_t SmallSize = 3;
+
   static void Release(ArrayData*);
+  static void ReleaseUncounted(ArrayData*);
   static const TypedValue* NvGetInt(const ArrayData*, int64_t ki);
   static const TypedValue* NvGetStr(const ArrayData*, const StringData*);
   static void NvGetKey(const ArrayData*, TypedValue* out, ssize_t pos);
@@ -84,11 +80,12 @@ struct PackedArray {
   static ssize_t IterRewind(const ArrayData*, ssize_t pos);
   static constexpr auto ValidMArrayIter = &ArrayCommon::ValidMArrayIter;
   static bool AdvanceMArrayIter(ArrayData*, MArrayIter& fp);
-  static void CopyPackedHelper(const ArrayData* adIn, ArrayData* ad);
+  static void CopyPackedHelper(const ArrayData* adIn, ArrayData* ad,
+                               RefCount initial_count);
   static ArrayData* Copy(const ArrayData* ad);
   static ArrayData* CopyWithStrongIterators(const ArrayData*);
-  static ArrayData* NonSmartCopy(const ArrayData*);
-  static ArrayData* NonSmartCopyHelper(const ArrayData*);
+  static ArrayData* CopyStatic(const ArrayData*);
+  static ArrayData* CopyStaticHelper(const ArrayData*);
   static ArrayData* EscalateForSort(ArrayData*, SortFunction);
   static void Ksort(ArrayData*, int, bool);
   static void Sort(ArrayData*, int, bool);
@@ -119,16 +116,32 @@ struct PackedArray {
 
   /*
    * Accepts any array of any kind satisfying isVectorData() and makes a
-   * non-smart packed copy, like NonSmartCopy().
+   * static packed copy, like CopyStatic().
    */
-  static ArrayData* NonSmartConvert(const ArrayData*);
-  static ArrayData* NonSmartConvertHelper(const ArrayData*);
+  static ArrayData* ConvertStatic(const ArrayData*);
+  static ArrayData* ConvertStaticHelper(const ArrayData*);
 
   static ptrdiff_t entriesOffset();
   static uint32_t getMaxCapInPlaceFast(uint32_t cap);
 
   static size_t heapSize(const ArrayData*);
   template<class Marker> static void scan(const ArrayData*, Marker&);
+
+  static ArrayData* MakeReserve(uint32_t capacity);
+  static ArrayData* MakeReserveSlow(uint32_t capacity);
+
+  /*
+   * Allocate a PackedArray containing `size' values, in the reverse order of
+   * the `values' array.
+   *
+   * This function takes ownership of the TypedValues in `values'.
+   */
+  static ArrayData* MakePacked(uint32_t size, const TypedValue* values);
+  static ArrayData* MakePackedHelper(uint32_t size, const TypedValue* values);
+  static ArrayData* MakeUninitialized(uint32_t size);
+
+  static ArrayData* MakeUncounted(ArrayData* array);
+  static ArrayData* MakeUncountedHelper(ArrayData* array);
 
 private:
   static ArrayData* Grow(ArrayData*);

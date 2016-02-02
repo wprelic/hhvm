@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -9,6 +9,7 @@
  *)
 
 open Ast
+open Core
 open Namespace_env
 
 module SMap = Utils.SMap
@@ -64,16 +65,25 @@ let autoimport_classes = [
   "ConditionWaitHandle";
   "RescheduleWaitHandle";
   "SleepWaitHandle";
-  "ExternalThreadEventWaitHandle"
+  "ExternalThreadEventWaitHandle";
+  "Shapes";
+  "TypeStructureKind";
 ]
 let autoimport_funcs = [
   "invariant";
-  "invariant_violation"
+  "invariant_violation";
+  "type_structure";
+]
+let autoimport_types = [
+  "typename";
+  "classname";
+  "TypeStructure";
 ]
 
 let autoimport_set =
-  let autoimport_list = autoimport_classes @ autoimport_funcs in
-  List.fold_left (fun s e -> SSet.add e s) SSet.empty autoimport_list
+  let autoimport_list
+    = autoimport_classes @ autoimport_funcs @ autoimport_types in
+  List.fold_left autoimport_list ~init:SSet.empty ~f:(fun s e -> SSet.add e s)
 (* NOTE that the runtime is able to distinguish between class and
    function names when auto-importing *)
 let is_autoimport_name id = SSet.mem id autoimport_set
@@ -99,22 +109,29 @@ let elaborate_into_current_ns nsenv id =
  * works out. (Fully qualifying identifiers is of course idempotent, but there
  * used to be other schemes here.)
  *)
-let elaborate_id_impl ~autoimport nsenv (p, id) =
+let elaborate_id_impl ~autoimport nsenv kind (p, id) =
   (* Go ahead and fully-qualify the name first. *)
   let fully_qualified =
     if id <> "" && id.[0] = '\\' then id
     else if autoimport && is_autoimport_name id then "\\" ^ id
     else begin
       (* Expand "use" imports. *)
-      let bslash_loc =
-        try String.index id '\\' with Not_found -> String.length id in
+      let (bslash_loc, has_bslash) =
+        try String.index id '\\', true
+        with Not_found -> String.length id, false in
+      (* "use function" and "use const" only apply if the id is completely
+       * unqualified, otherwise the normal "use" imports apply. *)
+      let uses = if has_bslash then nsenv.ns_uses else match kind with
+        | NSClass -> nsenv.ns_uses
+        | NSFun -> nsenv.ns_fun_uses
+        | NSConst -> nsenv.ns_const_uses in
       let prefix = String.sub id 0 bslash_loc in
       if prefix = "namespace" && id <> "namespace" then begin
         (* Strip off the 'namespace\' (including the slash) from id, then
         elaborate back into the current namespace. *)
         let len = (String.length id) - bslash_loc  - 1 in
         elaborate_into_current_ns nsenv (String.sub id (bslash_loc + 1) len)
-      end else match SMap.get prefix nsenv.ns_uses with
+      end else match SMap.get prefix uses with
         | None -> elaborate_into_current_ns nsenv id
         | Some use -> begin
           (* Strip off the "use" from id, but *not* the backslash after that
@@ -148,7 +165,7 @@ let elaborate_id_no_autos = elaborate_id_impl ~autoimport:false
 module ElaborateDefs = struct
   let hint nsenv = function
     | p, Happly (id, args) ->
-        p, Happly (elaborate_id nsenv id, args)
+        p, Happly (elaborate_id nsenv NSClass id, args)
     | other -> other
 
   let class_def nsenv = function
@@ -170,37 +187,51 @@ module ElaborateDefs = struct
         nsenv, program new_nsenv prog
       end
     | NamespaceUse l -> begin
-        let map = List.fold_left begin fun map (id1, id2) ->
-          SMap.add (snd id2) (snd id1) map
-        end nsenv.ns_uses l in
-        {nsenv with ns_uses = map}, []
+        let nsenv =
+          List.fold_left l ~init:nsenv ~f:begin fun nsenv (kind, id1, id2) ->
+            match kind with
+              | NSClass -> begin
+                let m = SMap.add (snd id2) (snd id1) nsenv.ns_uses in
+                {nsenv with ns_uses = m}
+              end
+              | NSFun -> begin
+                let m = SMap.add (snd id2) (snd id1) nsenv.ns_fun_uses in
+                {nsenv with ns_fun_uses = m}
+              end
+              | NSConst -> begin
+                let m = SMap.add (snd id2) (snd id1) nsenv.ns_const_uses in
+                {nsenv with ns_const_uses = m}
+              end
+          end in
+        nsenv, []
       end
     | Class c -> nsenv, [Class {c with
-        c_name = elaborate_id_no_autos nsenv c.c_name;
-        c_extends = List.map (hint nsenv) c.c_extends;
-        c_implements = List.map (hint nsenv) c.c_implements;
-        c_body = List.map (class_def nsenv) c.c_body;
+        c_name = elaborate_id_no_autos nsenv NSClass c.c_name;
+        c_extends = List.map c.c_extends (hint nsenv);
+        c_implements = List.map c.c_implements (hint nsenv);
+        c_body = List.map c.c_body (class_def nsenv);
         c_namespace = nsenv;
       }]
     | Fun f -> nsenv, [Fun {f with
-        f_name = elaborate_id_no_autos nsenv f.f_name;
+        f_name = elaborate_id_no_autos nsenv NSFun f.f_name;
         f_namespace = nsenv;
       }]
     | Typedef t -> nsenv, [Typedef {t with
-        t_id = elaborate_id_no_autos nsenv t.t_id;
+        t_id = elaborate_id_no_autos nsenv NSClass t.t_id;
         t_namespace = nsenv;
-    }]
+      }]
     | Constant cst -> nsenv, [Constant {cst with
-        cst_name = elaborate_id_no_autos nsenv cst.cst_name;
+        cst_name = elaborate_id_no_autos nsenv NSConst cst.cst_name;
         cst_namespace = nsenv;
-    }]
+      }]
     | other -> nsenv, [other]
 
   and program nsenv p =
-    let _, acc = List.fold_left begin fun (nsenv, acc) item ->
-      let nsenv, item = def nsenv item in
-      nsenv, item :: acc
-    end (nsenv, []) p in
+    let _, acc =
+      List.fold_left p ~init:(nsenv, []) ~f:begin fun (nsenv, acc) item ->
+        let nsenv, item = def nsenv item in
+        nsenv, item :: acc
+      end in
     List.concat (List.rev acc)
 end
 

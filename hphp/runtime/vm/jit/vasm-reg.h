@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -37,14 +37,14 @@ struct VscaledDisp;
  * XMM, or virtual register.
  */
 struct Vreg {
-  static const unsigned kNumGP{PhysReg::kSIMDOffset}; // 33
-  static const unsigned kNumXMM{30};
-  static const unsigned kNumSF{1};
-  static const unsigned G0{0};
-  static const unsigned X0{kNumGP};
-  static const unsigned S0{X0+kNumXMM};
-  static const unsigned V0{S0+kNumSF};
-  static const unsigned kInvalidReg{0xffffffffU};
+  static constexpr unsigned kNumGP = PhysReg::kNumGP;
+  static constexpr unsigned kNumXMM = PhysReg::kNumSIMD;
+  static constexpr unsigned kNumSF = PhysReg::kNumSF;
+  static constexpr unsigned G0 = PhysReg::kGPOffset;
+  static constexpr unsigned X0 = PhysReg::kSIMDOffset;
+  static constexpr unsigned S0 = PhysReg::kSFOffset;
+  static constexpr unsigned V0 = PhysReg::kMaxRegs;
+  static constexpr unsigned kInvalidReg = 0xffffffffU;
 
   /*
    * Constructors.
@@ -182,16 +182,16 @@ using Vreg8   = Vr<Reg8>;
 using VregSF  = Vr<RegSF>;
 
 struct VregDbl : Vr<RegXMM> {
-  explicit VregDbl(size_t rn) : Vr<RegXMM>{rn} {}
+  explicit VregDbl(size_t rn) : Vr<RegXMM>(rn) {}
   template<class... Args> /* implicit */ VregDbl(Args&&... args)
-    : Vr<RegXMM>{std::forward<Args>(args)...} {}
+    : Vr<RegXMM>(std::forward<Args>(args)...) {}
   static bool allowable(Vreg r) { return r.isVirt() || r.isSIMD(); }
 };
 
 struct Vreg128 : Vr<RegXMM> {
-  explicit Vreg128(size_t rn) : Vr<RegXMM>{rn} {}
+  explicit Vreg128(size_t rn) : Vr<RegXMM>(rn) {}
   template<class... Args> /* implicit */ Vreg128(Args&&... args)
-    : Vr<RegXMM>{std::forward<Args>(args)...}
+    : Vr<RegXMM>(std::forward<Args>(args)...)
   {}
 };
 
@@ -217,25 +217,33 @@ VscaledDisp operator+(Vscaled, int32_t);
  *    - index is optional
  */
 struct Vptr {
-  enum Segment : uint8_t { DS, FS };
+  enum Segment : uint8_t { DS, FS, GS };
 
   Vptr()
     : base(Vreg{})
     , index(Vreg{})
     , disp(0)
   {}
-  template<class Base> Vptr(Base b, int d)
+
+  template<class Base>
+  Vptr(Base b, int d)
     : base(b)
     , index(Vreg{})
     , scale(1)
     , disp(d)
   {}
-  template<class Base, class Index> Vptr(Base b, Index i, int s, int d)
+
+  template<class Base, class Index>
+  Vptr(Base b, Index i, int s, int d)
     : base(b)
     , index(i)
     , scale(s)
     , disp(d)
-  {}
+  {
+    assert((scale == 0x1 || scale == 0x2 || scale == 0x4 || scale == 0x8) &&
+           "Invalid index register scaling (must be 1,2,4 or 8).");
+  }
+
   /* implicit */ Vptr(MemoryRef m, Segment s = DS)
     : base(m.r.base)
     , index(m.r.index)
@@ -244,22 +252,26 @@ struct Vptr {
     , disp(m.r.disp)
   {}
 
+  Vptr(const Vptr& o) = default;
+  Vptr& operator=(const Vptr& o) = default;
+
   MemoryRef mr() const;
   /* implicit */ operator MemoryRef() const;
 
   bool operator==(const Vptr&) const;
   bool operator!=(const Vptr&) const;
 
-public:
   Vreg64 base;      // optional, for baseless mode
   Vreg64 index;     // optional
   uint8_t scale;    // 1,2,4,8
-  Segment seg{DS};  // DS or FS
+  Segment seg{DS};  // DS, FS or GS
   int32_t disp;
 };
 
 Vptr operator+(Vptr lhs, int32_t d);
 Vptr operator+(Vptr lhs, intptr_t d);
+
+Vptr baseless(VscaledDisp);
 
 ///////////////////////////////////////////////////////////////////////////////
 

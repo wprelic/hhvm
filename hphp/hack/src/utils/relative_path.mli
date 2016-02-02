@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -30,6 +30,7 @@ val default : t
 val create : prefix -> string -> t
 (* Prepends prefix to string *)
 val concat : prefix -> string -> t
+val join : prefix -> string list -> t
 val prefix : t -> prefix
 val suffix : t -> string
 val to_absolute : t -> string
@@ -38,3 +39,4 @@ module Set : module type of Set.Make (S)
 module Map : module type of MyMap (S)
 
 val relativize_set : prefix -> Utils.SSet.t -> Set.t
+val set_of_list : t list -> Set.t

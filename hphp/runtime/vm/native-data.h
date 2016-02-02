@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,9 +16,9 @@
 #ifndef _incl_HPHP_RUNTIME_VM_NATIVE_DATA_H
 #define _incl_HPHP_RUNTIME_VM_NATIVE_DATA_H
 
+#include "hphp/runtime/base/imarker.h"
 #include "hphp/runtime/base/memory-manager.h"
 #include "hphp/runtime/base/typed-value.h"
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/type-object.h"
 
 namespace HPHP { namespace Native {
@@ -32,6 +32,7 @@ struct NativeDataInfo {
   typedef void (*SweepFunc)(ObjectData *sweep);
   typedef Variant (*SleepFunc)(const ObjectData *sleep);
   typedef void (*WakeupFunc)(ObjectData *wakeup, const Variant& data);
+  typedef void (*ScanFunc)(const ObjectData *obj, IMarker& mark);
 
   size_t sz;
   uint16_t odattrs;
@@ -41,6 +42,7 @@ struct NativeDataInfo {
   SweepFunc sweep; // sweep $obj
   SleepFunc sleep; // serialize($obj)
   WakeupFunc wakeup; // unserialize($obj)
+  ScanFunc scan;
 
   bool isSerializable() const {
     return sleep != nullptr && wakeup != nullptr;
@@ -69,6 +71,16 @@ T* data(const Object& obj) {
   return data<T>(obj.get());
 }
 
+template<class T>
+constexpr ptrdiff_t dataOffset() {
+  return -sizeof(T);
+}
+
+template<class T>
+ObjectData* object(T *data) {
+  return reinterpret_cast<ObjectData*>(data + 1);
+}
+
 void registerNativeDataInfo(const StringData* name,
                             size_t sz,
                             NativeDataInfo::InitFunc init,
@@ -76,7 +88,8 @@ void registerNativeDataInfo(const StringData* name,
                             NativeDataInfo::DestroyFunc destroy,
                             NativeDataInfo::SweepFunc sweep,
                             NativeDataInfo::SleepFunc sleep,
-                            NativeDataInfo::WakeupFunc wakeup);
+                            NativeDataInfo::WakeupFunc wakeup,
+                            NativeDataInfo::ScanFunc scan);
 
 template<class T>
 void nativeDataInfoInit(ObjectData* obj) {
@@ -143,6 +156,23 @@ void>::type nativeDataInfoWakeup(ObjectData* obj, const Variant& content) {
   always_assert(0);
 }
 
+FOLLY_CREATE_HAS_MEMBER_FN_TRAITS(hasScan, scan);
+
+void conservativeScan(const ObjectData* obj, IMarker& mark);
+using ScanSig = void(IMarker&) const;
+
+template<class T>
+typename std::enable_if<hasScan<T,ScanSig>::value,
+void>::type nativeDataInfoScan(const ObjectData* obj, IMarker& mark) {
+  data<T>(obj)->scan(mark);
+}
+
+template<class T>
+typename std::enable_if<!hasScan<T,ScanSig>::value,
+void>::type nativeDataInfoScan(const ObjectData* obj, IMarker& mark) {
+  conservativeScan(obj, mark);
+}
+
 enum NDIFlags {
   NONE           = 0,
   // Skipping the ctor/dtor is generally a bad idea
@@ -159,17 +189,20 @@ typename std::enable_if<
   void
 >::type registerNativeDataInfo(const StringData* name,
                                int64_t flags = 0) {
+  auto ndic = &nativeDataInfoCopy<T>;
+  auto ndisw = &nativeDataInfoSweep<T>;
+  auto ndisl = &nativeDataInfoSleep<T>;
+  auto ndiw = &nativeDataInfoWakeup<T>;
+  auto ndis = &nativeDataInfoScan<T>;
+
   registerNativeDataInfo(name, sizeof(T),
-                         &nativeDataInfoInit<T>,
-                         (flags & NDIFlags::NO_COPY)
-                           ? nullptr : &nativeDataInfoCopy<T>,
-                         &nativeDataInfoDestroy<T>,
-                         (flags & NDIFlags::NO_SWEEP)
-                           ? nullptr : &nativeDataInfoSweep<T>,
-                         hasSleep<T, Variant() const>::value
-                           ? &nativeDataInfoSleep<T> : nullptr,
-                         hasWakeup<T, void(const Variant&, ObjectData*)>::value
-                           ? &nativeDataInfoWakeup<T> : nullptr);
+    &nativeDataInfoInit<T>,
+    (flags & NDIFlags::NO_COPY) ? nullptr : ndic,
+    &nativeDataInfoDestroy<T>,
+    (flags & NDIFlags::NO_SWEEP) ? nullptr : ndisw,
+    hasSleep<T, Variant() const>::value ? ndisl : nullptr,
+    hasWakeup<T, void(const Variant&, ObjectData*)>::value ? ndiw : nullptr,
+    hasScan<T,ScanSig>::value ? ndis : nullptr);
 }
 
 // Return the ObjectData payload allocated after this NativeNode header
@@ -193,22 +226,37 @@ void nativeDataInstanceDtor(ObjectData* obj, const Class* cls);
 Variant nativeDataSleep(const ObjectData* obj);
 void nativeDataWakeup(ObjectData* obj, const Variant& data);
 
-// return the full native header size, which is also the distance from
-// the allocated pointer to the ObjectData*.
-inline size_t ndsize(const NativeDataInfo* ndi) {
-  return alignTypedValue(ndi->sz + sizeof(NativeNode));
+template <typename F>
+void nativeDataScan(const ObjectData* obj, F& mark) {
+  auto ndi = obj->getVMClass()->getNativeDataInfo();
+  assert(ndi);
+  assert(ndi->scan);
+  ExtMarker<F> bridge(mark);
+  ndi->scan(obj, bridge);
 }
 
-inline NativeNode* getNativeNode(ObjectData *obj, const NativeDataInfo* ndi) {
+size_t ndsize(const ObjectData* obj, const NativeDataInfo* ndi);
+
+// return the full native header size, which is also the distance from
+// the allocated pointer to the ObjectData*.
+inline size_t ndsize(size_t dataSize) {
+  return alignTypedValue(dataSize + sizeof(NativeNode));
+ }
+
+inline size_t ndextra(const ObjectData* obj, const NativeDataInfo* ndi) {
+  return ndsize(obj, ndi) - ndsize(ndi->sz);
+}
+
+inline NativeNode* getNativeNode(ObjectData* obj, const NativeDataInfo* ndi) {
   return reinterpret_cast<NativeNode*>(
-    reinterpret_cast<char*>(obj) - ndsize(ndi)
+    reinterpret_cast<char*>(obj) - ndsize(obj, ndi)
   );
 }
 
 inline const NativeNode*
-getNativeNode(const ObjectData *obj, const NativeDataInfo* ndi) {
+getNativeNode(const ObjectData* obj, const NativeDataInfo* ndi) {
   return reinterpret_cast<const NativeNode*>(
-    reinterpret_cast<const char*>(obj) - ndsize(ndi)
+    reinterpret_cast<const char*>(obj) - ndsize(obj, ndi)
   );
 }
 

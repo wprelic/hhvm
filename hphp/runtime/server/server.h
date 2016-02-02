@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,8 +17,12 @@
 #ifndef incl_HPHP_HTTP_SERVER_SERVER_H_
 #define incl_HPHP_HTTP_SERVER_SERVER_H_
 
+#include <algorithm>
 #include <chrono>
+#include <functional>
+#include <list>
 #include <memory>
+#include <string>
 
 #include "hphp/runtime/server/takeover-agent.h"
 #include "hphp/runtime/server/transport.h"
@@ -324,9 +328,13 @@ public:
 /**
  * A ServerFactory knows how to create Server objects.
  */
-class ServerFactory : private boost::noncopyable {
+class ServerFactory {
 public:
+  ServerFactory() {}
   virtual ~ServerFactory() {}
+
+  ServerFactory(const ServerFactory&) = delete;
+  ServerFactory& operator=(const ServerFactory&) = delete;
 
   virtual ServerPtr createServer(const ServerOptions &options) = 0;
 
@@ -341,9 +349,12 @@ public:
  * This allows new server types to be plugged in dynamically, without having to
  * hard code the list of all possible server types.
  */
-class ServerFactoryRegistry : private boost::noncopyable {
+class ServerFactoryRegistry {
 public:
   ServerFactoryRegistry();
+
+  ServerFactoryRegistry(const ServerFactoryRegistry&) = delete;
+  ServerFactoryRegistry& operator=(const ServerFactoryRegistry&) = delete;
 
   static ServerFactoryRegistry *getInstance();
 
@@ -367,7 +378,8 @@ private:
  */
 class ServerException : public Exception {
 public:
-  ServerException(const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
+  ServerException(ATTRIBUTE_PRINTF_STRING const char *fmt, ...)
+    ATTRIBUTE_PRINTF(2,3);
 };
 
 class FailedToListenException : public ServerException {

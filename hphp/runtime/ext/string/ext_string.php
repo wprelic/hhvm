@@ -1,5 +1,10 @@
 <?hh
 
+namespace HH {
+newtype FormatString<T> = string;
+}
+
+namespace {
 /**
  * Returns a string with backslashes before characters that are listed in
  *   charlist parameter.
@@ -220,7 +225,7 @@ function lcfirst(string $str): string;
  *
  */
 <<__Native>>
-function ucwords(string $str): string;
+function ucwords(string $str, string $delimiters = " \t\r\n\f\v"): string;
 
 /**
  * This function tries to return a string with all NUL bytes, HTML and PHP
@@ -1711,3 +1716,4 @@ function soundex(string $str): mixed;
  */
 <<__IsFoldable, __Native>>
 function metaphone(string $str, int $phones = 0): mixed;
+}

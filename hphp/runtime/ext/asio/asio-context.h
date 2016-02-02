@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -21,7 +21,7 @@
 #include <functional>
 #include <queue>
 #include "hphp/runtime/ext/extension.h"
-#include "hphp/runtime/base/smart-containers.h"
+#include "hphp/runtime/base/req-containers.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -32,12 +32,13 @@ class c_ResumableWaitHandle;
 class c_RescheduleWaitHandle;
 class c_SleepWaitHandle;
 class c_ExternalThreadEventWaitHandle;
+class c_AsyncFunctionWaitHandle;
 
 typedef uint8_t context_idx_t;
 
 struct AsioContext final {
-  void* operator new(size_t size) { return smart_malloc(size); }
-  void operator delete(void* ptr) { smart_free(ptr); }
+  void* operator new(size_t size) { return req::malloc(size); }
+  void operator delete(void* ptr) { req::free(ptr); }
 
   explicit AsioContext(ActRec* savedFP) : m_savedFP(savedFP) {}
   void exit(context_idx_t ctx_idx);
@@ -47,19 +48,23 @@ struct AsioContext final {
   void schedule(c_ResumableWaitHandle* wait_handle) {
     m_runnableQueue.push_back(wait_handle);
   }
+  void scheduleFast(c_AsyncFunctionWaitHandle* wait_handle) {
+    // assert(wait_handle->isFastResumable());
+    m_fastRunnableQueue.push_back(wait_handle);
+  }
   void schedule(c_RescheduleWaitHandle* wait_handle, uint32_t queue,
                 int64_t priority);
 
   template <class TWaitHandle>
-  uint32_t registerTo(smart::vector<TWaitHandle*>& vec, TWaitHandle* wh);
+  uint32_t registerTo(req::vector<TWaitHandle*>& vec, TWaitHandle* wh);
 
   template <class TWaitHandle>
-  void unregisterFrom(smart::vector<TWaitHandle*>& vec, uint32_t idx);
+  void unregisterFrom(req::vector<TWaitHandle*>& vec, uint32_t idx);
 
-  smart::vector<c_SleepWaitHandle*>& getSleepEvents() {
+  req::vector<c_SleepWaitHandle*>& getSleepEvents() {
     return m_sleepEvents;
   };
-  smart::vector<c_ExternalThreadEventWaitHandle*>& getExternalThreadEvents() {
+  req::vector<c_ExternalThreadEventWaitHandle*>& getExternalThreadEvents() {
     return m_externalThreadEvents;
   };
 
@@ -68,8 +73,23 @@ struct AsioContext final {
   static constexpr uint32_t QUEUE_DEFAULT       = 0;
   static constexpr uint32_t QUEUE_NO_PENDING_IO = 1;
 
+  template<class F> void scan(F& mark) const {
+    // m_savedFP is a pointer to a frame on the stack that represents
+    // a WaitHandle::join() call; it's guaranteed to be on the stack
+    mark(m_runnableQueue);
+    mark(m_fastRunnableQueue);
+    for (auto& p : m_priorityQueueDefault) {
+      for (auto wh : p.second) mark(wh);
+    }
+    for (auto& p : m_priorityQueueNoPendingIO) {
+      for (auto wh : p.second) mark(wh);
+    }
+    mark(m_sleepEvents);
+    mark(m_externalThreadEvents);
+  }
+
 private:
-  typedef smart::map<int64_t, smart::deque<c_RescheduleWaitHandle*>>
+  typedef req::map<int64_t, req::deque<c_RescheduleWaitHandle*>>
     reschedule_priority_queue_t;
 
   bool runSingle(reschedule_priority_queue_t& queue);
@@ -79,7 +99,10 @@ private:
   ActRec* m_savedFP;
 
   // stack of ResumableWaitHandles ready for immediate execution
-  smart::vector<c_ResumableWaitHandle*> m_runnableQueue;
+  req::vector<c_ResumableWaitHandle*> m_runnableQueue;
+
+  // stack of AsyncFunctionWaitHandles ready for immediate execution
+  req::vector<c_AsyncFunctionWaitHandle*> m_fastRunnableQueue;
 
   // queue of RescheduleWaitHandles scheduled in default mode
   reschedule_priority_queue_t m_priorityQueueDefault;
@@ -89,8 +112,8 @@ private:
   reschedule_priority_queue_t m_priorityQueueNoPendingIO;
 
   // pending wait handles
-  smart::vector<c_SleepWaitHandle*> m_sleepEvents;
-  smart::vector<c_ExternalThreadEventWaitHandle*> m_externalThreadEvents;
+  req::vector<c_SleepWaitHandle*> m_sleepEvents;
+  req::vector<c_ExternalThreadEventWaitHandle*> m_externalThreadEvents;
 };
 
 ///////////////////////////////////////////////////////////////////////////////

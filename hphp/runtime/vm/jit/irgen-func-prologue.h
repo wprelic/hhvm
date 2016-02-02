@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,9 +17,10 @@
 #ifndef incl_HPHP_JIT_IRGEN_FUNC_PROLOGUE_H
 #define incl_HPHP_JIT_IRGEN_FUNC_PROLOGUE_H
 
-#include <cstdint>
-
+#include "hphp/runtime/vm/func.h"
 #include "hphp/runtime/vm/jit/types.h"
+
+#include <cstdint>
 
 namespace HPHP { namespace jit {
 
@@ -34,6 +35,8 @@ namespace irgen {
 ///////////////////////////////////////////////////////////////////////////////
 
 void emitFuncPrologue(IRGS& env, uint32_t argc, TransID transID);
+
+void emitFuncBodyDispatch(IRGS& env, const DVFuncletsVec& dvs);
 
 ///////////////////////////////////////////////////////////////////////////////
 

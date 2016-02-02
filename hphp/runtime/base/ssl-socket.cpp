@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,8 +16,9 @@
 
 #include "hphp/runtime/base/ssl-socket.h"
 #include "hphp/runtime/base/runtime-error.h"
-#include "hphp/runtime/base/smart-ptr.h"
+#include "hphp/runtime/base/req-ptr.h"
 #include "hphp/runtime/base/string-util.h"
+#include "hphp/runtime/server/server-stats.h"
 #include <folly/String.h>
 #include <poll.h>
 #include <sys/time.h>
@@ -32,7 +33,9 @@ bool SSLSocketData::closeImpl() {
   }
   if (m_handle) {
     SSL_free(m_handle);
+    SSL_CTX_free(m_ctx);
     m_handle = nullptr;
+    m_ctx = nullptr;
   }
   return SocketData::closeImpl();
 }
@@ -123,11 +126,17 @@ SSL *SSLSocket::createSSL(SSL_CTX *ctx) {
     String capath = m_context[s_capath].toString();
 
     if (!cafile.empty() || !capath.empty()) {
-      if (!SSL_CTX_load_verify_locations(ctx, cafile.data(), capath.data())) {
+      const char* cafileptr = cafile.empty() ? nullptr : cafile.data();
+      const char* capathptr = capath.empty() ? nullptr : capath.data();
+      if (!SSL_CTX_load_verify_locations(ctx, cafileptr, capathptr)) {
         raise_warning("Unable to set verify locations `%s' `%s'",
                       cafile.data(), capath.data());
         return nullptr;
       }
+    } else if (m_data->m_client && !SSL_CTX_set_default_verify_paths(ctx)) {
+      raise_warning(
+        "Unable to set default verify locations and no CA settings specified");
+      return nullptr;
     }
 
     int64_t depth = m_context[s_verify_depth].toInt64();
@@ -200,11 +209,24 @@ SSLSocket::SSLSocket()
   m_data(static_cast<SSLSocketData*>(getSocketData()))
 {}
 
-SSLSocket::SSLSocket(int sockfd, int type, const char *address /* = NULL */,
-                     int port /* = 0 */)
-: Socket(std::make_shared<SSLSocketData>(), sockfd, type, address, port),
+SSLSocket::SSLSocket(std::shared_ptr<SSLSocketData> data)
+: Socket(data),
   m_data(static_cast<SSLSocketData*>(getSocketData()))
 {}
+
+StaticString s_ssl("ssl");
+
+SSLSocket::SSLSocket(int sockfd, int type, const req::ptr<StreamContext>& ctx,
+                     const char *address /* = NULL */, int port /* = 0 */)
+: Socket(std::make_shared<SSLSocketData>(port, type), sockfd, type, address, port),
+  m_data(static_cast<SSLSocketData*>(getSocketData()))
+{
+  if (!ctx) {
+    return;
+  }
+  this->setStreamContext(ctx);
+  this->m_context = ctx->getOptions()[s_ssl].toArray();
+}
 
 SSLSocket::~SSLSocket() { }
 
@@ -214,11 +236,36 @@ void SSLSocket::sweep() {
   m_data = nullptr;
 }
 
+bool SSLSocket::enableCrypto(CryptoMethod method) {
+  if (this->m_data->m_method != CryptoMethod::NoCrypto) {
+    raise_warning("SSL/TLS already set-up for this stream");
+    return false;
+  }
+  this->m_data->m_method = method;
+  return setupCrypto() && enableCrypto();
+}
+
+bool SSLSocket::disableCrypto() {
+  if (!this->m_data->m_ssl_active) {
+    return false;
+  }
+  this->m_data->m_method = CryptoMethod::NoCrypto;
+  SSL_shutdown(this->m_data->m_handle);
+  this->m_data->m_ssl_active = false;
+  return true;
+}
+
 bool SSLSocket::onConnect() {
+  if (this->m_data->m_method == CryptoMethod::NoCrypto) {
+    return true;
+  }
   return setupCrypto() && enableCrypto();
 }
 
 bool SSLSocket::onAccept() {
+  if (m_data->m_method == CryptoMethod::NoCrypto) {
+    return true;
+  }
   if (getFd() >= 0 && m_data->m_enable_on_connect) {
     switch (m_data->m_method) {
     case CryptoMethod::ClientSSLv23:
@@ -321,8 +368,9 @@ bool SSLSocket::handleError(int64_t nr_bytes, bool is_init) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
-SmartPtr<SSLSocket> SSLSocket::Create(
-  int fd, int domain, const HostURL &hosturl, double timeout) {
+req::ptr<SSLSocket> SSLSocket::Create(
+  int fd, int domain, const HostURL &hosturl, double timeout,
+  const req::ptr<StreamContext>& ctx) {
   CryptoMethod method;
   const std::string scheme = hosturl.getScheme();
 
@@ -334,12 +382,17 @@ SmartPtr<SSLSocket> SSLSocket::Create(
     method = CryptoMethod::ClientSSLv3;
   } else if (scheme == "tls") {
     method = CryptoMethod::ClientTLS;
+  } else if (
+    scheme == "tcp"
+    || (scheme.empty() && (domain == AF_INET || domain == AF_INET6))
+  ) {
+    method = CryptoMethod::NoCrypto;
   } else {
     return nullptr;
   }
 
-  auto sock = makeSmartPtr<SSLSocket>(
-    fd, domain, hosturl.getHost().c_str(), hosturl.getPort());
+  auto sock = req::make<SSLSocket>(
+    fd, domain, ctx, hosturl.getHost().c_str(), hosturl.getPort());
 
   sock->m_data->m_method = method;
   sock->m_data->m_connect_timeout = timeout;
@@ -359,6 +412,8 @@ bool SSLSocket::waitForData() {
 int64_t SSLSocket::readImpl(char *buffer, int64_t length) {
   int64_t nr_bytes = 0;
   if (m_data->m_ssl_active) {
+    IOStatusHelper io("sslsocket::recv", getAddress().c_str(), getPort());
+
     bool retry = true;
     do {
       if (m_data->m_is_blocked) {
@@ -382,6 +437,8 @@ int64_t SSLSocket::readImpl(char *buffer, int64_t length) {
 int64_t SSLSocket::writeImpl(const char *buffer, int64_t length) {
   int didwrite;
   if (m_data->m_ssl_active) {
+    IOStatusHelper io("sslsocket::send", getAddress().c_str(), getPort());
+
     bool retry = true;
     do {
       didwrite = SSL_write(m_data->m_handle, buffer, length);
@@ -400,6 +457,10 @@ bool SSLSocket::setupCrypto(SSLSocket *session /* = NULL */) {
     return false;
   }
 
+  if (!m_context.exists(s_verify_peer)) {
+    m_context.add(s_verify_peer, true);
+  }
+
   /* need to do slightly different things, based on client/server method,
    * so lets remember which method was selected */
 #if OPENSSL_VERSION_NUMBER < 0x00909000L
@@ -412,10 +473,6 @@ bool SSLSocket::setupCrypto(SSLSocket *session /* = NULL */) {
     m_data->m_client = true;
     smethod = SSLv23_client_method();
     break;
-  case CryptoMethod::ClientSSLv3:
-    m_data->m_client = true;
-    smethod = SSLv3_client_method();
-    break;
   case CryptoMethod::ClientTLS:
     m_data->m_client = true;
     smethod = TLSv1_client_method();
@@ -424,10 +481,22 @@ bool SSLSocket::setupCrypto(SSLSocket *session /* = NULL */) {
     m_data->m_client = false;
     smethod = SSLv23_server_method();
     break;
+
+#ifndef OPENSSL_NO_SSL3
+  case CryptoMethod::ClientSSLv3:
+    m_data->m_client = true;
+    smethod = SSLv3_client_method();
+    break;
   case CryptoMethod::ServerSSLv3:
     m_data->m_client = false;
     smethod = SSLv3_server_method();
     break;
+#else
+  case CryptoMethod::ClientSSLv3:
+  case CryptoMethod::ServerSSLv3:
+    raise_warning("OpenSSL library does not support SSL3 protocol");
+    return false;
+#endif
 
   /* SSLv2 protocol might be disabled in the OpenSSL library */
 #ifndef OPENSSL_NO_SSL2
@@ -468,6 +537,8 @@ bool SSLSocket::setupCrypto(SSLSocket *session /* = NULL */) {
     SSL_CTX_free(ctx);
     return false;
   }
+
+  m_data->m_ctx = ctx;
 
   if (!SSL_set_fd(m_data->m_handle, getFd())) {
     handleError(0, true);
@@ -523,6 +594,10 @@ bool SSLSocket::applyVerificationPolicy(X509 *peer) {
       return false;
     } else if (name_len != (int)strlen(buf)) {
       raise_warning("Peer certificate CN=`%.*s' is malformed", name_len, buf);
+      return false;
+    } else if (name_len == sizeof(buf)) {
+      raise_warning("Peer certificate CN=`%.*s' is too long to verify",
+                    name_len, buf);
       return false;
     }
 
@@ -585,7 +660,7 @@ bool SSLSocket::enableCrypto(bool activate /* = true */) {
           (tvs.tv_sec + (double) tvs.tv_usec / 1000000);
         if (timeout < 0) {
           raise_warning("SSL: connection timeout");
-          return -1;
+          return false;
         }
       } else {
         n = SSL_accept(m_data->m_handle);
@@ -615,7 +690,7 @@ bool SSLSocket::enableCrypto(bool activate /* = true */) {
          * and/or the certificate chain */
         if (m_context[s_capture_peer_cert].toBoolean()) {
           m_context.set(s_peer_certificate,
-                        Variant(makeSmartPtr<Certificate>(peer_cert)));
+                        Variant(req::make<Certificate>(peer_cert)));
           peer_cert = nullptr;
         }
 
@@ -625,7 +700,7 @@ bool SSLSocket::enableCrypto(bool activate /* = true */) {
           if (chain) {
             for (int i = 0; i < sk_X509_num(chain); i++) {
               X509 *mycert = X509_dup(sk_X509_value(chain, i));
-              arr.append(Variant(makeSmartPtr<Certificate>(mycert)));
+              arr.append(Variant(req::make<Certificate>(mycert)));
             }
           }
           m_context.set(s_peer_certificate_chain, arr);
@@ -718,7 +793,7 @@ BIO *Certificate::ReadData(const Variant& var, bool *file /* = NULL */) {
 }
 
 
-SmartPtr<Certificate> Certificate::Get(const Variant& var) {
+req::ptr<Certificate> Certificate::Get(const Variant& var) {
   if (var.isResource()) {
     return dyn_cast_or_null<Certificate>(var);
   }
@@ -739,7 +814,7 @@ SmartPtr<Certificate> Certificate::Get(const Variant& var) {
     cert = PEM_read_bio_X509(in, nullptr, nullptr, nullptr);
     BIO_free(in);
     if (cert) {
-      return makeSmartPtr<Certificate>(cert);
+      return req::make<Certificate>(cert);
     }
   }
   return nullptr;

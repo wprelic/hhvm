@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,20 +18,19 @@
 
 #include "hphp/runtime/base/type-array.h"
 #include "hphp/runtime/ext/asio/asio-context.h"
-#include "hphp/runtime/ext/asio/async-function-wait-handle.h"
-#include "hphp/runtime/ext/asio/async-generator-wait-handle.h"
-#include "hphp/runtime/ext/asio/await-all-wait-handle.h"
-#include "hphp/runtime/ext/asio/condition-wait-handle.h"
-#include "hphp/runtime/ext/asio/gen-array-wait-handle.h"
-#include "hphp/runtime/ext/asio/gen-map-wait-handle.h"
-#include "hphp/runtime/ext/asio/gen-vector-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_async-function-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_async-generator-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_await-all-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_condition-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_gen-array-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_gen-map-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_gen-vector-wait-handle.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
 
 namespace {
-
-typedef AsioBlockable::Kind Kind;
+using Kind = AsioBlockable::Kind;
 
 template<class T>
 inline T* getContainingObject(const AsioBlockable* blockable) {
@@ -55,11 +54,11 @@ inline c_AsyncGeneratorWaitHandle* getAsyncGeneratorWaitHandle(
   return getContainingObject<c_AsyncGeneratorWaitHandle>(blockable);
 }
 
-inline c_AwaitAllWaitHandle* getAwaitAllWaitHandle(
+inline c_AwaitAllWaitHandle::Node* getAwaitAllWaitHandleNode(
   const AsioBlockable* blockable
 ) {
-  assert(blockable->getKind() == Kind::AwaitAllWaitHandle);
-  return getContainingObject<c_AwaitAllWaitHandle>(blockable);
+  assert(blockable->getKind() == Kind::AwaitAllWaitHandleNode);
+  return getContainingObject<c_AwaitAllWaitHandle::Node>(blockable);
 }
 
 inline c_ConditionWaitHandle* getConditionWaitHandle(
@@ -120,6 +119,15 @@ inline void exitContextImpl(
 }
 
 inline void exitContextImpl(
+  c_AwaitAllWaitHandle::Node* node,
+  context_idx_t ctx_idx
+) {
+  if (node->isFirstUnfinishedChild()) {
+    exitContextImpl(node->getWaitHandle(), ctx_idx);
+  }
+}
+
+inline void exitContextImpl(
   c_ConditionWaitHandle* waitHandle,
   context_idx_t ctx_idx
 ) {
@@ -139,8 +147,8 @@ c_WaitableWaitHandle* AsioBlockable::getWaitHandle() const {
       return getAsyncFunctionWaitHandleNode(this)->getWaitHandle();
     case Kind::AsyncGeneratorWaitHandle:
       return getAsyncGeneratorWaitHandle(this);
-    case Kind::AwaitAllWaitHandle:
-      return getAwaitAllWaitHandle(this);
+    case Kind::AwaitAllWaitHandleNode:
+      return getAwaitAllWaitHandleNode(this)->getWaitHandle();
     case Kind::ConditionWaitHandle:
       return getConditionWaitHandle(this);
     case Kind::GenArrayWaitHandle:
@@ -164,8 +172,8 @@ void AsioBlockableChain::unblock() {
       case Kind::AsyncGeneratorWaitHandle:
         getAsyncGeneratorWaitHandle(cur)->onUnblocked();
         break;
-      case Kind::AwaitAllWaitHandle:
-        getAwaitAllWaitHandle(cur)->onUnblocked();
+      case Kind::AwaitAllWaitHandleNode:
+        getAwaitAllWaitHandleNode(cur)->onUnblocked();
         break;
       case Kind::ConditionWaitHandle:
         getConditionWaitHandle(cur)->onUnblocked();
@@ -192,8 +200,8 @@ void AsioBlockableChain::exitContext(context_idx_t ctx_idx) {
       case Kind::AsyncGeneratorWaitHandle:
         exitContextImpl(getAsyncGeneratorWaitHandle(cur), ctx_idx);
         break;
-      case Kind::AwaitAllWaitHandle:
-        exitContextImpl(getAwaitAllWaitHandle(cur), ctx_idx);
+      case Kind::AwaitAllWaitHandleNode:
+        exitContextImpl(getAwaitAllWaitHandleNode(cur), ctx_idx);
         break;
       case Kind::ConditionWaitHandle:
         exitContextImpl(getConditionWaitHandle(cur), ctx_idx);
@@ -211,12 +219,33 @@ void AsioBlockableChain::exitContext(context_idx_t ctx_idx) {
   }
 }
 
+// Currently only AAWH utilizes this to handle failures.
+void AsioBlockableChain::removeFromChain(AsioBlockable* ab) {
+  AsioBlockable* prev = nullptr;
+  for (AsioBlockable* cur = m_firstParent, *next; cur; cur = next) {
+    next = cur->getNextParent();
+    if (ab == cur) {
+      // Found the AAWH we need to remove
+      assert(cur->getKind() == Kind::AwaitAllWaitHandleNode);
+      if (prev == nullptr) {
+        m_firstParent = next;
+      } else {
+        prev->updateNextParent(next);
+      }
+      return;
+    }
+    prev = cur;
+  }
+  // We should always be able to find the parent.
+  assert(false);
+}
+
 Array AsioBlockableChain::toArray() {
   Array result = Array::Create();
   for (auto cur = m_firstParent; cur; cur = cur->getNextParent()) {
     auto const wh = cur->getWaitHandle();
     if (!wh->isFinished()) {
-      result.append(wh);
+      result.append(Variant{wh});
     }
   }
   return result;

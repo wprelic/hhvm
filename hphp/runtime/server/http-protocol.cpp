@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -106,6 +106,7 @@ const StaticString
   s_CONTENT_LENGTH("CONTENT_LENGTH"),
   s_PHP_AUTH_USER("PHP_AUTH_USER"),
   s_PHP_AUTH_PW("PHP_AUTH_PW"),
+  s_PHP_AUTH_DIGEST("PHP_AUTH_DIGEST"),
   s_REQUEST_URI("REQUEST_URI"),
   s_SCRIPT_URL("SCRIPT_URL"),
   s_SCRIPT_URI("SCRIPT_URI"),
@@ -181,6 +182,9 @@ static void PrepareEnv(Array& env, Transport *transport) {
     break;
   case Arch::ARM:
     env.set(s_HHVM_ARCH, "arm");
+    break;
+  case Arch::PPC64:
+    env.set(s_HHVM_ARCH, "ppc64");
     break;
   }
 
@@ -300,7 +304,7 @@ void HttpProtocol::PrepareSystemVariables(Transport *transport,
       case 'P':
         postPopulated = true;
         PreparePostVariables(POSTarr, HTTP_RAW_POST_DATA,
-                             FILESarr, transport);
+                             FILESarr, transport, r);
         break;
       case 'c':
       case 'C':
@@ -323,7 +327,7 @@ void HttpProtocol::PrepareSystemVariables(Transport *transport,
     Array dummyPost(Array::Create());
     Array dummyFiles(Array::Create());
     PreparePostVariables(dummyPost, HTTP_RAW_POST_DATA,
-                         dummyFiles, transport);
+                         dummyFiles, transport, r);
   }
 
   PrepareRequestVariables(REQUESTarr,
@@ -367,7 +371,8 @@ void HttpProtocol::PrepareGetVariable(Array& get,
 void HttpProtocol::PreparePostVariables(Array& post,
                                         Variant& raw_post,
                                         Array& files,
-                                        Transport *transport) {
+                                        Transport *transport,
+                                        const RequestURI& r) {
   if (transport->getMethod() != Transport::Method::POST) {
     return;
   }
@@ -428,8 +433,13 @@ void HttpProtocol::PreparePostVariables(Array& post,
       bool decodeData = strncasecmp(contentType.c_str(),
                                     DEFAULT_POST_CONTENT_TYPE,
                                     sizeof(DEFAULT_POST_CONTENT_TYPE)-1) == 0;
-      // Always decode data for now. (macvicar)
-      decodeData = true;
+
+      if (!decodeData) {
+        auto vhost = VirtualHost::GetCurrent();
+        if (vhost && vhost->alwaysDecodePostData(r.originalURL())) {
+          decodeData = true;
+        }
+      }
 
       if (decodeData) {
         DecodeParameters(post, (const char*)data, size, true);
@@ -611,6 +621,8 @@ static void CopyAuthInfo(Array& server, Transport *transport) {
         server.set(s_PHP_AUTH_USER, decodedAuth.substr(0, colonPos));
         server.set(s_PHP_AUTH_PW, decodedAuth.substr(colonPos + 1));
       }
+    } else if (strncmp(authorization.c_str(), "Digest ", 7) == 0) {
+      server.set(s_PHP_AUTH_DIGEST, String(authorization.c_str() + 7));
     }
   }
 }

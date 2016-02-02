@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -56,16 +56,10 @@ const StringData*     Func::s___callStatic = makeStaticString("__callStatic");
 std::atomic<bool>     Func::s_treadmill;
 
 /*
- * This size hint will create a ~6MB vector and is rarely hit in practice.
- * Note that this is just a hint and exceeding it won't affect correctness.
- */
-constexpr size_t kFuncVecSizeHint = 750000;
-
-/*
  * FuncId high water mark and FuncId -> Func* table.
  */
 static std::atomic<FuncId> s_nextFuncId(0);
-static AtomicVector<const Func*> s_funcVec(kFuncVecSizeHint, nullptr);
+static AtomicVector<const Func*> s_funcVec(kFuncCountHint, nullptr);
 
 const AtomicVector<const Func*>& Func::getFuncVec() {
   return s_funcVec;
@@ -103,7 +97,8 @@ void* Func::allocFuncMem(int numParams) {
   int maxNumPrologues = Func::getMaxNumPrologues(numParams);
   int numExtraPrologues = std::max(maxNumPrologues - kNumFixedPrologues, 0);
 
-  size_t funcSize = sizeof(Func) + numExtraPrologues * sizeof(unsigned char*);
+  auto const funcSize =
+    sizeof(Func) + numExtraPrologues * sizeof(m_prologueTable[0]);
 
   return low_malloc(funcSize);
 }
@@ -128,12 +123,32 @@ void Func::destroy(Func* func) {
   low_free(func);
 }
 
-void Func::smashPrologues() {
+void Func::freeClone() {
+  assert(isPreFunc());
+  assert(m_cloned.flag.test_and_set());
+
+  if (mcg && RuntimeOption::EvalEnableReusableTC) {
+    // Free TC-space associated with func
+    jit::reclaimFunction(this);
+  } else {
+    smashPrologues();
+  }
+
+  if (m_funcId != InvalidFuncId) {
+    DEBUG_ONLY auto oldVal = s_funcVec.exchange(m_funcId, nullptr);
+    assert(oldVal == this);
+    m_funcId = InvalidFuncId;
+  }
+
+  m_cloned.flag.clear();
+}
+
+void Func::smashPrologues() const {
   int maxNumPrologues = getMaxNumPrologues(numParams());
   int numPrologues =
     maxNumPrologues > kNumFixedPrologues ? maxNumPrologues
                                          : kNumFixedPrologues;
-  mcg->smashPrologueGuards((jit::TCA*)m_prologueTable,
+  mcg->smashPrologueGuards((AtomicLowPtr<uint8_t>*)m_prologueTable,
                            numPrologues, this);
 }
 
@@ -159,7 +174,7 @@ Func* Func::clone(Class* cls, const StringData* name) const {
   f->setFullName(numParams);
 
   if (f != this) {
-    f->m_cachedFunc = rds::Link<Func*>{rds::kInvalidHandle};
+    f->m_cachedFunc = rds::Link<LowPtr<Func>>{rds::kInvalidHandle};
     f->m_maybeIntercepted = -1;
     f->m_isPreFunc = false;
   }
@@ -244,7 +259,7 @@ void Func::setFullName(int numParams) {
     // `methodSlot', which refers to its slot in its `baseCls' (which still
     // points to a subclass of Closure).
     if (!isMethod()) {
-      m_namedEntity = NamedEntity::get(m_name);
+      setNamedEntity(NamedEntity::get(m_name));
     }
   }
   if (RuntimeOption::EvalPerfDataMap) {
@@ -257,10 +272,13 @@ void Func::setFullName(int numParams) {
     char* to = (char*)(m_prologueTable + numPrologues);
 
     Debug::DebugInfo::recordDataMap(
-      from, to, folly::format("Func-{}",
-                              (isPseudoMain() ?
-                               m_unit->filepath()->data() :
-                               m_fullName->data())).str());
+      from,
+      to,
+      folly::format(
+        "Func-{}",
+        isPseudoMain() ? m_unit->filepath() : m_fullName.get()
+      ).str()
+    );
   }
   if (RuntimeOption::DynamicInvokeFunctions.size()) {
     if (RuntimeOption::DynamicInvokeFunctions.find(m_fullName->data()) !=
@@ -501,7 +519,7 @@ bool Func::isNameBindingImmutable(const Unit* fromUnit) const {
     return true;
   }
 
-  if (isUnique() && RuntimeOption::RepoAuthoritative) {
+  if (isUnique()) {
     return true;
   }
 
@@ -614,7 +632,7 @@ void Func::prettyPrint(std::ostream& out, const PrintOpts& opts) const {
   if (!opts.metadata) return;
 
   const ParamInfoVec& params = shared()->m_params;
-  for (uint i = 0; i < params.size(); ++i) {
+  for (uint32_t i = 0; i < params.size(); ++i) {
     if (params[i].funcletOff != InvalidAbsoluteOffset) {
       out << " DV for parameter " << i << " at " << params[i].funcletOff;
       if (params[i].phpCode) {
@@ -691,6 +709,7 @@ Func::SharedData::SharedData(PreClass* preClass, Offset base, Offset past,
   , m_isPairGenerator(false)
   , m_isGenerated(false)
   , m_hasExtendedSharedData(false)
+  , m_returnByValue(false)
   , m_originalFilename(nullptr)
 {
   m_pastDelta = std::min<uint32_t>(past - base, kSmallDeltaLimit);

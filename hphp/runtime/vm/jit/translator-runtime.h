@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,10 +19,8 @@
 
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/typed-value.h"
-
 #include "hphp/runtime/vm/bytecode.h"
 
-#include "hphp/runtime/vm/jit/abi-x64.h"
 #include "hphp/runtime/vm/jit/types.h"
 
 struct _Unwind_Exception;
@@ -87,26 +85,23 @@ ArrayData* addElemStringKeyHelper(ArrayData* ad, StringData* key,
                                   TypedValue val);
 void setNewElem(TypedValue* base, Cell val);
 void setNewElemArray(TypedValue* base, Cell val);
-void bindNewElemIR(TypedValue* base, RefData* val, MInstrState* mis);
 RefData* boxValue(TypedValue tv);
 ArrayData* arrayAdd(ArrayData* a1, ArrayData* a2);
-TypedValue setOpElem(TypedValue* base, TypedValue key,
-                     Cell val, MInstrState* mis, SetOpOp op);
-TypedValue incDecElem(TypedValue* base, TypedValue key,
-                      MInstrState* mis, IncDecOp op);
 /* Helper functions for conversion instructions that are too
  * complicated to inline
  */
 ArrayData* convCellToArrHelper(TypedValue tv);
+int64_t convObjToDblHelper(const ObjectData* o);
 int64_t convArrToDblHelper(ArrayData* a);
 int64_t convStrToDblHelper(const StringData* s);
+int64_t convResToDblHelper(const ResourceHdr* r);
 int64_t convCellToDblHelper(TypedValue tv);
 int64_t convArrToIntHelper(ArrayData* a);
 ObjectData* convCellToObjHelper(TypedValue tv);
 StringData* convDblToStrHelper(int64_t i);
 StringData* convIntToStrHelper(int64_t i);
 StringData* convObjToStrHelper(ObjectData* o);
-StringData* convResToStrHelper(ResourceData* o);
+StringData* convResToStrHelper(ResourceHdr* o);
 StringData* convCellToStrHelper(TypedValue tv);
 
 
@@ -129,7 +124,7 @@ void VerifyRetTypeSlow(const Class* cls,
                        const HPHP::TypeConstraint* expected,
                        const TypedValue value);
 void VerifyRetTypeCallable(TypedValue value);
-void VerifyRetTypeFail(const TypedValue value);
+void VerifyRetTypeFail(TypedValue* value);
 
 void raise_error_sd(const StringData* sd);
 
@@ -166,8 +161,6 @@ int64_t switchObjHelper(ObjectData* o, int64_t base, int64_t nTargets);
 typedef FixedStringMap<TCA,true> SSwitchMap;
 TCA sswitchHelperFast(const StringData* val, const SSwitchMap* table, TCA* def);
 
-void tv_release_generic(TypedValue* tv);
-
 void profileObjClassHelper(ClassProfile*, ObjectData*);
 
 Cell lookupCnsHelper(const TypedValue* tv,
@@ -188,11 +181,11 @@ void loadArrayFunctionContext(ArrayData*, ActRec* preLiveAR, ActRec* fp);
 void fpushCufHelperArray(ArrayData*, ActRec* preLiveAR, ActRec* fp);
 void fpushCufHelperString(StringData*, ActRec* preLiveAR, ActRec* fp);
 
-const Func* loadClassCtor(Class* cls);
+const Func* loadClassCtor(Class* cls, ActRec* fp);
 const Func* lookupUnknownFunc(const StringData*);
 const Func* lookupFallbackFunc(const StringData*, const StringData*);
 
-Class* lookupKnownClass(Class** cache, const StringData* clsName);
+Class* lookupKnownClass(LowPtr<Class>* cache, const StringData* clsName);
 
 TypedValue lookupClassConstantTv(TypedValue* cache,
                                  const NamedEntity* ne,
@@ -220,23 +213,24 @@ rds::Handle lookupClsRDSHandle(const StringData* name);
  */
 void registerLiveObj(ObjectData* obj);
 
-/*
- * Set tl_regState to CLEAN and call _Unwind_Resume.
- */
-void unwindResumeHelper();
+/* Check if a method of the given name exists on the class. */
+bool methodExistsHelper(Class*, StringData*);
 
 /*
  * Throw a VMSwitchMode exception.
  */
-void throwSwitchMode() ATTRIBUTE_NORETURN;
+ATTRIBUTE_NORETURN void throwSwitchMode();
 
 namespace MInstrHelpers {
+TypedValue setOpElem(TypedValue* base, TypedValue key, Cell val, SetOpOp op);
 StringData* stringGetI(StringData*, uint64_t);
 uint64_t pairIsset(c_Pair*, int64_t);
 uint64_t vectorIsset(c_Vector*, int64_t);
-void bindElemC(TypedValue*, TypedValue, RefData*, MInstrState*);
-void setWithRefElemC(TypedValue*, TypedValue, TypedValue, MInstrState*);
-void setWithRefNewElem(TypedValue*, TypedValue, MInstrState*);
+void bindElemC(TypedValue*, TypedValue, RefData*);
+void setWithRefElemC(TypedValue*, TypedValue, TypedValue);
+void setWithRefNewElem(TypedValue*, TypedValue);
+TypedValue incDecElem(TypedValue* base, TypedValue key, IncDecOp op);
+void bindNewElem(TypedValue* base, RefData* val);
 }
 
 /*

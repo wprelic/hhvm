@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -22,14 +22,12 @@
 #include <cstdio>
 
 #include <sys/types.h>
-#if defined(__CYGWIN__) || defined(__MINGW__)
-#include <pthread.h>
-#elif defined(_MSC_VER)
-#include <windows.h>
+#ifdef _MSC_VER
+# include <windows.h>
 #else
-#include <sys/syscall.h>
+# include <sys/syscall.h>
+# include <unistd.h>
 #endif
-#include <unistd.h>
 #include <pthread.h>
 
 namespace HPHP {
@@ -107,7 +105,11 @@ public:
    * Get command line with a process ID.
    */
   static std::string GetCommandLine(pid_t pid);
-  static bool CommandStartsWith(pid_t pid, const std::string &cmd);
+
+  /**
+   * Check if the current process is being run under GDB.  Will return false if
+   * we're unable to read /proc/{Process::GetProcessId()}/status.
+   */
   static bool IsUnderGDB();
 
   /**
@@ -152,7 +154,7 @@ public:
 #elif defined(__CYGWIN__) || defined(__MINGW__)
     return (long)pthread_self();
 #elif defined(_MSC_VER)
-  return GetCurrentThreadId();
+    return GetCurrentThreadId();
 #else
     return syscall(SYS_gettid);
 #endif
@@ -227,7 +229,11 @@ public:
 
 private:
   static int Exec(const char *path, const char *argv[], int *fdin, int *fdout,
-                  int *fderr);
+                  int *fderr
+#ifdef _MSC_VER
+                  , PROCESS_INFORMATION* procInfo
+#endif
+                 );
 };
 
 ///////////////////////////////////////////////////////////////////////////////

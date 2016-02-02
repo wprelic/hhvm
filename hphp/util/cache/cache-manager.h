@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -36,8 +36,6 @@
 #include <string>
 #include <vector>
 
-#include <boost/utility.hpp>
-
 namespace HPHP {
 
 class CacheData;
@@ -49,10 +47,13 @@ enum class VFileType : uint8_t {
   Directory
 };
 
-class CacheManager : private boost::noncopyable {
+class CacheManager {
  public:
   CacheManager();
   ~CacheManager();
+
+  CacheManager(const CacheManager&) = delete;
+  CacheManager& operator=(const CacheManager&) = delete;
 
   // Look up a named file to retrieve its contents.
   //
@@ -120,7 +121,7 @@ class CacheManager : private boost::noncopyable {
   void dump() const;
 
  private:
-  using CacheMap = struct std::map<std::string, std::unique_ptr<CacheData>>;
+  using CacheMap = std::map<std::string, std::unique_ptr<CacheData>>;
 
   void addDirectories(const std::string& name);
 

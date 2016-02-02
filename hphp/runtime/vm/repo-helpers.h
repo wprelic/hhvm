@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,7 +23,6 @@
 #include "hphp/util/md5.h"
 #include "hphp/util/portability.h"
 
-#include <boost/noncopyable.hpp>
 #include <sqlite3.h>
 
 namespace HPHP {
@@ -44,7 +43,8 @@ enum RepoId {
 };
 
 struct RepoExc : std::exception {
-  RepoExc(const char* fmt, ...) ATTRIBUTE_PRINTF(2, 3) {
+  RepoExc(ATTRIBUTE_PRINTF_STRING const char* fmt, ...)
+    ATTRIBUTE_PRINTF(2, 3) {
     va_list(ap);
     va_start(ap, fmt);
     char* msg;
@@ -154,10 +154,13 @@ class RepoQuery {
  * Semantics: the guard object will rollback the transaction unless
  * you tell it not to.  Call .commit() when you want things to stay.
  */
-class RepoTxn : boost::noncopyable {
+class RepoTxn {
  public:
   explicit RepoTxn(Repo& repo);
   ~RepoTxn();
+
+  RepoTxn(const RepoTxn&) = delete;
+  RepoTxn& operator=(const RepoTxn&) = delete;
 
   /*
    * All these routines may throw if there is an error accessing the

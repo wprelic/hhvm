@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,7 +16,6 @@
 #ifndef incl_HPHP_SRCKEY_H_
 #define incl_HPHP_SRCKEY_H_
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/vm/hhbc.h"
 
 #include <boost/operators.hpp>
@@ -177,7 +176,8 @@ using SrcKeySet = hphp_hash_set<SrcKey,SrcKey::Hasher>;
 std::string show(SrcKey sk);
 std::string showShort(SrcKey sk);
 
-void sktrace(SrcKey sk, const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
+void sktrace(SrcKey sk, ATTRIBUTE_PRINTF_STRING const char *fmt, ...)
+  ATTRIBUTE_PRINTF(2,3);
 #define SKTRACE(level, sk, ...) \
   ONTRACE(level, sktrace(sk, __VA_ARGS__))
 

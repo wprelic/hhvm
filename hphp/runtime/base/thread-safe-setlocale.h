@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,7 +19,7 @@
 
 #include <vector>
 #include <string>
-#include <xlocale.h>
+#include "hphp/util/locale-portability.h"
 #include "hphp/util/thread-local.h"
 
 namespace HPHP {
@@ -44,7 +44,9 @@ private:
   void generate_LC_ALL_String();
 
   std::vector<CategoryAndLocaleMap> m_category_locale_map;
+#ifndef _MSC_VER
   locale_t m_locale;
+#endif
 };
 
 extern DECLARE_THREAD_LOCAL(ThreadSafeLocaleHandler,

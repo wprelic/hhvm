@@ -12,14 +12,16 @@
 unset CDPATH
 DIR="$( cd "$( dirname "$0" )" && pwd )"
 
-# OSS version depends on this fallback since it's
-# obviously not using fbmake
+# OSS version depends on this fallback since it's obviously not using fbmake.
 if [ x"$FBMAKE_PRE_COMMAND_OUTDIR" = x"" ]; then
-  FBMAKE_PRE_COMMAND_OUTDIR="$DIR/../"
+  BUILD_DIR="$DIR/../"
+else
+  # Should be in /some/path/hphp/util/, so chop off the hphp/util.
+  BUILD_DIR="$DIR/../../$FBMAKE_PRE_COMMAND_OUTDIR"
 fi
 
-BUILDINFO_FILE="$FBMAKE_PRE_COMMAND_OUTDIR/hphp-build-info.cpp"
-REPO_SCHEMA_H="$FBMAKE_PRE_COMMAND_OUTDIR/hphp-repo-schema.h"
+BUILDINFO_FILE="$BUILD_DIR/hphp-build-info.cpp"
+REPO_SCHEMA_H="$BUILD_DIR/hphp-repo-schema.h"
 
 if git rev-parse --show-toplevel >& /dev/null; then
     scm=git
@@ -31,14 +33,16 @@ else
     if hg root >& /dev/null; then
         scm=hg
         root=$(hg root)
-        compiler="hg log -r . --template '{branch}-0-g{gitnode}' 2> /dev/null"
-        compiler="$compiler || hg log -r . --template '{branch}-0-h{node}'"
+        if [ -f "$root/fbcode/.projectid" ]; then
+          root="$root/fbcode"
+        fi
+        compiler="hg --config trusted.users='*' log -l1 -r'reverse(::.) & file(\"$root/**\")' -T'{branch}-0-g{sub(r\"^\$\",node,mirrornode(\"fbcode\",\"git\"))}\n' 2> /dev/null"
         find_files="hg files -I hphp/"
         alias scm_update='hg pull && hg rebase -d master'
     else
         scm=""
         root=$DIR/../../
-        find_files='find hphp \( -type f -o -type l \) \! -iregex ".*\(~\|#.*\|\.swp\|/tags\|/.bash_history\|/out\)" | sort'
+        find_files='find hphp \( -type f -o -type l \) \! -iregex ".*\(~\|#.*\|\.swp\|/tags\|/.bash_history\|/out\)" | LC_ALL=C sort'
     fi
 fi
 

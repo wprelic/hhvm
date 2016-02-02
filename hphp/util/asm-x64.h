@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,7 +16,6 @@
 #ifndef incl_HPHP_UTIL_ASM_X64_H_
 #define incl_HPHP_UTIL_ASM_X64_H_
 
-#include <boost/noncopyable.hpp>
 #include <type_traits>
 
 #include "hphp/util/data-block.h"
@@ -108,6 +107,7 @@ struct RegRIP {
 
 // Convert between physical registers of different sizes
 inline Reg8 rbyte(Reg32 r)     { return Reg8(int(r)); }
+inline Reg8 rbyte(Reg64 r)     { return Reg8(int(r)); }
 inline Reg16 r16(Reg8 r)       { return Reg16(int(r)); }
 inline Reg32 r32(Reg8 r)       { return Reg32(int(r)); }
 inline Reg32 r32(Reg16 r)      { return Reg32(int(r)); }
@@ -711,7 +711,7 @@ struct Label;
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-class X64Assembler : private boost::noncopyable {
+class X64Assembler {
   friend struct Label;
 
   /*
@@ -725,6 +725,9 @@ class X64Assembler : private boost::noncopyable {
 
 public:
   explicit X64Assembler(CodeBlock& cb) : codeBlock(cb) {}
+
+  X64Assembler(const X64Assembler&) = delete;
+  X64Assembler& operator=(const X64Assembler&) = delete;
 
   CodeBlock& code() const { return codeBlock; }
 
@@ -982,6 +985,7 @@ public:
 
   void jmp(Reg64 r)            { instrR(instr_jmp, r); }
   void jmp(MemoryRef m)        { instrM(instr_jmp, m); }
+  void jmp(RIPRelativeRef m)   { instrM(instr_jmp, m); }
   void call(Reg64 r)           { instrR(instr_call, r); }
   void call(MemoryRef m)       { instrM(instr_call, m); }
   void call(RIPRelativeRef m)  { instrM(instr_call, m); }
@@ -2084,7 +2088,7 @@ private:
 
 //////////////////////////////////////////////////////////////////////
 
-struct Label : private boost::noncopyable {
+struct Label {
   explicit Label()
     : m_a(nullptr)
     , m_address(nullptr)
@@ -2104,6 +2108,9 @@ struct Label : private boost::noncopyable {
       }
     }
   }
+
+  Label(const Label&) = delete;
+  Label& operator=(const Label&) = delete;
 
   void jmp(X64Assembler& a) {
     addJump(&a, Branch::Jmp);

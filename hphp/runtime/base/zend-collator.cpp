@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1998-2010 Zend Technologies Ltd. (http://www.zend.com) |
    +----------------------------------------------------------------------+
    | This source file is subject to version 2.00 of the Zend license,     |
@@ -19,7 +19,6 @@
 #include "hphp/runtime/base/intl-convert.h"
 #include "hphp/runtime/base/type-conversions.h"
 #include "hphp/runtime/base/builtin-functions.h"
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/array-iterator.h"
 #include "hphp/runtime/base/comparisons.h"
@@ -85,7 +84,7 @@ static double collator_u_strtod(const UChar *nptr, UChar **endptr) {
     if (length < (int)sizeof(buf)) {
       numbuf = buf;
     } else {
-      numbuf = (char *) smart_malloc(length + 1);
+      numbuf = (char *) req::malloc(length + 1);
     }
 
     bufpos = numbuf;
@@ -98,7 +97,7 @@ static double collator_u_strtod(const UChar *nptr, UChar **endptr) {
     value = zend_strtod(numbuf, nullptr);
 
     if (numbuf != buf) {
-      smart_free(numbuf);
+      req::free(numbuf);
     }
 
     if (endptr != nullptr) {
@@ -288,7 +287,7 @@ static String intl_convert_str_utf8_to_utf16(const String& utf8_str,
                              utf8_str.data(), utf8_str.length(),
                              status);
   if (U_FAILURE(*status)) {
-    return (const char *)(L"");
+    return empty_string();
   }
   return String((char*)ustr, UBYTES(ustr_len), AttachString);
 }

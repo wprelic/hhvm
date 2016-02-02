@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,29 +18,32 @@
 #define HPHP_STREAM_WRAPPER_H
 
 #include <string>
-#include "hphp/runtime/base/types.h"
+
 #include "hphp/runtime/base/directory.h"
 #include "hphp/runtime/base/file.h"
-#include "hphp/runtime/base/smart-ptr.h"
-
-#include <boost/noncopyable.hpp>
+#include "hphp/runtime/base/req-ptr.h"
 
 struct stat;
 
 namespace HPHP {
 class StreamContext;
+
 namespace Stream {
 ///////////////////////////////////////////////////////////////////////////////
 
-class Wrapper : boost::noncopyable {
+class Wrapper {
  public:
   Wrapper() : m_isLocal(true) { }
+
+  Wrapper(const Wrapper&) = delete;
+  Wrapper& operator=(const Wrapper&) = delete;
+
   void registerAs(const std::string &scheme);
 
-  virtual SmartPtr<File> open(const String& filename,
+  virtual req::ptr<File> open(const String& filename,
                               const String& mode,
                               int options,
-                              const SmartPtr<StreamContext>& context) = 0;
+                              const req::ptr<StreamContext>& context) = 0;
   virtual int access(const String& path, int mode) {
     return -1;
   }
@@ -62,11 +65,13 @@ class Wrapper : boost::noncopyable {
   virtual int rmdir(const String& path, int options) {
     return -1;
   }
-  virtual SmartPtr<Directory> opendir(const String& path) {
+  virtual req::ptr<Directory> opendir(const String& path) {
     return nullptr;
   }
 
   virtual ~Wrapper() {}
+
+  virtual void vscan(IMarker& mark) const {}
 
   /**
    * Is there a chance that open() could return a file that is local?

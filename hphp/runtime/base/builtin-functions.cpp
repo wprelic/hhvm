@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -26,10 +26,9 @@
 #include "hphp/runtime/base/strings.h"
 #include "hphp/runtime/base/unit-cache.h"
 #include "hphp/runtime/debugger/debugger.h"
-#include "hphp/runtime/ext/process/ext_process.h"
 #include "hphp/runtime/ext/std/ext_std_function.h"
-#include "hphp/runtime/ext/ext_closure.h"
-#include "hphp/runtime/ext/ext_collections.h"
+#include "hphp/runtime/ext/std/ext_std_closure.h"
+#include "hphp/runtime/ext/collections/ext_collections-idl.h"
 #include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/util/logger.h"
 #include "hphp/util/process.h"
@@ -67,6 +66,11 @@ const StaticString
   s_self("self"),
   s_parent("parent"),
   s_static("static");
+
+const StaticString s_cmpWithCollection(
+  "Cannot use relational comparison operators (<, <=, >, >=) to compare "
+  "a collection with an integer, double, string, array, or object"
+);
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -111,12 +115,12 @@ bool is_callable(const Variant& v, bool syntax_only, RefData* name) {
   }
 
   auto const tv_func = v.asCell();
-  if (IS_STRING_TYPE(tv_func->m_type)) {
+  if (isStringType(tv_func->m_type)) {
     if (name) *name->var() = v;
     return ret;
   }
 
-  if (tv_func->m_type == KindOfArray) {
+  if (isArrayType(tv_func->m_type)) {
     const Array& arr = Array(tv_func->m_data.parr);
     const Variant& clsname = arr.rvalAtRef(int64_t(0));
     const Variant& mthname = arr.rvalAtRef(int64_t(1));
@@ -132,7 +136,7 @@ bool is_callable(const Variant& v, bool syntax_only, RefData* name) {
     StringData* clsString = nullptr;
     if (tv_cls->m_type == KindOfObject) {
       clsString = tv_cls->m_data.pobj->getClassName().get();
-    } else if (IS_STRING_TYPE(tv_cls->m_type)) {
+    } else if (isStringType(tv_cls->m_type)) {
       clsString = tv_cls->m_data.pstr;
     } else {
       if (name) *name->var() = array_string;
@@ -140,7 +144,9 @@ bool is_callable(const Variant& v, bool syntax_only, RefData* name) {
     }
 
     if (name) {
-      *name->var() = concat3(clsString, s_colon2, tv_meth->m_data.pstr);
+      *name->var() = concat3(String{clsString},
+                             s_colon2,
+                             String{tv_meth->m_data.pstr});
     }
     return ret;
   }
@@ -454,11 +460,13 @@ static Variant invoke_failed(const char *func,
 
 static Variant invoke(const String& function, const Variant& params,
                       strhash_t hash, bool tryInterp,
-                      bool fatal) {
+                      bool fatal, bool useWeakTypes = false) {
   Func* func = Unit::loadFunc(function.get());
   if (func && (isContainer(params) || params.isNull())) {
     Variant ret;
-    g_context->invokeFunc(ret.asTypedValue(), func, params);
+    g_context->invokeFunc(ret.asTypedValue(), func, params, nullptr, nullptr,
+                          nullptr, nullptr, ExecutionContext::InvokeNormal,
+                          useWeakTypes);
     if (UNLIKELY(ret.getRawType()) == KindOfRef) {
       tvUnbox(ret.asTypedValue());
     }
@@ -470,9 +478,10 @@ static Variant invoke(const String& function, const Variant& params,
 // Declared in externals.h.  If you're considering calling this
 // function for some new code, please reconsider.
 Variant invoke(const char *function, const Variant& params, strhash_t hash /* = -1 */,
-               bool tryInterp /* = true */, bool fatal /* = true */) {
+               bool tryInterp /* = true */, bool fatal /* = true */,
+               bool useWeakTypes /* = false */) {
   String funcName(function, CopyString);
-  return invoke(funcName, params, hash, tryInterp, fatal);
+  return invoke(funcName, params, hash, tryInterp, fatal, useWeakTypes);
 }
 
 Variant invoke_static_method(const String& s, const String& method,
@@ -503,7 +512,7 @@ Variant o_invoke_failed(const char *cls, const char *meth,
     msg += cls;
     msg += "::";
     msg += meth;
-    throw FatalErrorException(msg.c_str());
+    raise_fatal_error(msg.c_str());
   } else {
     raise_warning("call_user_func to non-existent method %s::%s", cls, meth);
     return false;
@@ -546,11 +555,20 @@ void throw_collection_property_exception() {
     "Cannot access a property on a collection");
 }
 
+void throw_invalid_operation_exception(StringData* str) {
+  SystemLib::throwInvalidOperationExceptionObject(Variant{str});
+}
+
+void throw_arithmetic_error(StringData* str) {
+  SystemLib::throwArithmeticErrorObject(Variant{str});
+}
+
+void throw_division_by_zero_error(StringData *str) {
+  SystemLib::throwDivisionByZeroErrorObject(Variant{str});
+}
+
 void throw_collection_compare_exception() {
-  static const string msg(
-    "Cannot use relational comparison operators (<, <=, >, >=) to compare "
-    "a collection with an integer, double, string, array, or object");
-  SystemLib::throwInvalidOperationExceptionObject(msg);
+  SystemLib::throwInvalidOperationExceptionObject(s_cmpWithCollection);
 }
 
 void throw_param_is_not_container() {
@@ -566,11 +584,11 @@ void throw_cannot_modify_immutable_object(const char* className) {
   SystemLib::throwInvalidOperationExceptionObject(msg);
 }
 
-void check_collection_compare(ObjectData* obj) {
+void check_collection_compare(const ObjectData* obj) {
   if (obj && obj->isCollection()) throw_collection_compare_exception();
 }
 
-void check_collection_compare(ObjectData* obj1, ObjectData* obj2) {
+void check_collection_compare(const ObjectData* obj1, const ObjectData* obj2) {
   if (obj1 && obj2 && (obj1->isCollection() || obj2->isCollection())) {
     throw_collection_compare_exception();
   }
@@ -590,11 +608,17 @@ Object create_object_only(const String& s) {
 }
 
 Object init_object(const String& s, const Array& params, ObjectData* o) {
-  return g_context->initObject(s.get(), params, o);
+  return Object{g_context->initObject(s.get(), params, o)};
 }
 
-Object create_object(const String& s, const Array& params, bool init /* = true */) {
+Object
+create_object(const String& s, const Array& params, bool init /* = true */) {
   return Object::attach(g_context->createObject(s.get(), params, init));
+}
+
+ATTRIBUTE_NORETURN
+void throw_object(const Object& e) {
+  throw e;
 }
 
 /*
@@ -734,19 +758,19 @@ Variant throw_fatal_unset_static_property(const char *s, const char *prop) {
 
 Variant unserialize_ex(const char* str, int len,
                        VariableUnserializer::Type type,
-                       const Array& class_whitelist /* = null_array */) {
+                       const Array& options /* = null_array */) {
   if (str == nullptr || len <= 0) {
     return false;
   }
 
-  VariableUnserializer vu(str, len, type, true, class_whitelist);
+  VariableUnserializer vu(str, len, type, true, options);
   Variant v;
   try {
     v = vu.unserialize();
   } catch (FatalErrorException &e) {
     throw;
   } catch (Exception &e) {
-    raise_notice("Unable to unserialize: [%s]. %s.", str,
+    raise_notice("Unable to unserialize: [%.1000s]. %s.", str,
                  e.getMessage().c_str());
     return false;
   }
@@ -755,37 +779,37 @@ Variant unserialize_ex(const char* str, int len,
 
 Variant unserialize_ex(const String& str,
                        VariableUnserializer::Type type,
-                       const Array& class_whitelist /* = null_array */) {
-  return unserialize_ex(str.data(), str.size(), type, class_whitelist);
+                       const Array& options /* = null_array */) {
+  return unserialize_ex(str.data(), str.size(), type, options);
 }
 
 String concat3(const String& s1, const String& s2, const String& s3) {
-  StringSlice r1 = s1.slice();
-  StringSlice r2 = s2.slice();
-  StringSlice r3 = s3.slice();
-  int len = r1.len + r2.len + r3.len;
+  auto r1 = s1.slice();
+  auto r2 = s2.slice();
+  auto r3 = s3.slice();
+  auto len = r1.size() + r2.size() + r3.size();
   auto str = String::attach(StringData::Make(len));
   auto const r = str.mutableData();
-  memcpy(r,                   r1.ptr, r1.len);
-  memcpy(r + r1.len,          r2.ptr, r2.len);
-  memcpy(r + r1.len + r2.len, r3.ptr, r3.len);
+  memcpy(r,                         r1.data(), r1.size());
+  memcpy(r + r1.size(),             r2.data(), r2.size());
+  memcpy(r + r1.size() + r2.size(), r3.data(), r3.size());
   str.setSize(len);
   return str;
 }
 
 String concat4(const String& s1, const String& s2, const String& s3,
                const String& s4) {
-  StringSlice r1 = s1.slice();
-  StringSlice r2 = s2.slice();
-  StringSlice r3 = s3.slice();
-  StringSlice r4 = s4.slice();
-  int len = r1.len + r2.len + r3.len + r4.len;
+  auto r1 = s1.slice();
+  auto r2 = s2.slice();
+  auto r3 = s3.slice();
+  auto r4 = s4.slice();
+  auto len = r1.size() + r2.size() + r3.size() + r4.size();
   auto str = String::attach(StringData::Make(len));
   auto const r = str.mutableData();
-  memcpy(r,                            r1.ptr, r1.len);
-  memcpy(r + r1.len,                   r2.ptr, r2.len);
-  memcpy(r + r1.len + r2.len,          r3.ptr, r3.len);
-  memcpy(r + r1.len + r2.len + r3.len, r4.ptr, r4.len);
+  memcpy(r,                                     r1.data(), r1.size());
+  memcpy(r + r1.size(),                         r2.data(), r2.size());
+  memcpy(r + r1.size() + r2.size(),             r3.data(), r3.size());
+  memcpy(r + r1.size() + r2.size() + r3.size(), r4.data(), r4.size());
   str.setSize(len);
   return str;
 }
@@ -817,7 +841,7 @@ static Variant invoke_file(const String& s,
 
 Variant include_impl_invoke(const String& file, bool once,
                             const char *currentDir) {
-  if (file[0] == '/') {
+  if (FileUtil::isAbsolutePath(file.toCppString())) {
     if (RuntimeOption::SandboxMode || !RuntimeOption::AlwaysUseRelativePath) {
       try {
         return invoke_file(file, once, currentDir);
@@ -880,7 +904,7 @@ String resolve_include(const String& file, const char* currentDir,
       return file;
     }
 
-  } else if (c_file[0] == '/') {
+  } else if (FileUtil::isAbsolutePath(file.toCppString())) {
     String can_path = FileUtil::canonicalize(file);
 
     if (tryFile(can_path, ctx)) {
@@ -906,7 +930,7 @@ String resolve_include(const String& file, const char* currentDir,
       auto const is_stream_wrapper =
         includePath.find("://") != std::string::npos;
 
-      if (!is_stream_wrapper && includePath[0] != '/') {
+      if (!is_stream_wrapper && !FileUtil::isAbsolutePath(includePath)) {
         path += (g_context->getCwd() + "/");
       }
 
@@ -930,7 +954,7 @@ String resolve_include(const String& file, const char* currentDir,
       }
     }
 
-    if (currentDir[0] == '/') {
+    if (FileUtil::isAbsolutePath(currentDir)) {
       String path(currentDir);
       path += "/";
       path += file;
@@ -967,7 +991,7 @@ static Variant include_impl(const String& file, bool once,
     if (required) {
       String ms = "Required file that does not exist: ";
       ms += file;
-      throw FatalErrorException(ms.data());
+      raise_fatal_error(ms.data());
     }
     return false;
   }
@@ -992,12 +1016,11 @@ bool function_exists(const String& function_name) {
 // debugger and code coverage instrumentation
 
 void throw_exception(const Object& e) {
-  if (!e.instanceof(SystemLib::s_ExceptionClass)) {
-    raise_error("Exceptions must be valid objects derived from the "
-                "Exception base class");
+  if (!e.instanceof(SystemLib::s_ThrowableClass)) {
+    raise_error("Exceptions must implement the Throwable interface.");
   }
   DEBUGGER_ATTACHED_ONLY(phpDebuggerExceptionThrownHook(e.get()));
-  throw e;
+  throw_object(e);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

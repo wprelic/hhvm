@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -68,7 +68,8 @@ inline void Translator::setUseAHot(bool val) {
 inline bool Translator::isTransDBEnabled() {
   return debug ||
          RuntimeOption::EvalDumpTC ||
-         RuntimeOption::EvalDumpIR;
+         RuntimeOption::EvalDumpIR ||
+         RuntimeOption::EvalDumpRegion;
 }
 
 inline const TransRec* Translator::getTransRec(TCA tca) const {
@@ -135,6 +136,7 @@ inline ControlFlowInfo opcodeControlFlowInfo(const Op op) {
     case Op::CreateCont:
     case Op::Yield:
     case Op::YieldK:
+    case Op::YieldFromDelegate:
     case Op::Await:
     case Op::RetC:
     case Op::RetV:
@@ -166,6 +168,7 @@ inline ControlFlowInfo opcodeControlFlowInfo(const Op op) {
     case Op::FCallUnpack:
     case Op::ContEnter:
     case Op::ContRaise:
+    case Op::ContEnterDelegate:
     case Op::Incl:
     case Op::InclOnce:
     case Op::Req:

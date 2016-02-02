@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,7 +15,7 @@
 */
 
 #include "hphp/runtime/vm/jit/vasm.h"
-#include "hphp/runtime/vm/jit/vasm-emit.h"
+#include "hphp/runtime/vm/jit/vasm-gen.h"
 #include "hphp/runtime/vm/jit/vasm-instr.h"
 #include "hphp/runtime/vm/jit/vasm-print.h"
 #include "hphp/runtime/vm/jit/vasm-unit.h"
@@ -71,6 +71,29 @@ struct Simplifier {
     }
   }
 
+  bool match_and_test(const Vblock& block,
+                      size_t& iIdx,
+                      Vinstr& andq,
+                      Vreg& sf) {
+    if (!match_instr(block, iIdx, Vinstr::andq)) return false;
+
+    auto const& code = block.code;
+    auto const& inst = code[iIdx].andq_;
+    auto const dst = inst.d;
+    if (uses[dst] == 2 && uses[inst.sf] == 0 &&
+        match_instr(block, iIdx + 1, Vinstr::testq)) {
+      auto const& testq = code[iIdx + 1].testq_;
+      if (testq.s0 == dst && testq.s1 == dst) {
+        andq = inst;
+        sf = testq.sf;
+        ++iIdx;
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   // If there is an adjacent setcc/xorbi pair where the xor is being used
   // to invert the result of the setcc, just invert the setcc condition and
   // omit the xor.
@@ -83,7 +106,7 @@ struct Simplifier {
       auto const& inst = code[iIdx].setcc_;
       auto const dst = inst.d;
       // Make sure setcc result is only used by xor.
-      if (uses[inst.d] == 1 && match_instr(block, iIdx + 1, Vinstr::xorbi)) {
+      if (uses[dst] == 1 && match_instr(block, iIdx + 1, Vinstr::xorbi)) {
         auto const& xor = code[iIdx + 1].xorbi_;
         if (xor.s0.b() == 1 && xor.s1 == dst && uses[xor.sf] == 0) {
           sinst = code[iIdx++];  // setcc instruction being modified.
@@ -95,14 +118,42 @@ struct Simplifier {
     return false;
   }
 
+  // Whether we have a copyargs where none of its sources is a dest.
+  bool match_copyargs_no_overlap(const Vblock& block, size_t iIdx) {
+    if (!match_instr(block, iIdx, Vinstr::copyargs)) return false;
+
+    auto const& inst = block.code[iIdx].copyargs_;
+    auto const& dsts = unit.tuples[inst.d];
+    auto const& srcs = unit.tuples[inst.s];
+    assertx(dsts.size() == srcs.size());
+
+    for (auto const src : srcs) {
+      for (auto const dst : dsts) {
+        if (src == dst) return false;
+      }
+    }
+    return true;
+  }
+
   // Perform any simplification steps for the instructions beginning
   // at the given index.  Add additional simplification matchers here.
   size_t simplify(Vout& v, const Vblock& block, size_t iIdx) {
     Vinstr inst;
     Vreg dst;
-    if (match_setcc_xorbi(block, iIdx, inst, dst)) {
+    if (match_and_test(block, iIdx, inst, dst)) {
+      v << testq{inst.andq_.s0, inst.andq_.s1, dst};
+    } else if (match_setcc_xorbi(block, iIdx, inst, dst)) {
       // Rewrite setcc/xorbi pair as setcc with inverted condition.
       v << setcc{ccNegate(inst.setcc_.cc), inst.setcc_.sf, dst};
+    } else if (match_copyargs_no_overlap(block, iIdx)) {
+      // Convert simple copyargs to a list of copies.
+      auto const& inst = block.code[iIdx].copyargs_;
+      auto const& dsts = unit.tuples[inst.d];
+      auto const& srcs = unit.tuples[inst.s];
+
+      for (size_t i = 0; i < srcs.size(); ++i) {
+        v << copy{srcs[i], dsts[i]};
+      }
     }
     return iIdx;
   }

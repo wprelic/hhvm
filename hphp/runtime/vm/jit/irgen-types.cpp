@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -152,13 +152,19 @@ void verifyTypeImpl(IRGS& env, int32_t const id) {
     return;
   }
 
+  auto retFail = [&] {
+    updateMarker(env);
+    env.irb->exceptionStackBoundary();
+    gen(env, VerifyRetFail, ldStkAddr(env, BCSPOffset{0}));
+  };
+
   auto result = annotCompat(valType.toDataType(), tc.type(), tc.typeName());
   switch (result) {
     case AnnotAction::Pass:
       return;
     case AnnotAction::Fail:
       if (isReturnType) {
-        gen(env, VerifyRetFail, val);
+        retFail();
       } else {
         gen(env, VerifyParamFail, cns(env, id));
       }
@@ -227,7 +233,7 @@ void verifyTypeImpl(IRGS& env, int32_t const id) {
       // The hint was self or parent and there's no corresponding
       // class for the current func. This typehint will always fail.
       if (isReturnType) {
-        gen(env, VerifyRetFail, val);
+        retFail();
       } else {
         gen(env, VerifyParamFail, cns(env, id));
       }
@@ -251,7 +257,7 @@ void verifyTypeImpl(IRGS& env, int32_t const id) {
       },
       [&] { // taken: the param type does not match
         hint(env, Block::Hint::Unlikely);
-        if (isReturnType) gen(env, VerifyRetFail, val);
+        if (isReturnType) retFail();
         else              gen(env, VerifyParamFail, cns(env, id));
       }
     );
@@ -292,7 +298,7 @@ void implIsScalarL(IRGS& env, int32_t id) {
 void implIsScalarC(IRGS& env) {
   auto const src = popC(env);
   push(env, gen(env, IsScalarType, src));
-  gen(env, DecRef, src);
+  decRef(env, src);
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -402,7 +408,7 @@ SSATmp* implInstanceOfD(IRGS& env, SSATmp* src, const StringData* className) {
 void emitInstanceOfD(IRGS& env, const StringData* className) {
   auto const src = popC(env);
   push(env, implInstanceOfD(env, src, className));
-  gen(env, DecRef, src);
+  decRef(env, src);
 }
 
 void emitInstanceOf(IRGS& env) {
@@ -413,8 +419,8 @@ void emitInstanceOf(IRGS& env) {
     auto const c2 = gen(env, LdObjClass, t2);
     auto const c1 = gen(env, LdObjClass, t1);
     push(env, gen(env, InstanceOf, c2, c1));
-    gen(env, DecRef, t2);
-    gen(env, DecRef, t1);
+    decRef(env, t2);
+    decRef(env, t1);
     return;
   }
 
@@ -425,8 +431,8 @@ void emitInstanceOf(IRGS& env) {
     auto const c1  = gen(env, DerefClsRDSHandle, rds);
     auto const c2  = gen(env, LdObjClass, t2);
     push(env, gen(env, InstanceOf, c2, c1));
-    gen(env, DecRef, t2);
-    gen(env, DecRef, t1);
+    decRef(env, t2);
+    decRef(env, t1);
     return;
   }
 
@@ -438,8 +444,8 @@ void emitInstanceOf(IRGS& env) {
     t2->isA(TDbl) ? gen(env, InterfaceSupportsDbl, t1) :
     cns(env, false)
   );
-  gen(env, DecRef, t2);
-  gen(env, DecRef, t1);
+  decRef(env, t2);
+  decRef(env, t1);
 }
 
 void emitVerifyRetTypeC(IRGS& env) {
@@ -476,7 +482,7 @@ void emitOODeclExists(IRGS& env, OODeclExistsOp subop) {
     tAutoload
   );
   push(env, val);
-  gen(env, DecRef, tCls);
+  decRef(env, tCls);
 }
 
 void emitIssetL(IRGS& env, int32_t id) {
@@ -505,7 +511,7 @@ void emitIsTypeC(IRGS& env, IsTypeOp subop) {
   } else {
     push(env, gen(env, IsType, Type(t), src));
   }
-  gen(env, DecRef, src);
+  decRef(env, src);
 }
 
 void emitIsTypeL(IRGS& env, int32_t id, IsTypeOp subop) {

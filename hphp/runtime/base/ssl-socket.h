@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,7 @@
 #ifndef incl_HPHP_SSL_SOCKET_H_
 #define incl_HPHP_SSL_SOCKET_H_
 
-#include "hphp/runtime/base/smart-ptr.h"
+#include "hphp/runtime/base/req-ptr.h"
 #include "hphp/runtime/base/socket.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/network.h"
@@ -44,20 +44,28 @@ struct SSLSocket : Socket {
     ServerSSLv3,
     ServerSSLv23,
     ServerTLS,
+
+    // This is evil. May be changed by a call stream_socket_enable_crypto()
+    NoCrypto,
   };
 
   static int GetSSLExDataIndex();
-  static SmartPtr<SSLSocket> Create(int fd, int domain, const HostURL &hosturl,
-                                    double timeout);
+  static req::ptr<SSLSocket> Create(int fd, int domain, const HostURL &hosturl,
+                                    double timeout,
+                                    const req::ptr<StreamContext>& ctx);
 
   SSLSocket();
-  SSLSocket(int sockfd, int type, const char *address = nullptr, int port = 0);
+  SSLSocket(int sockfd, int type, const req::ptr<StreamContext>& ctx,
+            const char *address = nullptr, int port = 0);
   virtual ~SSLSocket();
   DECLARE_RESOURCE_ALLOCATION(SSLSocket);
 
   // will setup and enable crypto
   bool onConnect();
   bool onAccept();
+  // This is evil. Needed for stream_socket_enable_crypto() though :(
+  bool enableCrypto(CryptoMethod method);
+  bool disableCrypto();
 
   CLASSNAME_IS("SSLSocket")
   // overriding ResourceData
@@ -67,6 +75,11 @@ struct SSLSocket : Socket {
   virtual int64_t readImpl(char *buffer, int64_t length) override;
   virtual int64_t writeImpl(const char *buffer, int64_t length) override;
   virtual bool checkLiveness() override;
+
+  explicit SSLSocket(std::shared_ptr<SSLSocketData> data);
+  std::shared_ptr<SSLSocketData> getData() const {
+    return std::static_pointer_cast<SSLSocketData>(Socket::getData());
+  }
 
 private:
   bool handleError(int64_t nr_bytes, bool is_init);
@@ -88,7 +101,8 @@ private:
 };
 
 struct SSLSocketData : SocketData {
-  SSLSocketData() { }
+  SSLSocketData() {}
+  SSLSocketData(int port, int type) : SocketData(port, type) {}
   virtual bool closeImpl();
   ~SSLSocketData();
 private:
@@ -99,6 +113,7 @@ private:
   bool m_state_set{false};
   bool m_is_blocked{true};
   SSL *m_handle{nullptr};
+  SSL_CTX *m_ctx{nullptr};
   SSLSocket::CryptoMethod m_method{(SSLSocket::CryptoMethod)-1};
   double m_connect_timeout{0};
 };
@@ -132,7 +147,7 @@ public:
    *    to that cert
    *  . it will be interpreted as the cert data
    */
-  static SmartPtr<Certificate> Get(const Variant& var);
+  static req::ptr<Certificate> Get(const Variant& var);
   static BIO *ReadData(const Variant& var, bool *file = nullptr);
 };
 

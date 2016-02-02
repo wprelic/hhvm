@@ -139,6 +139,8 @@ abstract class ReflectionFunctionAbstract implements Reflector {
   public function getExtension();
   public function getExtensionName();
   final private function __clone();
+  public function hasReturnType(): bool;
+  public function getReturnType(): ?ReflectionType;
 }
 
 class ReflectionFunction extends ReflectionFunctionAbstract implements Reflector {
@@ -215,6 +217,8 @@ class ReflectionParameter implements Reflector {
   public function getTypeText(): string;
   public function getDefaultValueText();
   public function isVariadic();
+  public function hasType(): bool;
+  public function getType(): ?ReflectionType;
 }
 
 class ReflectionProperty implements Reflector {
@@ -290,5 +294,25 @@ class ReflectionTypeConstant implements Reflector {
   public function getName(): string;
   public function isAbstract(): bool;
   public function getDeclaringClass(): ReflectionClass;
+  public function getClass(): ReflectionClass;
   public function getAssignedTypeText(): ?string;
+}
+
+class ReflectionTypeAlias implements Reflector {
+  final private function __clone();
+  final public function __construct(string $name);
+  public function __toString(): string;
+  public function getTypeStructure(): array;
+  public function getResolvedTypeStructure(): array;
+  public function getAssignedTypeText(): string;
+  public function getName(): string;
+}
+
+class ReflectionType {
+  final private function __clone();
+  public function __construct(?Reflector $param_or_ret = null,
+                              array $type_hint_info = array());
+  public function allowsNull(): bool;
+  public function isBuiltin(): bool;
+  public function __toString(): string;
 }

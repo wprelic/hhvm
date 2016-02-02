@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -138,7 +138,7 @@ void emitCreateCl(IRGS& env, int32_t numParams, const StringData* clsName) {
 
   gen(env, StClosureCtx, closure, ctx);
 
-  SSATmp* args[numParams];
+  SSATmp** args = (SSATmp**)alloca(sizeof(SSATmp*) * numParams);
   for (int32_t i = 0; i < numParams; ++i) {
     args[numParams - i - 1] = popF(env);
   }
@@ -196,7 +196,7 @@ void emitNewMixedArray(IRGS& env, int32_t capacity) {
 
 void emitNewLikeArrayL(IRGS& env, int32_t id, int32_t capacity) {
   auto const ldrefExit = makeExit(env);
-  auto const ldPMExit = makeExit(env);
+  auto const ldPMExit = makePseudoMainExit(env);
   auto const ld = ldLocInner(env, id, ldrefExit, ldPMExit, DataTypeSpecific);
 
   SSATmp* arr;
@@ -221,7 +221,6 @@ void emitNewPackedArray(IRGS& env, int32_t numArgs) {
   );
   static constexpr auto kMaxUnrolledInitArray = 8;
   if (numArgs > kMaxUnrolledInitArray) {
-    spillStack(env);
     gen(
       env,
       InitPackedArrayLoop,
@@ -252,13 +251,6 @@ void emitNewPackedArray(IRGS& env, int32_t numArgs) {
 void emitNewStructArray(IRGS& env, const ImmVector& immVec) {
   auto const numArgs = immVec.size();
   auto const ids = immVec.vec32();
-
-  // The NewPackedArray opcode's helper needs array values passed to it
-  // via the stack.  We use spillStack() to flush the eval stack and
-  // obtain a pointer to the topmost item; if over-flushing becomes
-  // a problem then we should refactor the NewPackedArray opcode to
-  // take its values directly as SSA operands.
-  spillStack(env);
 
   NewStructData extra;
   extra.offset  = offsetFromIRSP(env, BCSPOffset{0});
@@ -330,7 +322,7 @@ void emitMapAddElemC(IRGS& env) {
   auto const key = popC(env);
   auto const coll = popC(env);
   push(env, gen(env, MapAddElemC, coll, key, val));
-  gen(env, DecRef, key);
+  decRef(env, key);
 }
 
 void emitColAddNewElemC(IRGS& env) {
@@ -374,7 +366,7 @@ void emitStaticLocInit(IRGS& env, int32_t locId, const StringData* name) {
   gen(env, IncRef, box);
   auto const oldValue = ldLoc(env, locId, ldPMExit, DataTypeSpecific);
   stLocRaw(env, locId, fp(env), box);
-  gen(env, DecRef, oldValue);
+  decRef(env, oldValue);
   // We don't need to decref value---it's a bytecode invariant that
   // our Cell was not ref-counted.
 }
@@ -414,7 +406,7 @@ void emitStaticLoc(IRGS& env, int32_t locId, const StringData* name) {
   gen(env, IncRef, box);
   auto const oldValue = ldLoc(env, locId, ldPMExit, DataTypeGeneric);
   stLocRaw(env, locId, fp(env), box);
-  gen(env, DecRef, oldValue);
+  decRef(env, oldValue);
   push(env, res);
 }
 

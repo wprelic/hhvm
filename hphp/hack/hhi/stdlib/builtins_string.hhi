@@ -45,7 +45,7 @@ function strtolower($str);
 function strtoupper($str);
 function ucfirst($str);
 function lcfirst($str);
-function ucwords($str);
+function ucwords($str, $delimiters = " \t\r\n\f\v");
 function trim($str, $charlist = HPHP_TRIM_CHARLIST)/*: string*/;
 function ltrim($str, $charlist = HPHP_TRIM_CHARLIST)/*: string*/;
 function rtrim($str, $charlist = HPHP_TRIM_CHARLIST)/*: string*/;
@@ -55,6 +55,19 @@ function join($glue, $pieces = null);
 function str_split($str, $split_length = 1);
 function chunk_split($body, $chunklen = 76, $end = "\r\n");
 function strtok($str, $token = null);
+/**
+ * http://php.net/manual/en/function.str-getcsv.php
+ *
+ * Parse a CSV string into an array
+ *
+ * NOTE: return type is an array of nullable strings because:
+ *  = str_getcsv('')
+ *  Array
+ *  (
+ *    [0] => null
+ *  )
+ */
+function str_getcsv(?string $input, string $delimiter = ",", string $enclosure = "\"", string $escape = "\\"): array<?string>;
 function str_replace($search, $replace, $subject, &$count = null);
 function str_ireplace($search, $replace, $subject, &$count = null);
 function substr_replace($str, $replacement, $start, $length = 0x7FFFFFFF);

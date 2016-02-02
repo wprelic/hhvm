@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -49,14 +49,14 @@ const StaticString array_string("Array");
 
 void Array::setEvalScalar() const {
   Array* thisPtr = const_cast<Array*>(this);
-  if (!m_arr) thisPtr->m_arr = ArrayData::Create();
+  if (!m_arr) thisPtr->m_arr = Ptr::attach(ArrayData::Create());
   if (!m_arr->isStatic()) {
     thisPtr->m_arr = ArrayData::GetScalarArray(get());
   }
 }
 
 void Array::compileTimeAssertions() {
-  static_assert(sizeof(Array) == sizeof(SmartPtr<ArrayData>), "Fix this.");
+  static_assert(sizeof(Array) == sizeof(req::ptr<ArrayData>), "Fix this.");
 }
 
 void ArrNR::compileTimeAssertions() {
@@ -67,7 +67,10 @@ void ArrNR::compileTimeAssertions() {
 // constructors
 
 Array Array::Create(const Variant& name, const Variant& var) {
-  return Array(ArrayData::Create(name.isString() ? name.toKey() : name, var));
+  return Array{
+    ArrayData::Create(name.isString() ? name.toKey() : name, var),
+    NoIncRef{}
+  };
 }
 
 Array::~Array() {}
@@ -81,8 +84,8 @@ Array &Array::operator=(const Variant& var) {
 
 // Move assign
 Array& Array::operator=(Variant&& v) {
-  if (v.asTypedValue()->m_type == KindOfArray) {
-    m_arr = SmartPtr<ArrayData>::attach(v.asTypedValue()->m_data.parr);
+  if (isArrayType(v.asTypedValue()->m_type)) {
+    m_arr = req::ptr<ArrayData>::attach(v.asTypedValue()->m_data.parr);
     v.asTypedValue()->m_type = KindOfNull;
   } else {
     *this = const_cast<const Variant&>(v);
@@ -109,7 +112,7 @@ static void throw_bad_array_merge() {
 }
 
 Array &Array::operator+=(const Variant& var) {
-  if (var.getType() != KindOfArray) {
+  if (!var.isArray()) {
     throw_bad_array_merge();
   }
   return operator+=(var.getArrayData());
@@ -298,7 +301,7 @@ Array &Array::plusImpl(ArrayData *data) {
     } else if (m_arr != data) {
       auto const escalated = m_arr->plusEq(data);
       if (escalated != m_arr) {
-        m_arr = SmartPtr<ArrayData>::attach(escalated);
+        m_arr = Ptr::attach(escalated);
       }
     }
   }
@@ -310,7 +313,8 @@ Array &Array::mergeImpl(ArrayData *data) {
     throw_bad_array_merge();
   }
   if (!data->empty()) {
-    m_arr = SmartPtr<ArrayData>::attach(m_arr->merge(data));
+    auto const escalated = m_arr->merge(data);
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   } else {
     m_arr->renumber();
   }
@@ -368,7 +372,7 @@ bool Array::less(const Variant& v2) const {
   if (m_arr == nullptr || v2.isNull()) {
     return HPHP::less(toBoolean(), v2.toBoolean());
   }
-  if (v2.getType() == KindOfArray) {
+  if (isArrayType(v2.getType())) {
     return m_arr->compare(v2.toArray().get()) < 0;
   }
   return HPHP::more(v2, *this);
@@ -396,10 +400,18 @@ bool Array::more(const Variant& v2) const {
   if (m_arr == nullptr || v2.isNull()) {
     return HPHP::more(toBoolean(), v2.toBoolean());
   }
-  if (v2.getType() == KindOfArray) {
+  if (isArrayType(v2.getType())) {
     return v2.toArray().get()->compare(get()) < 0;
   }
   return HPHP::less(v2, *this);
+}
+
+int Array::compare(const Array& v2, bool flip /* = false */) const {
+  if (m_arr == nullptr || v2.get() == nullptr) {
+    return HPHP::compare(toBoolean(), v2.toBoolean());
+  }
+  if (flip) return -v2.get()->compare(get());
+  return m_arr->compare(v2.get());
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -410,11 +422,15 @@ ArrayIter Array::begin(const String& context /* = null_string */) const {
 }
 
 void Array::escalate() {
-  if (m_arr) m_arr = m_arr->escalate();
+  if (m_arr) {
+    auto escalated = m_arr->escalate();
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
+  }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // offset functions
+#define ACCESSPARAMS_IMPL AccessFlags::Type flags
 
 Variant Array::rvalAt(int key, ACCESSPARAMS_IMPL) const {
   if (m_arr) return m_arr->get((int64_t)key, flags & AccessFlags::Error);
@@ -471,7 +487,7 @@ const Variant& Array::rvalAtRef(const Variant& key, ACCESSPARAMS_IMPL) const {
       return m_arr->get((int64_t)key.asTypedValue()->m_data.dbl,
                        flags & AccessFlags::Error);
 
-    case KindOfStaticString:
+    case KindOfPersistentString:
     case KindOfString:
       {
         int64_t n;
@@ -482,6 +498,7 @@ const Variant& Array::rvalAtRef(const Variant& key, ACCESSPARAMS_IMPL) const {
       }
       return m_arr->get(key.asCStrRef(), flags & AccessFlags::Error);
 
+    case KindOfPersistentArray:
     case KindOfArray:
     case KindOfObject:
       throw_bad_type_exception("Invalid type used as key");
@@ -504,21 +521,21 @@ Variant Array::rvalAt(const Variant& key, ACCESSPARAMS_IMPL) const {
 }
 
 Variant &Array::lvalAt() {
-  if (!m_arr) m_arr = ArrayData::Create();
+  if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
   Variant *ret = nullptr;
   auto arr = m_arr;
-  ArrayData *escalated = arr->lvalNew(ret, arr->hasMultipleRefs());
-  if (escalated != arr) m_arr = escalated;
+  ArrayData *escalated = arr->lvalNew(ret, arr->cowCheck());
+  if (escalated != arr) m_arr = Ptr::attach(escalated);
   assert(ret);
   return *ret;
 }
 
 Variant &Array::lvalAtRef() {
-  if (!m_arr) m_arr = ArrayData::Create();
+  if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
   Variant *ret = nullptr;
   auto arr = m_arr;
-  ArrayData *escalated = arr->lvalNewRef(ret, arr->hasMultipleRefs());
-  if (escalated != arr) m_arr = escalated;
+  ArrayData *escalated = arr->lvalNewRef(ret, arr->cowCheck());
+  if (escalated != arr) m_arr = Ptr::attach(escalated);
   assert(ret);
   return *ret;
 }
@@ -541,10 +558,10 @@ template<typename T>
 ALWAYS_INLINE
 void Array::setImpl(const T &key, const Variant& v) {
   if (!m_arr) {
-    m_arr = ArrayData::Create(key, v);
+    m_arr = Ptr::attach(ArrayData::Create(key, v));
   } else {
-    ArrayData *escalated = m_arr->set(key, v, (m_arr->hasMultipleRefs()));
-    if (escalated != m_arr) m_arr = escalated;
+    ArrayData *escalated = m_arr->set(key, v, m_arr->cowCheck());
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   }
 }
 
@@ -552,11 +569,11 @@ template<typename T>
 ALWAYS_INLINE
 void Array::setRefImpl(const T &key, Variant& v) {
   if (!m_arr) {
-    m_arr = ArrayData::CreateRef(key, v);
+    m_arr = Ptr::attach(ArrayData::CreateRef(key, v));
   } else {
     escalate();
-    ArrayData *escalated = m_arr->setRef(key, v, (m_arr->hasMultipleRefs()));
-    if (escalated != m_arr) m_arr = escalated;
+    ArrayData *escalated = m_arr->setRef(key, v, m_arr->cowCheck());
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   }
 }
 
@@ -564,10 +581,10 @@ template<typename T>
 ALWAYS_INLINE
 void Array::addImpl(const T &key, const Variant& v) {
   if (!m_arr) {
-    m_arr = ArrayData::Create(key, v);
+    m_arr = Ptr::attach(ArrayData::Create(key, v));
   } else {
-    ArrayData *escalated = m_arr->add(key, v, (m_arr->hasMultipleRefs()));
-    if (escalated != m_arr) m_arr = escalated;
+    ArrayData *escalated = m_arr->add(key, v, m_arr->cowCheck());
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   }
 }
 
@@ -636,8 +653,8 @@ bool Array::exists(const String& key, bool isKey /* = false */) const {
 }
 
 bool Array::exists(const Variant& key, bool isKey /* = false */) const {
-  if (IS_BOOL_TYPE(key.getType()) ||
-      IS_INT_TYPE(key.getType())) {
+  if (isBoolType(key.getType()) ||
+      isIntType(key.getType())) {
     return existsImpl(key.toInt64());
   }
   if (isKey) return existsImpl(key);
@@ -657,8 +674,8 @@ void Array::remove(const String& key, bool isString /* = false */) {
 }
 
 void Array::remove(const Variant& key) {
-  if (IS_BOOL_TYPE(key.getType()) ||
-      IS_INT_TYPE(key.getType())) {
+  if (isBoolType(key.getType()) ||
+      isIntType(key.getType())) {
     removeImpl(key.toInt64());
     return;
   }
@@ -670,28 +687,28 @@ void Array::remove(const Variant& key) {
 
 const Variant& Array::append(const Variant& v) {
   if (!m_arr) {
-    m_arr = ArrayData::Create(v);
+    m_arr = Ptr::attach(ArrayData::Create(v));
   } else {
-    ArrayData *escalated = m_arr->append(v, (m_arr->hasMultipleRefs()));
-    if (escalated != m_arr) m_arr = escalated;
+    ArrayData *escalated = m_arr->append(v, m_arr->cowCheck());
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   }
   return v;
 }
 
 const Variant& Array::appendRef(Variant& v) {
   if (!m_arr) {
-    m_arr = ArrayData::CreateRef(v);
+    m_arr = Ptr::attach(ArrayData::CreateRef(v));
   } else {
-    ArrayData *escalated = m_arr->appendRef(v, (m_arr->hasMultipleRefs()));
-    if (escalated != m_arr) m_arr = escalated;
+    ArrayData *escalated = m_arr->appendRef(v, m_arr->cowCheck());
+    if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   }
   return v;
 }
 
 const Variant& Array::appendWithRef(const Variant& v) {
-  if (!m_arr) m_arr = ArrayData::Create();
-  ArrayData *escalated = m_arr->appendWithRef(v, (m_arr->hasMultipleRefs()));
-  if (escalated != m_arr) m_arr = escalated;
+  if (!m_arr) m_arr = Ptr::attach(ArrayData::Create());
+  ArrayData *escalated = m_arr->appendWithRef(v, m_arr->cowCheck());
+  if (escalated != m_arr) m_arr = Ptr::attach(escalated);
   return v;
 }
 
@@ -699,7 +716,7 @@ Variant Array::pop() {
   if (m_arr) {
     Variant ret;
     ArrayData *newarr = m_arr->pop(ret);
-    if (newarr != m_arr) m_arr = newarr;
+    if (newarr != m_arr) m_arr = Ptr::attach(newarr);
     return ret;
   }
   return init_null();
@@ -709,7 +726,7 @@ Variant Array::dequeue() {
   if (m_arr) {
     Variant ret;
     ArrayData *newarr = m_arr->dequeue(ret);
-    if (newarr != m_arr) m_arr = newarr;
+    if (newarr != m_arr) m_arr = Ptr::attach(newarr);
     return ret;
   }
   return init_null();
@@ -718,72 +735,8 @@ Variant Array::dequeue() {
 void Array::prepend(const Variant& v) {
   if (!m_arr) operator=(Create());
   assert(m_arr);
-  ArrayData *newarr = m_arr->prepend(v, (m_arr->hasMultipleRefs()));
-  if (newarr != m_arr) m_arr = newarr;
-}
-
-///////////////////////////////////////////////////////////////////////////////
-// output functions
-
-void Array::serialize(VariableSerializer *serializer,
-                      bool isObject /* = false */) const {
-  if (m_arr) {
-    m_arr->serialize(serializer, isObject);
-  } else {
-    serializer->writeNull();
-  }
-}
-
-void Array::unserialize(VariableUnserializer *uns) {
-  int64_t size = uns->readInt();
-  uns->expectChar(':');
-  uns->expectChar('{');
-
-  if (size == 0) {
-    operator=(Create());
-  } else {
-    if (UNLIKELY(size < 0 || size > std::numeric_limits<int>::max())) {
-      throw Exception("Array size out of bounds");
-    }
-    auto const scale = computeScaleFromSize(size);
-    auto const allocsz = computeAllocBytes(scale);
-
-    // For large arrays, do a naive pre-check for OOM.
-    if (UNLIKELY(allocsz > kMaxSmartSize && MM().preAllocOOM(allocsz))) {
-      check_request_surprise_unlikely();
-    }
-
-    // Pre-allocate an ArrayData of the given size, to avoid escalation in the
-    // middle, which breaks references.
-    operator=(ArrayInit(size, ArrayInit::Mixed{}).toArray());
-    for (int64_t i = 0; i < size; i++) {
-      Variant key;
-      unserializeVariant(key, uns, UnserializeMode::Key);
-      if (!key.isString() && !key.isInteger()) {
-        throw Exception("Invalid key");
-      }
-      // for apc, we know the key can't exist, but ignore that optimization
-      assert(uns->type() != VariableUnserializer::Type::APCSerialize ||
-             !exists(key, true));
-
-      Variant &value = lvalAt(key, AccessFlags::Key);
-      if (UNLIKELY(IS_REFCOUNTED_TYPE(value.getRawType()))) {
-        uns->putInOverwrittenList(value);
-      }
-      unserializeVariant(value, uns);
-
-      if (i < (size - 1)) {
-        auto lastChar = uns->peekBack();
-        if ((lastChar != ';' && lastChar != '}')) {
-          throw Exception("Array element not terminated properly");
-        }
-      }
-    }
-  }
-
-  check_request_surprise_unlikely();
-
-  uns->expectChar('}');
+  ArrayData *newarr = m_arr->prepend(v, m_arr->cowCheck());
+  if (newarr != m_arr) m_arr = Ptr::attach(newarr);
 }
 
 ///////////////////////////////////////////////////////////////////////////////

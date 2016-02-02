@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -33,16 +33,22 @@ namespace HPHP { namespace jit {
 
 constexpr inline Type::Type(bits_t bits, Ptr kind)
   : m_bits(bits)
-  , m_ptrKind(static_cast<std::underlying_type<Ptr>::type>(kind))
+  , m_ptrKind(static_cast<ptr_t>(kind))
   , m_hasConstVal(false)
   , m_extra(0)
 {}
 
-#define IRT(name, ...) constexpr Type T##name{Type::k##name, Ptr::Unk};
-#define IRTP(name, ptr, ...) constexpr Type T##name{Type::k##name, Ptr::ptr};
-IR_TYPES
+#define IRT(name, ...) constexpr Type T##name{Type::k##name, Ptr::NotPtr};
+#define IRTP(name, ptr, bits) constexpr Type T##name{Type::bits, Ptr::ptr};
+IRT_PHP(IRT_BOXES_AND_PTRS)
+IRT_PHP_UNIONS(IRT_BOXES_AND_PTRS)
+IRT_SPECIAL
 #undef IRT
 #undef IRTP
+
+#define IRT(name, ...) constexpr Type T##name{Type::k##name, Ptr::Bottom};
+IRT_RUNTIME
+#undef IRT
 
 /*
  * Abbreviated namespace for predefined types.
@@ -110,102 +116,36 @@ inline Type for_const(TCA)           { return TTCA; }
 }
 
 ///////////////////////////////////////////////////////////////////////////////
-// Ptr.
-
-inline Ptr add_ref(Ptr p) {
-  if (p == Ptr::Unk || p == Ptr::ClsInit || p == Ptr::ClsCns) {
-    return p;
-  }
-  return static_cast<Ptr>(static_cast<uint32_t>(p) | kPtrRefBit);
-}
-
-inline Ptr remove_ref(Ptr p) {
-  // If p is unknown or Ptr::Ref, we'll get back unknown. Note that this is not
-  // the same as subtracting Ptr::Ref from p.
-  return static_cast<Ptr>(static_cast<uint32_t>(p) & ~kPtrRefBit);
-}
-
-/*
- * For use in this file.
- */
-bool ptr_subtype(Ptr, Ptr);
-
-///////////////////////////////////////////////////////////////////////////////
 // Type.
 
 inline Type::Type()
   : m_bits(kBottom)
-  , m_ptrKind(0)
+  , m_ptrKind(static_cast<ptr_t>(Ptr::Bottom))
   , m_hasConstVal(false)
   , m_extra(0)
 {}
 
 inline Type::Type(DataType outer, DataType inner)
   : m_bits(bitsFromDataType(outer, inner))
-  , m_ptrKind(0)
+  , m_ptrKind(static_cast<ptr_t>(outer == KindOfClass ? Ptr::Bottom
+                                                      : Ptr::NotPtr))
   , m_hasConstVal(false)
   , m_extra(0)
 {}
-
-inline Type::Type(DataType outer, KindOfAny)
-  : m_bits(outer == KindOfRef ? kBoxedCell
-                              : bitsFromDataType(outer, KindOfUninit))
-  , m_ptrKind(0)
-  , m_hasConstVal(false)
-  , m_extra(0)
-{}
-
-inline Type& Type::operator=(Type b) {
-  m_bits = b.m_bits;
-  m_hasConstVal = b.m_hasConstVal;
-  m_ptrKind = b.m_ptrKind;
-  m_extra = b.m_extra;
-  return *this;
-}
 
 inline size_t Type::hash() const {
-  return hash_int64_pair(m_rawInt, m_extra);
+  return hash_int64_pair(m_raw, m_extra);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 // Comparison.
 
 inline bool Type::operator==(Type rhs) const {
-  return m_rawInt == rhs.m_rawInt && m_extra == rhs.m_extra;
+  return m_raw == rhs.m_raw && m_extra == rhs.m_extra;
 }
 
 inline bool Type::operator!=(Type rhs) const {
   return !operator==(rhs);
-}
-
-inline bool Type::operator<=(Type rhs) const {
-  auto lhs = *this;
-
-  // Check for any members in lhs.m_bits that aren't in rhs.m_bits.
-  if ((lhs.m_bits & rhs.m_bits) != lhs.m_bits) {
-    return false;
-  }
-
-  // Check for Bottom; all the remaining cases assume `lhs' is not Bottom.
-  if (lhs.m_bits == kBottom) return true;
-
-  // If `rhs' is a constant, we must be the same constant.
-  if (rhs.m_hasConstVal) {
-    assertx(!rhs.isUnion());
-    return lhs.m_hasConstVal && lhs.m_extra == rhs.m_extra;
-  }
-
-  // If `rhs' could be a pointer, we must have a subtype relation in pointer
-  // kinds or we're not a subtype.  (If `lhs' can't be a pointer, we found out
-  // above when we intersected the bits.)  If neither can be a pointer, it's an
-  // invariant that `m_ptrKind' will be Ptr::Unk so this will pass.
-  if (lhs.ptrKind() != rhs.ptrKind() &&
-      !ptr_subtype(lhs.ptrKind(), rhs.ptrKind())) {
-    return false;
-  }
-
-  // Compare specializations only if `rhs' is specialized.
-  return !rhs.isSpecialized() || lhs.spec() <= rhs.spec();
 }
 
 inline bool Type::operator>=(Type rhs) const {
@@ -303,12 +243,13 @@ inline Type Type::cns(const TypedValue& tv) {
       case KindOfBoolean:
       case KindOfInt64:
       case KindOfDouble:
-      case KindOfStaticString:
         return Type(tv.m_type);
 
+      case KindOfPersistentString:
       case KindOfString:
         return type_detail::for_const(tv.m_data.pstr);
 
+      case KindOfPersistentArray:
       case KindOfArray:
         return type_detail::for_const(tv.m_data.parr);
 
@@ -410,6 +351,15 @@ inline Type Type::ExactObj(const Class* cls) {
   return Type(TObj, ClassSpec(cls, ClassSpec::ExactTag{}));
 }
 
+inline Type Type::SubCls(const Class* cls) {
+  if (cls->attrs() & AttrNoOverride) return ExactCls(cls);
+  return Type(TCls, ClassSpec(cls, ClassSpec::SubTag{}));
+}
+
+inline Type Type::ExactCls(const Class* cls) {
+  return Type::cns(cls);
+}
+
 inline Type Type::unspecialize() const {
   return Type(m_bits, ptrKind());
 }
@@ -421,16 +371,20 @@ inline bool Type::isSpecialized() const {
   return clsSpec() || arrSpec();
 }
 
-inline bool Type::supports(SpecKind kind) const {
+inline bool Type::supports(bits_t bits, SpecKind kind) {
   switch (kind) {
     case SpecKind::None:
       return true;
     case SpecKind::Array:
-      return m_bits & kAnyArr;
+      return bits & kArrSpecBits;
     case SpecKind::Class:
-      return m_bits & kAnyObj;
+      return bits & kClsSpecBits;
   }
   not_reached();
+}
+
+inline bool Type::supports(SpecKind kind) const {
+  return supports(m_bits, kind);
 }
 
 inline ArraySpec Type::arrSpec() const {
@@ -479,7 +433,7 @@ inline Type Type::box() const {
 
 inline Type Type::inner() const {
   assertx(*this <= TBoxedCell);
-  return Type(m_bits >> kBoxShift, Ptr::Unk, m_extra);
+  return Type(m_bits >> kBoxShift, ptrKind(), m_extra);
 }
 
 inline Type Type::unbox() const {
@@ -489,17 +443,19 @@ inline Type Type::unbox() const {
 
 inline Type Type::ptr(Ptr kind) const {
   assertx(*this <= TGen);
+  assertx(kind <= Ptr::Ptr);
   // Enforce a canonical representation for Bottom.
   if (m_bits == kBottom) return TBottom;
-  return Type(m_bits << kPtrShift,
+  return Type(m_bits,
               kind,
               isSpecialized() && !m_hasConstVal ? m_extra : 0);
 }
 
 inline Type Type::deref() const {
   assertx(*this <= TPtrToGen);
-  return Type(m_bits >> kPtrShift,
-              Ptr::Unk /* no longer a pointer */,
+  if (m_bits == kBottom) return TBottom;
+  return Type(m_bits,
+              Ptr::NotPtr,
               isSpecialized() ? m_extra : 0);
 }
 
@@ -519,9 +475,9 @@ inline Ptr Type::ptrKind() const {
 ///////////////////////////////////////////////////////////////////////////////
 // Private constructors.
 
-inline Type::Type(bits_t bits, Ptr kind, uintptr_t extra /* = 0 */)
+inline Type::Type(bits_t bits, Ptr kind, uintptr_t extra)
   : m_bits(bits)
-  , m_ptrKind(static_cast<std::underlying_type<Ptr>::type>(kind))
+  , m_ptrKind(static_cast<ptr_t>(kind))
   , m_hasConstVal(false)
   , m_extra(extra)
 {

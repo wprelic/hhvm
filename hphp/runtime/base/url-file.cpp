@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -79,6 +79,10 @@ bool UrlFile::open(const String& input_url, const String& mode) {
     return false;
   }
   HttpClient http(m_timeout, m_maxRedirect);
+  auto ctx = this->getStreamContext();
+  if (ctx) {
+    http.setStreamContextOptions(ctx->getOptions());
+  }
   m_response.clear();
 
   if (!m_proxyHost.empty()) {
@@ -162,13 +166,13 @@ bool UrlFile::open(const String& input_url, const String& mode) {
 
 int64_t UrlFile::writeImpl(const char *buffer, int64_t length) {
   assert(m_len != -1);
-  throw FatalErrorException((std::string("cannot write a url stream: ") +
+  raise_fatal_error((std::string("cannot write a url stream: ") +
                              getName()).c_str());
 }
 
 bool UrlFile::flush() {
   assert(m_len != -1);
-  throw FatalErrorException((std::string("cannot flush a url stream: ") +
+  raise_fatal_error((std::string("cannot flush a url stream: ") +
                              getName()).c_str());
 }
 

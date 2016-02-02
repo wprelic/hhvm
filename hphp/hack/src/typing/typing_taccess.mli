@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -11,15 +11,8 @@
 open Typing_defs
 
 (* Expands a type access to underlying type *)
-val expand_with_env:
-  Typing_phase.env ->
-  Typing_env.env ->
-  Typing_reason.t ->
-  locl taccess_type ->
-  Typing_env.env * ety
-
 val expand:
   Typing_env.env ->
   Typing_reason.t ->
-  locl taccess_type ->
+  taccess_type ->
   Typing_env.env * locl ty

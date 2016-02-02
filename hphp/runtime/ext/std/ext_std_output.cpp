@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -24,7 +24,6 @@
 #include "hphp/runtime/base/zend-url.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/vm-regs.h"
-#include "hphp/system/constants.h"
 #include "hphp/util/hardware-counter.h"
 #include "hphp/util/lock.h"
 #include "hphp/util/logger.h"
@@ -232,8 +231,8 @@ Variant HHVM_FUNCTION(hphp_get_hardware_counters) {
 }
 
 bool HHVM_FUNCTION(hphp_set_hardware_events,
-                    const Variant& events /* = null */) {
-  String ev = events.toString();
+                   const Variant& events /* = null */) {
+  auto ev = events.toString();
   ev = url_decode(ev.data(), ev.size());
   return HardwareCounter::SetPerfEvents(ev.slice());
 }

@@ -35,11 +35,14 @@
 TRACE_SET_MOD(vasm);
 
 namespace HPHP { namespace jit {
-using namespace x64;
+
+///////////////////////////////////////////////////////////////////////////////
+
 using Trace::RingBufferType;
 using Trace::ringbufferName;
 
 const char* area_names[] = { "main", "cold", "frozen" };
+
 namespace {
 
 const char* vixl_ccs[] = {
@@ -90,24 +93,22 @@ struct FormatVisitor {
   void imm(TCA* addr) {
     str << sep() << folly::format("{}", addr);
   }
-  void imm(Vpoint p) { str << sep() << '@' << (size_t)p; }
-  void imm(const CppCall& cppcall) {
-    switch (cppcall.kind()) {
+  void imm(const CallSpec& call) {
+    switch (call.kind()) {
     default:
       str << sep() << "<unknown>";
       break;
-    case CppCall::Kind::Direct:
-      return imm((TCA)cppcall.address());
-    case CppCall::Kind::Virtual:
-      str << sep() << folly::format("<virtual at 0x{:08x}>",
-                                    cppcall.vtableOffset());
+    case CallSpec::Kind::Direct:
+    case CallSpec::Kind::Smashable:
+      return imm((TCA)call.address());
+    case CallSpec::Kind::ArrayVirt:
+      str << sep() << folly::format("ArrayVirt({})", call.arrayTable());
       break;
-    case CppCall::Kind::ArrayVirt:
-      str << sep() << folly::format("ArrayVirt({})", cppcall.arrayTable());
+    case CallSpec::Kind::Destructor:
+      str << sep() << folly::format("destructor({})", show(call.reg()));
       break;
-    case CppCall::Kind::Destructor:
-      str << sep() << folly::format("destructor({})", show(cppcall.reg()));
-      break;
+    case CallSpec::Kind::Stub:
+      return imm(call.stubAddr());
     }
   }
   void imm(RingBufferType t) { str << sep() << ringbufferName(t); }
@@ -120,14 +121,14 @@ struct FormatVisitor {
   void imm(const Func* func) {
     str << sep();
     if (func) {
-      str << folly::format("{}(id {:#x})", func->fullName()->data(),
+      str << folly::format("{}(id {:#x})", func->fullName(),
                            func->getFuncId());
     } else {
       str << "nullptr";
     }
   }
   void imm(ServiceRequest req) {
-    str << sep() << serviceReqName(req);
+    str << sep() << svcreq::to_name(req);
   }
   void imm(TransFlags f) {
     if (f.noinlineSingleton) str << sep() << "noinlineSingleton";
@@ -218,7 +219,7 @@ std::string show(Vreg r) {
   if (!r.isValid()) return "%?";
   std::ostringstream str;
   if (r.isPhys()) {
-    mcg->backEnd().streamPhysReg(str, r);
+    str << show(r.physReg());
   } else {
     str << "%" << size_t(r);
   }
@@ -231,6 +232,10 @@ std::string show(Vptr p) {
   auto prefix = false;
   if (p.seg == Vptr::FS) {
     str += "%fs";
+    prefix = true;
+  }
+  if (p.seg == Vptr::GS) {
+    str += "%gs";
     prefix = true;
   }
   if (p.base.isValid()) {
@@ -293,28 +298,28 @@ std::string show(const Vunit& unit, const Vinstr& inst) {
 }
 
 void printBlock(std::ostream& out, const Vunit& unit,
-                const PredVector& preds, Vlabel b) {
+                const PredVector& preds, Vlabel b,
+                const IRInstruction*& origin) {
   auto& block = unit.blocks[b];
   out << '\n' << color(ANSI_COLOR_MAGENTA);
-  out << folly::format(" B{: <11} {}", size_t(b),
+  out << folly::format(" B{: <6} {}", size_t(b),
            area_names[int(block.area)]);
   for (auto p : preds[b]) out << ", B" << size_t(p);
-  out << color(ANSI_COLOR_END);
+  out << color(ANSI_COLOR_END) << '\n';
 
   if (block.code.empty()) {
     out << "        <empty>\n";
     return;
   }
 
-  if (!block.code.front().origin) out << '\n';
-
-  const IRInstruction* currentOrigin = nullptr;
   for (auto& inst : block.code) {
-    if (currentOrigin != inst.origin && inst.origin) {
-      currentOrigin = inst.origin;
-      out << "\n    " << currentOrigin->toString() << '\n';
+    out << "      ";
+    if (origin != inst.origin && inst.origin) {
+      origin = inst.origin;
+      out << folly::format("{:<45} # {}\n", show(unit, inst), *origin);
+    } else {
+      out << show(unit, inst) << '\n';
     }
-    out << "        " << show(unit, inst) << '\n';
   }
 }
 
@@ -357,8 +362,9 @@ std::string show(const Vunit& unit) {
 
   // Print reachable blocks first.
   auto reachableBlocks = sortBlocks(unit);
+  const IRInstruction* origin = nullptr;
   for (auto b : reachableBlocks) {
-    printBlock(out, unit, preds, b);
+    printBlock(out, unit, preds, b, origin);
     reachableSet.set(b);
   }
 
@@ -369,7 +375,9 @@ std::string show(const Vunit& unit) {
   if (Trace::moduleEnabledRelease(Trace::vasm, kVasmUnreachableLevel)) {
     out << "\nUnreachable blocks:\n";
     for (size_t b = 0; b < unit.blocks.size(); b++) {
-      if (!reachableSet.test(b)) printBlock(out, unit, preds, Vlabel{b});
+      if (!reachableSet.test(b)) {
+        printBlock(out, unit, preds, Vlabel{b}, origin);
+      }
     }
   } else {
     out << folly::format("\n{} unreachable blocks not shown. "
@@ -389,5 +397,7 @@ void printUnit(int level, const std::string& caption, const Vunit& unit) {
     banner("")
   );
 }
+
+///////////////////////////////////////////////////////////////////////////////
 
 }}

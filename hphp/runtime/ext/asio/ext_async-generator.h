@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -19,7 +19,7 @@
 #define incl_HPHP_EXT_ASIO_ASYNC_GENERATOR_H_
 
 #include "hphp/runtime/ext/extension.h"
-#include "hphp/runtime/ext/ext_generator.h"
+#include "hphp/runtime/ext/generator/ext_generator.h"
 #include "hphp/runtime/vm/resumable.h"
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/system/systemlib.h"
@@ -30,17 +30,24 @@ class c_StaticWaitHandle;
 class c_WaitableWaitHandle;
 
 ///////////////////////////////////////////////////////////////////////////////
-// class AsyncGeneratorData
+// class AsyncGenerator
 
-class AsyncGeneratorData final : public BaseGeneratorData {
+class AsyncGenerator final : public BaseGenerator {
 public:
-  ~AsyncGeneratorData();
+   AsyncGenerator() : m_waitHandle(nullptr) {}
+  ~AsyncGenerator();
 
   static ObjectData* Create(const ActRec* fp, size_t numSlots,
                             jit::TCA resumeAddr, Offset resumeOffset);
-  static AsyncGeneratorData* fromObject(ObjectData *obj);
+  static Class* getClass() {
+    assert(s_class);
+    return s_class;
+  }
   static constexpr ptrdiff_t objectOff() {
-    return sizeof(AsyncGeneratorData);
+    return -(Native::dataOffset<AsyncGenerator>());
+  }
+  static AsyncGenerator* fromObject(ObjectData *obj) {
+    return Native::data<AsyncGenerator>(obj);
   }
 
   c_AsyncGeneratorWaitHandle* await(Offset resumeOffset,
@@ -52,51 +59,29 @@ public:
   void failCpp();
 
   ObjectData* toObject() {
-    return reinterpret_cast<ObjectData*>(
-      reinterpret_cast<char*>(this) + objectOff());
+    return Native::object<AsyncGenerator>(this);
   }
 
   bool isEagerlyExecuted() const {
-    assert(getState() == State::Running);
+    assert(isRunning());
     return m_waitHandle == nullptr;
   }
 
   c_AsyncGeneratorWaitHandle* getWaitHandle() const {
-    assert(getState() == State::Running);
+    assert(isRunning());
     return m_waitHandle;
   }
+
 private:
   // valid only in Running state; null during eager execution
   c_AsyncGeneratorWaitHandle* m_waitHandle;
-};
-///////////////////////////////////////////////////////////////////////////////
-// class AsyncGenerator
-
-class c_AsyncGenerator final : public BaseGenerator {
-public:
-  DECLARE_CLASS_NO_SWEEP(AsyncGenerator)
-
-  explicit c_AsyncGenerator(Class* cls = c_AsyncGenerator::classof())
-    : BaseGenerator(cls)
-  {}
-  ~c_AsyncGenerator() {
-    data()->~AsyncGeneratorData();
-  }
-  void t___construct();
-  void t_next();
-  void t_send(const Variant& value);
-  void t_raise(const Object& exception);
 
 public:
-  AsyncGeneratorData *data() {
-    return reinterpret_cast<AsyncGeneratorData*>(reinterpret_cast<char*>(
-      static_cast<BaseGenerator*>(this)) - AsyncGeneratorData::objectOff());
-  }
+  static Class* s_class;
+  static const StaticString s_className;
 };
 
 ///////////////////////////////////////////////////////////////////////////////
 }
-
-#include "hphp/runtime/ext/asio/ext_async-generator-inl.h"
 
 #endif // incl_HPHP_EXT_ASIO_ASYNC_GENERATOR_H_

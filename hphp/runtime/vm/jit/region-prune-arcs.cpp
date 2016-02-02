@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -59,10 +59,11 @@ std::string DEBUG_ONLY show(const State& state) {
   return ret;
 }
 
-State entry_state(const RegionDesc& region) {
+State entry_state(const RegionDesc& region, std::vector<Type>* input) {
   auto const numLocals = region.start().func()->numLocals();
   auto ret = State{};
   ret.initialized = true;
+  if (input) ret.locals = *input;
   ret.locals.resize(numLocals, TGen);
   return ret;
 }
@@ -96,11 +97,7 @@ bool preconds_may_pass(const RegionDesc::Block& block,
   }
 
   auto const& preConds = block.typePreConditions();
-  auto preCond_it = preConds.find(block.start());
-  for (;
-      preCond_it != end(preConds) && preCond_it->first == block.start();
-      ++preCond_it) {
-    auto const preCond = preCond_it->second;
+  for (auto const& preCond : preConds) {
     using L = RegionDesc::Location::Tag;
     switch (preCond.location.tag()) {
     case L::Stack: break;
@@ -157,7 +154,7 @@ void apply_transfer_function(State& dst, const PostConditions& postConds) {
 
 }
 
-void region_prune_arcs(RegionDesc& region) {
+void region_prune_arcs(RegionDesc& region, std::vector<Type>* input) {
   FTRACE(4, "region_prune_arcs\n");
 
   region.sortBlocks();
@@ -175,27 +172,13 @@ void region_prune_arcs(RegionDesc& region) {
     blockToRPO[binfo.blockID] = rpoID;
   }
   workQ.push(0);
-  blockInfos[0].in = entry_state(region);
+  blockInfos[0].in = entry_state(region, input);
 
   FTRACE(4, "Iterating:\n");
   do {
     auto const rpoID = workQ.pop();
     auto& binfo = blockInfos[rpoID];
     FTRACE(4, "B{}\n", binfo.blockID);
-
-    /*
-     * This code currently assumes inlined functions were entirely contained
-     * within a single profiling translation, and will need updates if we
-     * inline bigger things in a way visible to region selection.
-     *
-     * Note: inlined blocks /may/ have postConditions, if they are the last
-     * blocks from profiling translations.  Currently any locations referred to
-     * in postconditions for these blocks are for the outermost caller, so this
-     * code handles that correctly.
-     */
-    if (region.block(binfo.blockID)->inlineLevel() != 0) {
-      assertx(region.block(binfo.blockID)->typePreConditions().empty());
-    }
 
     binfo.out = binfo.in;
     apply_transfer_function(

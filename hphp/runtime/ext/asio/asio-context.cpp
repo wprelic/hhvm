@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -21,12 +21,12 @@
 #include "hphp/runtime/base/request-injection-data.h"
 #include "hphp/runtime/ext/asio/asio-external-thread-event-queue.h"
 #include "hphp/runtime/ext/asio/asio-session.h"
-#include "hphp/runtime/ext/asio/external-thread-event-wait-handle.h"
-#include "hphp/runtime/ext/asio/sleep-wait-handle.h"
-#include "hphp/runtime/ext/asio/reschedule-wait-handle.h"
-#include "hphp/runtime/ext/asio/resumable-wait-handle.h"
-#include "hphp/runtime/ext/asio/resumable-wait-handle-defs.h"
-#include "hphp/runtime/ext/asio/waitable-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_external-thread-event-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_sleep-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_reschedule-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_resumable-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_resumable-wait-handle-defs.h"
+#include "hphp/runtime/ext/asio/ext_waitable-wait-handle.h"
 #include "hphp/runtime/ext/intervaltimer/ext_intervaltimer.h"
 #include "hphp/runtime/ext/xenon/ext_xenon.h"
 #include "hphp/runtime/vm/event-hook.h"
@@ -39,7 +39,7 @@ namespace HPHP {
 namespace {
   template<bool decRef, class TWaitHandle>
   void exitContextQueue(context_idx_t ctx_idx,
-                        smart::deque<TWaitHandle*>& queue) {
+                        req::deque<TWaitHandle*>& queue) {
     while (!queue.empty()) {
       auto wait_handle = queue.front();
       queue.pop_front();
@@ -50,7 +50,7 @@ namespace {
 
   template<class TWaitHandle>
   void exitContextVector(context_idx_t ctx_idx,
-                         smart::vector<TWaitHandle*> &vector) {
+                         req::vector<TWaitHandle*> &vector) {
     while (!vector.empty()) {
       auto wait_handle = vector.back();
       vector.pop_back();
@@ -89,6 +89,7 @@ void AsioContext::exit(context_idx_t ctx_idx) {
   assert(AsioSession::Get()->getContext(ctx_idx) == this);
 
   exitContextVector(ctx_idx, m_runnableQueue);
+  exitContextVector(ctx_idx, m_fastRunnableQueue);
 
   for (auto& it : m_priorityQueueDefault) {
     exitContextQueue<true>(ctx_idx, it.second);
@@ -134,6 +135,13 @@ void AsioContext::runUntil(c_WaitableWaitHandle* wait_handle) {
       continue;
     }
 
+    if (!m_fastRunnableQueue.empty()) {
+      auto current = m_fastRunnableQueue.back();
+      m_fastRunnableQueue.pop_back();
+      current->resume();
+      continue;
+    }
+
     // Process all sleep handles that have completed their sleep.
     if (session->processSleepEvents()) {
       continue;
@@ -154,12 +162,19 @@ void AsioContext::runUntil(c_WaitableWaitHandle* wait_handle) {
     // Wait for pending external thread events...
     if (!m_externalThreadEvents.empty()) {
       // ...but only until the next sleeper (from any context) finishes.
-      auto waketime = session->sleepWakeTime();
 
       // Wait if necessary.
       if (LIKELY(!ete_queue->hasReceived())) {
         onIOWaitEnter(session);
-        ete_queue->receiveSomeUntil(waketime);
+        // check if onIOWaitEnter callback unblocked any wait handles
+        if (LIKELY(m_runnableQueue.empty() &&
+                   m_fastRunnableQueue.empty() &&
+                   !m_externalThreadEvents.empty() &&
+                   !ete_queue->hasReceived() &&
+                   m_priorityQueueDefault.empty())) {
+          auto waketime = session->sleepWakeTime();
+          ete_queue->receiveSomeUntil(waketime);
+        }
         onIOWaitExit(session);
       }
 
@@ -179,7 +194,13 @@ void AsioContext::runUntil(c_WaitableWaitHandle* wait_handle) {
     // be ready (in any context).
     if (!m_sleepEvents.empty()) {
       onIOWaitEnter(session);
-      std::this_thread::sleep_until(session->sleepWakeTime());
+      // check if onIOWaitEnter callback unblocked any wait handles
+      if (LIKELY(m_runnableQueue.empty() &&
+                 m_fastRunnableQueue.empty() &&
+                 m_externalThreadEvents.empty() &&
+                 m_priorityQueueDefault.empty())) {
+        std::this_thread::sleep_until(session->sleepWakeTime());
+      }
       onIOWaitExit(session);
 
       session->processSleepEvents();
@@ -200,7 +221,7 @@ void AsioContext::runUntil(c_WaitableWaitHandle* wait_handle) {
     // But we can't, the cycles are detected and avoided at blockOn() time.
     // So, looks like it's not cycle, but the word I started typing first.
     assert(false);
-    throw FatalErrorException(
+    raise_fatal_error(
       "Invariant violation: queues are empty, but wait handle did not finish");
   }
 }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -47,8 +47,10 @@ private:
   bool handleConstSizeRequest (const std::string &cmd, Transport *transport);
   bool handleStaticStringsRequest(const std::string &cmd,
                                   Transport *transport);
-  bool handleDumpStaticStrings(const std::string &cmd, Transport *transport,
-                               const std::string &filename);
+  bool handleDumpStaticStringsRequest(const std::string &cmd,
+                                      const std::string &filename);
+  bool handleRandomStaticStringsRequest(const std::string &cmd,
+                                        Transport *transport);
   bool handleVMRequest      (const std::string &cmd, Transport *transport);
   void handleProxyRequest(const std::string& cmd, Transport *transport);
   bool handleRandomApcRequest (const std::string &cmd, Transport *transport);

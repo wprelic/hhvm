@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -30,8 +30,8 @@
 #include "hphp/runtime/vm/jit/type.h"
 
 #include "hphp/util/arena.h"
-#include "hphp/runtime/ext/asio/async-function-wait-handle.h"
-#include "hphp/runtime/ext/asio/static-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_async-function-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_static-wait-handle.h"
 
 #include <folly/Range.h>
 
@@ -209,7 +209,7 @@ Type unboxPtr(Type t) {
 Type boxPtr(Type t) {
   auto const rawBoxed = t.deref().unbox().box();
   auto const noNull = rawBoxed - TBoxedUninit;
-  return noNull.ptr(remove_ref(t.ptrKind()));
+  return noNull.ptr(t.ptrKind() - Ptr::Ref);
 }
 
 Type allocObjReturn(const IRInstruction* inst) {
@@ -243,11 +243,11 @@ Type arrElemReturn(const IRInstruction* inst) {
 
   auto resultType = inst->hasTypeParam() ? inst->typeParam() : TGen;
   if (inst->is(ArrayGet)) {
-    resultType &= TInit;
+    resultType &= TInitGen;
   }
 
-  // Elements of a static array are uncounted
-  if (inst->src(0)->isA(TStaticArr)) {
+  // Elements of a noncounted array are uncounted
+  if (inst->src(0)->isA(TPersistentArr)) {
     resultType &= TUncountedInit;
   }
 
@@ -352,6 +352,13 @@ Type outputType(const IRInstruction* inst, int dstId) {
 #define DParam          return inst->typeParam();
 #define DParamPtr(k)    assertx(inst->typeParam() <= TGen.ptr(Ptr::k)); \
                         return inst->typeParam();
+#define DLdObjCls {                                                \
+  if (auto spec = inst->src(0)->type().clsSpec()) {                \
+    auto const cls = spec.cls();                                   \
+    return spec.exact() ? Type::ExactCls(cls) : Type::SubCls(cls); \
+  }                                                                \
+  return TCls;                                                     \
+}
 #define DUnboxPtr       return unboxPtr(inst->src(0)->type());
 #define DBoxPtr         return boxPtr(inst->src(0)->type());
 #define DAllocObj       return allocObjReturn(inst);
@@ -383,6 +390,7 @@ Type outputType(const IRInstruction* inst, int dstId) {
 #undef DParamMayRelax
 #undef DParam
 #undef DParamPtr
+#undef DLdObjCls
 #undef DUnboxPtr
 #undef DBoxPtr
 #undef DAllocObj

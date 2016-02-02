@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,7 +15,6 @@
 */
 
 #include <algorithm>
-#include <cxxabi.h>
 #include <fstream>
 #include <sstream>
 #include <iostream>
@@ -43,7 +42,7 @@ std::unordered_map<fbstring, const PhpClass*> g_classMap;
 // this purpose, not part of the normal argument sequence.
 bool g_armMode = false;
 
-constexpr char* g_allIncludes = R"(
+const char* const g_allIncludes = R"(
 #include "hphp/runtime/ext_hhvm/ext_hhvm.h"
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/array-init.h"
@@ -86,10 +85,10 @@ void delete_{0:s}(ObjectData* obj, const Class* cls) {{
 
   auto const builtinSz = sizeof(c_{0:s}) - sizeof(ObjectData);
   auto const size = ObjectData::sizeForNProps(nProps) + builtinSz;
-  if (LIKELY(size <= kMaxSmartSize)) {{
-    return MM().smartFreeSize(ptr, size);
+  if (LIKELY(size <= kMaxSmallSize)) {{
+    return MM().freeSmallSize(ptr, size);
   }}
-  return MM().smartFreeSizeBig(ptr, size);
+  return MM().freeBigSize(ptr, size);
 }})",
     className) << "\n\n";
 }
@@ -203,7 +202,7 @@ void emitCast(const PhpParam& param, int32_t index, std::ostream& out,
   if (doCheck) {
     out << ind << "if (";
     if (param.kindOf() == KindOfString) {
-      out << "!IS_STRING_TYPE((args-" << index << ")->m_type)";
+      out << "!isStringType((args-" << index << ")->m_type)";
     } else {
       out << "(args-" << index << ")->m_type != KindOf"
           << kindOfString(param.kindOf());
@@ -259,7 +258,7 @@ void emitTypechecks(const PhpFunc& func, std::ostream& out, const char* ind) {
       out << "(count <= " << k << " || ";
     }
     if (kindof == KindOfString) {
-      out << "IS_STRING_TYPE((args - " << k << ")->m_type)";
+      out << "isStringType((args - " << k << ")->m_type)";
     } else {
       out << "(args - " << k << ")->m_type == KindOf" << kindOfString(kindof);
     }
@@ -289,7 +288,7 @@ void emitBuildExtraArgs(const PhpFunc& func, std::ostream& out,
 {0}      ai.set(i-{1}, tvAsVariant(extraArg));
 {0}    }}
 {0}  }}
-{0}  extraArgs = ai.create();
+{0}  extraArgs = ai.toArray();
 {0}}}
 )",
     ind,
@@ -603,8 +602,7 @@ static void emitClassCtorAndDtor(const PhpClass& klass, std::ostream& out) {
  * fh_ or th_ function pointer alias, which is the f_/t_ signature with ABI
  * exposed.
  */
-void processFunc(const PhpFunc& func, std::ostream& header,
-                 std::ostream& cpp) {
+void processFunc(const PhpFunc& func, std::ostream& cpp) {
   bool isMethod = func.isMethod();
   auto classIt = g_classMap.find(func.className());
   if (classIt != g_classMap.end()) {
@@ -738,9 +736,9 @@ void processFunc(const PhpFunc& func, std::ostream& header,
 }
 
 int main(int argc, const char* argv[]) {
-  if (argc < 5) {
+  if (argc < 4) {
     std::cout << "Usage: " << argv[0]
-              << " <x64|arm> <output .h> <output .cpp> <*.idl.json>...\n";
+              << " <x64|arm> <output .cpp> <*.idl.json>...\n";
     return 0;
   }
 
@@ -749,16 +747,14 @@ int main(int argc, const char* argv[]) {
 
   g_armMode = (strcmp(argv[1], "arm") == 0);
 
-  std::ofstream header(argv[2]);
-  std::ofstream cpp(argv[3]);
+  std::ofstream cpp(argv[2]);
 
-  brandOutputFile(header, "gen-ext-hhvm.cpp", invocation_trace);
   brandOutputFile(cpp, "gen-ext-hhvm.cpp", invocation_trace);
 
   fbvector<PhpFunc> funcs;
   fbvector<PhpClass> classes;
 
-  for (auto i = 4; i < argc; ++i) {
+  for (auto i = 3; i < argc; ++i) {
     try {
       parseIDL(argv[i], funcs, classes);
     } catch (const std::exception& exc) {
@@ -777,16 +773,14 @@ int main(int argc, const char* argv[]) {
     }
   }
 
-  header << "namespace HPHP {\n\n";
   cpp << g_allIncludes << "\n";
   cpp << "namespace HPHP {\n\n";
 
   auto idlIt = g_funcVec.begin();
   for (; idlIt != g_funcVec.end(); ++idlIt) {
-    processFunc(**idlIt, header, cpp);
+    processFunc(**idlIt, cpp);
   }
 
-  header << "} // namespace HPHP\n";
   cpp << "} // namespace HPHP\n";
 
   return 0;

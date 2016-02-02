@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -37,38 +37,29 @@ void surpriseCheck(IRGS& env, Offset relOffset) {
  * offset is in the current RegionDesc.
  */
 Block* getBlock(IRGS& env, Offset offset) {
+  SrcKey sk(curSrcKey(env), offset);
   // If hasBlock returns true, then IRUnit already has a block for that offset
   // and makeBlock will just return it.  This will be the proper successor
   // block set by setSuccIRBlocks.  Otherwise, the given offset doesn't belong
   // to the region, so we just create an exit block.
-  if (!env.irb->hasBlock(offset)) return makeExit(env, offset);
+  if (!env.irb->hasBlock(sk)) return makeExit(env, offset);
 
-  return env.irb->makeBlock(offset);
+  return env.irb->makeBlock(sk, curProfCount(env));
 }
 
 //////////////////////////////////////////////////////////////////////
 
-void jmpImpl(IRGS& env, Offset offset, JmpFlags flags) {
-  if (flags & JmpFlagNextIsMerge) {
-    prepareForHHBCMergePoint(env);
-  }
+void jmpImpl(IRGS& env, Offset offset) {
   auto target = getBlock(env, offset);
   assertx(target != nullptr);
   gen(env, Jmp, target);
 }
 
 void implCondJmp(IRGS& env, Offset taken, bool negate, SSATmp* src) {
-  auto const flags = instrJmpFlags(*env.currentNormalizedInstruction);
-  if (flags & JmpFlagEndsRegion) {
-    spillStack(env);
-  }
-  if ((flags & JmpFlagNextIsMerge) != 0) {
-    prepareForHHBCMergePoint(env);
-  }
   auto const target = getBlock(env, taken);
   assertx(target != nullptr);
   auto const boolSrc = gen(env, ConvCellToBool, src);
-  gen(env, DecRef, src);
+  decRef(env, src);
   gen(env, negate ? JmpZero : JmpNZero, target, boolSrc);
 }
 
@@ -77,12 +68,11 @@ void implCondJmp(IRGS& env, Offset taken, bool negate, SSATmp* src) {
 void emitJmp(IRGS& env, Offset relOffset) {
   surpriseCheck(env, relOffset);
   auto const offset = bcOff(env) + relOffset;
-  jmpImpl(env, offset, instrJmpFlags(*env.currentNormalizedInstruction));
+  jmpImpl(env, offset);
 }
 
 void emitJmpNS(IRGS& env, Offset relOffset) {
-  jmpImpl(env, bcOff(env) + relOffset,
-    instrJmpFlags(*env.currentNormalizedInstruction));
+  jmpImpl(env, bcOff(env) + relOffset);
 }
 
 void emitJmpZ(IRGS& env, Offset relOffset) {
@@ -124,10 +114,6 @@ void emitSwitch(IRGS& env,
     zeroOff = defaultOff;
   }
 
-  if (instrJmpFlags(*env.currentNormalizedInstruction) & JmpFlagNextIsMerge) {
-    prepareForHHBCMergePoint(env);
-  }
-
   if (type <= TNull) {
     gen(env, Jmp, getBlock(env, zeroOff));
     return;
@@ -139,7 +125,7 @@ void emitSwitch(IRGS& env,
     return;
   }
   if (type <= TArr) {
-    gen(env, DecRef, switchVal);
+    decRef(env, switchVal);
     gen(env, Jmp, getBlock(env, defaultOff));
     return;
   }
@@ -184,7 +170,8 @@ void emitSwitch(IRGS& env,
   // included in the region.
   auto const shouldLower =
     std::any_of(offsets.begin(), offsets.end(), [&](Offset o) {
-      return env.irb->hasBlock(bcOff(env) + o);
+      SrcKey sk(curSrcKey(env), bcOff(env) + o);
+      return env.irb->hasBlock(sk);
     });
   if (shouldLower && profile.optimizing()) {
     auto const values = sortedSwitchProfile(profile, iv.size());
@@ -199,7 +186,8 @@ void emitSwitch(IRGS& env,
     // fully-generic JmpSwitchDest at the end if nothing matches.
     for (auto const& val : values) {
       auto targetOff = bcOff(env) + offsets[val.caseIdx];
-      if (!env.irb->hasBlock(targetOff)) continue;
+      SrcKey sk(curSrcKey(env), targetOff);
+      if (!env.irb->hasBlock(sk)) continue;
 
       if (bounded && val.caseIdx == iv.size() - 2) {
         // If we haven't checked bounds yet and this is the "first non-zero"
@@ -238,7 +226,6 @@ void emitSwitch(IRGS& env,
   data.invSPOff    = invSPOff(env);
   data.irSPOff     = offsetFromIRSP(env, BCSPOffset{0});
 
-  spillStack(env);
   gen(env, JmpSwitchDest, data, index, sp(env), fp(env));
 }
 
@@ -281,7 +268,7 @@ void emitSSwitch(IRGS& env, const ImmVector& iv) {
                                  : LdSSwitchDestSlow,
                         data,
                         testVal);
-  gen(env, DecRef, testVal);
+  decRef(env, testVal);
   gen(
     env,
     JmpSSwitchDest,

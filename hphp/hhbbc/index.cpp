@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -542,7 +542,7 @@ std::string show(const Class& c) {
       return s->data();
     },
     [] (borrowed_ptr<ClassInfo> cinfo) {
-      return folly::format("{}*", cinfo->cls->name->data()).str();
+      return folly::format("{}*", cinfo->cls->name).str();
     }
   );
 }
@@ -1169,12 +1169,12 @@ void trace_interfaces(const IndexData& index, const ConflictGraph& cg) {
     if (cgIt == end(cg.map)) break;
     auto& conflicts = cgIt->second;
 
-    folly::format(&out, "{:>40} {:3} {:2} [", iface->name->data(),
+    folly::format(&out, "{:>40} {:3} {:2} [", iface->name,
                   conflicts.size(),
                   folly::get_default(index.ifaceSlotMap, iface));
     auto sep = "";
     for (auto conflict : conflicts) {
-      folly::format(&out, "{}{}", sep, conflict->name->data());
+      folly::format(&out, "{}{}", sep, conflict->name);
       sep = ", ";
     }
     folly::format(&out, "]\n");
@@ -1184,7 +1184,7 @@ void trace_interfaces(const IndexData& index, const ConflictGraph& cg) {
   for (auto& item : classes) {
     if (item.vtable.empty()) break;
 
-    folly::format(&out, "{:>30}: [", item.cinfo->cls->name->data());
+    folly::format(&out, "{:>30}: [", item.cinfo->cls->name);
     auto sep = "";
     for (auto iface : item.vtable) {
       folly::format(&out, "{}{}", sep, iface ? iface->name->data() : "null");
@@ -2065,8 +2065,9 @@ Type Index::lookup_constraint(Context ctx, const TypeConstraint& tc) const {
         case KindOfBoolean:      return TBool;
         case KindOfInt64:        return TInt;
         case KindOfDouble:       return TDbl;
+        case KindOfPersistentString:
         case KindOfString:       return TStr;
-        case KindOfStaticString: return TStr;
+        case KindOfPersistentArray:
         case KindOfArray:        return TArr;
         case KindOfResource:     return TRes;
         case KindOfObject:
@@ -2142,8 +2143,9 @@ Type Index::satisfies_constraint_helper(Context ctx,
         case KindOfBoolean:      return TBool;
         case KindOfInt64:        return TInt;
         case KindOfDouble:       return TDbl;
+        case KindOfPersistentString:
         case KindOfString:       return TStr;
-        case KindOfStaticString: return TStr;
+        case KindOfPersistentArray:
         case KindOfArray:        return TArr;
         case KindOfResource:     return TRes;
         case KindOfObject:
@@ -2185,6 +2187,25 @@ Type Index::satisfies_constraint_helper(Context ctx,
   }
 
   return TBottom;
+}
+
+bool Index::is_async_func(res::Func rfunc) const {
+  return match<bool>(
+    rfunc.val,
+    [&] (res::Func::FuncName s)        { return false; },
+    [&] (res::Func::MethodName s)      { return false; },
+    [&] (borrowed_ptr<FuncInfo> finfo) {
+      return finfo->func->isAsync && !finfo->func->isGenerator;
+    },
+    [&] (borrowed_ptr<FuncFamily> fam) {
+      for (auto const& finfo : fam->possibleFuncs) {
+        if (!finfo->func->isAsync || finfo->func->isGenerator) {
+          return false;
+        }
+      }
+      return true;
+    }
+  );
 }
 
 Type Index::lookup_class_constant(Context ctx,
@@ -2351,7 +2372,7 @@ Type Index::lookup_public_static(Type cls, Type name) const {
   }();
 
   auto const vname = tv(name);
-  if (!vname || (vname && vname->m_type != KindOfStaticString)) {
+  if (!vname || (vname && vname->m_type != KindOfPersistentString)) {
     return TInitGen;
   }
   auto const sname = vname->m_data.pstr;
@@ -2633,7 +2654,7 @@ void PublicSPropIndexer::merge(Context ctx, Type tcls, Type name, Type val) {
 
   auto const cinfo = *maybe_cinfo;
   bool const unknownName = !vname ||
-    (vname && vname->m_type != KindOfStaticString);
+    (vname && vname->m_type != KindOfPersistentString);
 
   if (!cinfo) {
     if (unknownName) {

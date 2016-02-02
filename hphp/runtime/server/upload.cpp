@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -26,6 +26,7 @@
 #include "hphp/runtime/base/string-util.h"
 #include "hphp/util/text-util.h"
 #include "hphp/runtime/base/request-event-handler.h"
+#include <folly/FileUtil.h>
 
 using std::set;
 
@@ -50,6 +51,7 @@ struct Rfc1867Data final : RequestEventHandler {
   void requestShutdown() override {
     if (!rfc1867UploadedFiles.empty()) destroy_uploaded_files();
   }
+  void vscan(IMarker&) const override {}
 };
 IMPLEMENT_STATIC_REQUEST_LOCAL(Rfc1867Data, s_rfc1867_data);
 
@@ -258,6 +260,7 @@ static uint32_t read_post(multipart_buffer *self, char *buf,
     memcpy(buf + bytes_read, self->cursor, extra_byte_read);
     bytes_to_read -= extra_byte_read;
     bytes_read += extra_byte_read;
+    self->cursor += extra_byte_read;
   }
   return bytes_read;
 }
@@ -974,8 +977,7 @@ void rfc1867PostHandler(Transport* transport,
           cancel_upload = UPLOAD_ERROR_B;
         } else if (blen > 0) {
 
-          wlen = write(fd, buff, blen);
-
+          wlen = folly::writeFull(fd, buff, blen);
           if (wlen < blen) {
             Logger::Verbose("Only %zd bytes were written, expected to "
                             "write %zd", wlen, blen);

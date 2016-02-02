@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -14,33 +14,39 @@
    +----------------------------------------------------------------------+
 */
 
-#ifndef incl_HPHP_VM_TRANSLATOR_UNWIND_X64_H_
-#define incl_HPHP_VM_TRANSLATOR_UNWIND_X64_H_
+#ifndef incl_HPHP_JIT_UNWIND_X64_H_
+#define incl_HPHP_JIT_UNWIND_X64_H_
 
 #include <cstdlib>
+#include <exception>
+#include <memory>
 #include <sstream>
 #include <string>
-#include <unwind.h>
-#include <memory>
-#include <exception>
 #include <typeinfo>
 
 #include "hphp/runtime/base/rds.h"
 #include "hphp/runtime/base/typed-value.h"
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/tread-hash-map.h"
+
 #include "hphp/util/asm-x64.h"
-#include "hphp/util/assertions.h"
+#include "hphp/util/eh-frame.h"
+
+#ifndef _MSC_VER
+#include <unwind.h>
+#else
+#include "hphp/runtime/vm/jit/unwind-msvc.h"
+#endif
 
 namespace HPHP {
+
 struct ActRec;
 
 namespace jit {
 
 //////////////////////////////////////////////////////////////////////
 
-typedef TreadHashMap<CTCA, TCA, ctca_identity_hash> CatchTraceMap;
+using CatchTraceMap = TreadHashMap<CTCA, TCA, ctca_identity_hash>;
 
 /*
  * Information the unwinder needs stored in RDS, and the rds::Link for
@@ -143,8 +149,7 @@ inline const std::type_info& typeInfoFromUnwindException(
  * Called whenever we create a new translation cache for the whole
  * region of code.
  */
-typedef std::shared_ptr<void> UnwindInfoHandle;
-UnwindInfoHandle register_unwind_region(unsigned char* address, size_t size);
+EHFrameHandle register_unwind_region(unsigned char* address, size_t size);
 
 /*
  * The personality routine for code emitted by the jit.

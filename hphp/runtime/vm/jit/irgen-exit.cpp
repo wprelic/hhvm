@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -18,6 +18,8 @@
 #include "hphp/runtime/vm/jit/normalized-instruction.h"
 #include "hphp/runtime/vm/jit/irgen-internal.h"
 
+#include "hphp/runtime/vm/hhbc-codec.h"
+
 namespace HPHP { namespace jit { namespace irgen {
 
 namespace {
@@ -25,10 +27,11 @@ namespace {
 //////////////////////////////////////////////////////////////////////
 
 bool branchesToItself(SrcKey sk) {
-  auto op = (Op*)sk.pc();
-  if (!instrIsControlFlow(*op)) return false;
-  if (isSwitch(*op)) return false;
-  auto const branchOffsetPtr = instrJumpOffset(op);
+  auto const pc = sk.pc();
+  auto const op = peek_op(pc);
+  if (!instrIsControlFlow(op)) return false;
+  if (isSwitch(op)) return false;
+  auto const branchOffsetPtr = instrJumpOffset(pc);
   return branchOffsetPtr != nullptr && *branchOffsetPtr == 0;
 }
 
@@ -83,9 +86,8 @@ Block* implMakeExit(IRGS& env, TransFlags trflags, Offset targetBcOff,
     PUNT(MakeExitAtBranchToItself);
   }
 
-  auto const exit = env.unit.defBlock(Block::Hint::Unlikely);
+  auto const exit = defBlock(env, Block::Hint::Unlikely);
   BlockPusher bp(*env.irb, makeMarker(env, targetBcOff), exit);
-  spillStack(env);
   exitRequest(env, trflags, SrcKey{curSrcKey(env), targetBcOff});
   return exit;
 }
@@ -107,7 +109,7 @@ Block* makeGuardExit(IRGS& env, TransFlags flags) {
 }
 
 Block* makeExitSlow(IRGS& env) {
-  auto const exit = env.unit.defBlock(Block::Hint::Unlikely);
+  auto const exit = defBlock(env, Block::Hint::Unlikely);
   BlockPusher bp(*env.irb, makeMarker(env, bcOff(env)), exit);
   interpOne(env, *env.currentNormalizedInstruction);
   // If it changes the PC, InterpOneCF will get us to the new location.
@@ -126,9 +128,8 @@ Block* makePseudoMainExit(IRGS& env) {
 Block* makeExitOpt(IRGS& env, TransID transId) {
   assertx(!isInlining(env));
   auto const targetBcOff = bcOff(env);
-  auto const exit = env.unit.defBlock(Block::Hint::Unlikely);
+  auto const exit = defBlock(env, Block::Hint::Unlikely);
   BlockPusher blockPusher(*env.irb, makeMarker(env, targetBcOff), exit);
-  spillStack(env);
   auto const data = ReqRetranslateOptData {
     transId,
     SrcKey { curSrcKey(env), targetBcOff },

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -15,8 +15,12 @@
 */
 #include "hphp/runtime/base/exceptions.h"
 
+#include "hphp/system/systemlib.h"
 #include "hphp/runtime/base/execution-context.h"
 #include "hphp/runtime/base/backtrace.h"
+#include "hphp/runtime/base/imarker.h"
+#include "hphp/runtime/base/type-variant.h"
+#include "hphp/runtime/vm/vm-regs.h"
 
 namespace HPHP {
 
@@ -44,6 +48,46 @@ ExtendedException::ExtendedException(const char *fmt, ...) {
   format(fmt, ap);
   va_end(ap);
   computeBacktrace();
+}
+
+ExtendedException::ExtendedException(const std::string& msg,
+                                     ArrayData* backTrace)
+  : m_btp(backTrace)
+{
+  m_msg = msg;
+}
+
+/*
+ * Normally we wouldn't need an explicit copy/move-constructors, or
+ * copy/move-assignment operators, but we have to make sure m_key isn't copied.
+ */
+
+ExtendedException::ExtendedException(const ExtendedException& other)
+  : Exception(other),
+    m_btp(other.m_btp),
+    m_silent(other.m_silent)
+{}
+
+ExtendedException::ExtendedException(ExtendedException&& other) noexcept
+  : Exception(std::move(other)),
+    m_btp(std::move(other.m_btp)),
+    m_silent(other.m_silent)
+{}
+
+ExtendedException&
+ExtendedException::operator=(const ExtendedException& other) {
+  Exception::operator=(other);
+  m_btp = other.m_btp;
+  m_silent = other.m_silent;
+  return *this;
+}
+
+ExtendedException&
+ExtendedException::operator=(ExtendedException&& other) noexcept {
+  Exception::operator=(std::move(other));
+  m_btp = std::move(other.m_btp);
+  m_silent = other.m_silent;
+  return *this;
 }
 
 Array ExtendedException::getBacktrace() const {
@@ -101,5 +145,23 @@ void throw_not_supported(const char* feature, const char* reason) {
   throw ExtendedException("%s is not supported: %s", feature, reason);
 }
 
+///////////////////////////////////////////////////////////////////////////////
+
+ATTRIBUTE_NORETURN
+void raise_fatal_error(const char* msg,
+                       const Array& bt /* = null_array */,
+                       bool recoverable /* = false */,
+                       bool silent /* = false */,
+                       bool throws /* = true */) {
+  if (RuntimeOption::PHP7_EngineExceptions && throws) {
+    VMRegAnchor _;
+    SystemLib::throwErrorObject(Variant(msg));
+  }
+  auto ex = bt.isNull() && !recoverable
+    ? FatalErrorException(msg)
+    : FatalErrorException(msg, bt, recoverable);
+  ex.setSilent(silent);
+  throw ex;
+}
 ///////////////////////////////////////////////////////////////////////////////
 }

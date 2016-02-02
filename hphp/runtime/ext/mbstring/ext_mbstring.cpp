@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -18,9 +18,8 @@
 #include "hphp/runtime/ext/mbstring/ext_mbstring.h"
 #include "hphp/runtime/base/string-buffer.h"
 #include "hphp/runtime/base/request-local.h"
-#include "hphp/runtime/ext/php_unicode.h"
-#include "hphp/runtime/ext/unicode_data.h"
-#include "hphp/runtime/ext/process/ext_process.h"
+#include "hphp/runtime/ext/mbstring/php_unicode.h"
+#include "hphp/runtime/ext/mbstring/unicode_data.h"
 #include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/runtime/ext/std/ext_std_output.h"
 #include "hphp/runtime/base/array-init.h"
@@ -28,7 +27,6 @@
 #include "hphp/runtime/base/zend-string.h"
 #include "hphp/runtime/base/ini-setting.h"
 #include "hphp/runtime/base/request-event-handler.h"
-#include "hphp/system/constants.h"
 
 extern "C" {
 #include <mbfl/mbfl_convert.h>
@@ -188,6 +186,9 @@ struct MBGlobals final : RequestEventHandler {
   OnigRegion *search_regs;
   OnigOptionType regex_default_options;
   OnigSyntaxType *regex_default_syntax;
+
+  void vscan(IMarker& mark) const override {
+  }
 
   MBGlobals() :
     language(mbfl_no_language_uni),
@@ -888,7 +889,7 @@ static bool php_mb_parse_encoding(const Variant& encoding,
                                   mbfl_encoding ***return_list,
                                   int *return_size, bool persistent) {
   bool ret;
-  if (encoding.is(KindOfArray)) {
+  if (encoding.isArray()) {
     ret = php_mb_parse_encoding_array(encoding.toArray(),
                                       return_list, return_size,
                                       persistent ? 1 : 0);
@@ -1024,6 +1025,26 @@ Array HHVM_FUNCTION(mb_list_encodings) {
   const mbfl_encoding *encoding;
   while ((encoding = encodings[i++]) != nullptr) {
     ret.append(String(encoding->name, CopyString));
+  }
+  return ret;
+}
+
+Variant HHVM_FUNCTION(mb_encoding_aliases, const String& name) {
+  const mbfl_encoding *encoding;
+  int i = 0;
+  encoding = mbfl_name2encoding(name.data());
+  if (!encoding) {
+    raise_warning("mb_encoding_aliases(): Unknown encoding \"%s\"",
+                  name.data());
+    return false;
+  }
+
+  Array ret = Array::Create();
+  if (encoding->aliases != nullptr) {
+    while ((*encoding->aliases)[i] != nullptr) {
+      ret.append((*encoding->aliases)[i]);
+      i++;
+    }
   }
   return ret;
 }
@@ -1217,7 +1238,7 @@ Variant HHVM_FUNCTION(mb_convert_encoding,
                       const String& to_encoding,
                       const Variant& from_encoding /* = null_variant */) {
   String encoding = from_encoding.toString();
-  if (from_encoding.is(KindOfArray)) {
+  if (from_encoding.isArray()) {
     StringBuffer _from_encodings;
     Array encs = from_encoding.toArray();
     for (ArrayIter iter(encs); iter; ++iter) {
@@ -1304,7 +1325,7 @@ Variant HHVM_FUNCTION(mb_convert_kana,
 static bool php_mbfl_encoding_detect(const Variant& var,
                                      mbfl_encoding_detector *identd,
                                      mbfl_string *string) {
-  if (var.is(KindOfArray) || var.is(KindOfObject)) {
+  if (var.isArray() || var.is(KindOfObject)) {
     Array items = var.toArray();
     for (ArrayIter iter(items); iter; ++iter) {
       if (php_mbfl_encoding_detect(iter.second(), identd, string)) {
@@ -1326,7 +1347,7 @@ static Variant php_mbfl_convert(const Variant& var,
                                 mbfl_buffer_converter *convd,
                                 mbfl_string *string,
                                 mbfl_string *result) {
-  if (var.is(KindOfArray)) {
+  if (var.isArray()) {
     Array ret = empty_array();
     Array items = var.toArray();
     for (ArrayIter iter(items); iter; ++iter) {
@@ -1434,7 +1455,7 @@ Variant HHVM_FUNCTION(mb_convert_variables,
 
   /* convert */
   if (convd != nullptr) {
-    vars = php_mbfl_convert(vars, convd, &string, &result);
+    vars.assignIfRef(php_mbfl_convert(vars, convd, &string, &result));
     for (int n = 0; n < args.size(); n++) {
       const_cast<Array&>(args).set(n, php_mbfl_convert(args[n], convd,
                                                         &string, &result));
@@ -1503,7 +1524,7 @@ static Variant php_mb_numericentity_exec(const String& str,
 
   /* conversion map */
   int *iconvmap = nullptr;
-  if (convmap.is(KindOfArray)) {
+  if (convmap.isArray()) {
     Array convs = convmap.toArray();
     mapsize = convs.size();
     if (mapsize > 0) {
@@ -2238,7 +2259,7 @@ bool HHVM_FUNCTION(mb_parse_str,
   mbfl_encoding *detected =
     _php_mb_encoding_handler_ex(&info, resultArr, encstr);
   free(encstr);
-  result = resultArr;
+  result.assignIfRef(resultArr);
 
   MBSTRG(http_input_identify) = detected;
   return detected != nullptr;
@@ -2280,15 +2301,23 @@ static Variant php_mb_substr(const String& str, int from,
     }
   }
 
-  int size;
+  int len = vlen.toInt64();
+  int size = 0;
+
   if (substr) {
-    size = mbfl_strlen(&string);
+    int size_tmp = -1;
+    if (vlen.isNull() || len == 0x7FFFFFFF) {
+      size_tmp = mbfl_strlen(&string);
+      len = size_tmp;
+    }
+    if (from < 0 || len < 0) {
+      size = size_tmp < 0 ? mbfl_strlen(&string) : size_tmp;
+    }
   } else {
     size = str.size();
-  }
-  int len = vlen.toInt64();
-  if (vlen.isNull() || len == 0x7FFFFFFF) {
-    len = size;
+    if (vlen.isNull() || len == 0x7FFFFFFF) {
+      len = size;
+    }
   }
 
   /* if "from" position is negative, count start position from the end
@@ -2311,11 +2340,8 @@ static Variant php_mb_substr(const String& str, int from,
     }
   }
 
-  if (from > size) {
-    if (!substr) {
-      return false;
-    }
-    from = size;
+  if (!substr && from > size) {
+    return false;
   }
 
   mbfl_string result;
@@ -3713,7 +3739,7 @@ Variant HHVM_FUNCTION(mb_ereg_search_regs,
 }
 
 static Variant _php_mb_regex_ereg_exec(const Variant& pattern, const String& str,
-                                       Variant &regs, int icase) {
+                                       Variant *regs, int icase) {
   php_mb_regex_t *re;
   OnigRegion *regions = nullptr;
   int i, match_len, beg, end;
@@ -3768,7 +3794,7 @@ static Variant _php_mb_regex_ereg_exec(const Variant& pattern, const String& str
       regsPai.append(false);
     }
   }
-  regs = regsPai.toArray();
+  if (regs) *regs = regsPai.toArray();
 
   if (match_len == 0) {
     match_len = 1;
@@ -3783,14 +3809,14 @@ Variant HHVM_FUNCTION(mb_ereg,
                       const Variant& pattern,
                       const String& str,
                       VRefParam regs /* = null */) {
-  return _php_mb_regex_ereg_exec(pattern, str, regs, 0);
+  return _php_mb_regex_ereg_exec(pattern, str, regs.getVariantOrNull(), 0);
 }
 
 Variant HHVM_FUNCTION(mb_eregi,
                       const Variant& pattern,
                       const String& str,
                       VRefParam regs /* = null */) {
-  return _php_mb_regex_ereg_exec(pattern, str, regs, 1);
+  return _php_mb_regex_ereg_exec(pattern, str, regs.getVariantOrNull(), 1);
 }
 
 Variant HHVM_FUNCTION(mb_regex_encoding,
@@ -4367,7 +4393,7 @@ bool HHVM_FUNCTION(mb_send_mail,
 
   char *all_headers = (char *)device.buffer;
 
-  String cmd = HHVM_FN(escapeshellcmd)(extra_cmd);
+  String cmd = string_escape_shell_cmd(extra_cmd.c_str());
   bool ret = (!err && php_mail(to_r, encoded_subject.data(),
                                encoded_message.data(),
                                all_headers, cmd.data()));
@@ -4388,6 +4414,15 @@ static class mbstringExtension final : public Extension {
     IniSetting::Bind(this, IniSetting::PHP_INI_ALL,
                      "mbstring.substitute_character",
                      &MBSTRG(current_filter_illegal_mode));
+
+    HHVM_RC_INT(MB_OVERLOAD_MAIL, 1);
+    HHVM_RC_INT(MB_OVERLOAD_STRING, 2);
+    HHVM_RC_INT(MB_OVERLOAD_REGEX, 4);
+
+    HHVM_RC_INT(MB_CASE_UPPER, PHP_UNICODE_CASE_UPPER);
+    HHVM_RC_INT(MB_CASE_LOWER, PHP_UNICODE_CASE_LOWER);
+    HHVM_RC_INT(MB_CASE_TITLE, PHP_UNICODE_CASE_TITLE);
+
     HHVM_FE(mb_list_encodings);
     HHVM_FE(mb_list_encodings_alias_names);
     HHVM_FE(mb_list_mime_names);
@@ -4402,6 +4437,7 @@ static class mbstringExtension final : public Extension {
     HHVM_FE(mb_detect_order);
     HHVM_FE(mb_encode_mimeheader);
     HHVM_FE(mb_encode_numericentity);
+    HHVM_FE(mb_encoding_aliases);
     HHVM_FE(mb_ereg_match);
     HHVM_FE(mb_ereg_replace);
     HHVM_FE(mb_ereg_search_getpos);

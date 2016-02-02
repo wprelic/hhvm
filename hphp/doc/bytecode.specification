@@ -680,10 +680,8 @@ other FPI region. An FPI region may not contain backward jumps, nor may it
 contain forward jumps that jump past the end of the FPI region.
 
 Each function has an "FPI region table". Each row in the FPI region table
-consists of the starting offset of the FPI region (the bytecode offset
-immediately following the FPush* instruction), the ending offset of the FPI
-region (the bytecode offset of the FCall* instruction), and the number of
-parameters being passed.
+consists of offset of the FPush* instruction that begins the region, the FCall
+instruction that ends the region, and the number of parameters being passed.
 
 
 Flavor descriptors
@@ -1273,14 +1271,6 @@ Sqrt   [C]    ->  [C:Null|Dbl]
   If $1 is a negative number, this instruction pushes a floating-point value
   representing NAN onto the stack.
 
-Strlen  [C] -> [C:Null|Int]
-
-  String length. If $1 is a string push the length of the string on the stack.
-  If $1 is an object with a __toString method, call this method and push the
-  length of the resulting string on the stack. If $1 is an array or resource,
-  raise a warning and push null on the stack. Otherwise convert $1 to a string
-  and push the length of that string on the stack.
-
 Xor    [C C]  ->  [C:Bool]
 
   Logical xor (xor). Pushes ((bool)$2 xor (bool)$1) onto the stack.
@@ -1320,6 +1310,11 @@ Gt    [C C]  ->  [C:Bool]
 Gte    [C C]  ->  [C:Bool]
 
   Greater than or equal to (>=). Pushes ($2 >= $1) onto the stack.
+
+Cmp    [C C]  ->  [C:Int]
+
+  Comparison. Pushes either -1, 0, or 1 onto the stack if ($1 < $2), ($1 ==
+  $2), or ($1 > $2), respectively.
 
 BitAnd    [C:<T2> C:<T1>]  ->  [C:Int]    (where T1 != Str || T2 != Str)
           [C:Str C:Str]  ->  [C:Str]
@@ -1531,6 +1526,13 @@ CGetL <local variable id>    []  ->  [C]
   as a cell. If the local variable is not defined, this instruction raises a
   warning and pushes null onto the stack.
 
+CGetQuietL <local variable id>    []  ->  [C]
+
+  Get local as cell. If the local variable given by %1 is defined, this
+  instruction gets the value of the local variable and pushes it onto the stack
+  as a cell. If the local variable is not defined, this instruction pushes null
+  onto the stack.
+
 CGetL2 <local variable id>    [<F>:<T>]  ->  [C <F>:<T>]
 
   Get local as cell. If the local variable given by %1 is defined, this
@@ -1572,6 +1574,15 @@ CGetN    [C]  ->  [C]
   If there is no local variable defined named x, this instruction pushes null
   onto the stack and raises a warning.
 
+CGetQuietN    [C]  ->  [C]
+
+  Get local as cell. This instruction first computes x = (string)$1. Next, this
+  instruction reads the local variable named x pushes its value onto the stack
+  as a cell.
+
+  If there is no local variable defined named x, this instruction pushes null
+  onto the stack.
+
 CGetG    [C]  ->  [C]
 
   Get global as cell. This instruction first computes x = (string)$1. Next,
@@ -1580,6 +1591,15 @@ CGetG    [C]  ->  [C]
 
   If there is not a global variable defined named x, this instruction pushes
   null onto the stack and raises a warning.
+
+CGetQuietG    [C]  ->  [C]
+
+  Get global as cell. This instruction first computes x = (string)$1. Next,
+  this instruction reads the global variable named x pushes its value onto the
+  stack as a cell.
+
+  If there is not a global variable defined named x, this instruction pushes
+  null onto the stack.
 
 CGetS    [C A]  ->  [C]
 
@@ -1961,8 +1981,9 @@ FPushFuncD <num params> <litstr id>    []  ->  []
   Otherwise this instruction pushes a new entry on the FPI stack, initializing
   it with the number of parameters being passed (given by %1) and a reference
   to the FPI structure for the function named x. With FPushFuncD the litstr in
-  %2 must not start with a '\' character. Function names should be normalized
-  with respect to namespace and never start with a '\'.
+  %2 must not start with a '\' character, or be of the form "Class::Method".
+  Function names should be normalized with respect to namespace and never start
+  with a '\'.
 
   If x is an object, this instruction checks if the object has an __invoke
   method. If the object does not have an __invoke method, this instruction
@@ -1971,7 +1992,13 @@ FPushFuncD <num params> <litstr id>    []  ->  []
   by %1) and a reference to the FPI structure for the __invoke method from
   object x.
 
-  If x is not a string or object, this instruction throws a fatal error.
+  if x is an array, this instruction will check that the first array element is
+  either the name of a class, or an instance of one, and that the second array
+  element is the name of a method.  If no such class exists, or no such method
+  on that class exists, then this instruction throws a fatal error.  Otherwise
+  this instruction does the same FPI manipulation mentioned above.
+
+  If x is not a string, object, or array, this instruction throws a fatal error.
 
 FPushFuncU <num params> <litstr id> <litstr fallback> []  ->  []
 
@@ -2177,6 +2204,17 @@ FCallArray    [F]  ->  [R]
 
   When the callee returns, it will transfer the return value onto the caller's
   evaluation stack using the R flavor.
+
+FCallAwait <num params> <class name> <func name> [F..F] -> [R]
+
+  FPI call direct to a known async function. Equivalent to the sequence
+
+    FCallD
+    UnboxRNop
+    Await
+
+  but may enable the runtime to avoid creating a StaticWaitHandle in the event
+  that the called function returns eagerly.
 
 FCallUnpack <num params> [F..F] -> [R]
 
@@ -3432,218 +3470,140 @@ identical, but each instruction utilizes a distinct set of operations. For each
 member instruction, first use a Base* operation depending on the kind of
 location code. Next perform a series of intermediate operations depending on
 member code to process all but the last member. Finally, perform a final
-operation depending on member code to process the last member. See the
-instruction-specific tables for details.
+operation depending on member code to process the last member. We currently
+have two ways to encode this sequence of operations: a single bytecode with a
+variable-length vector of subops, or a variable-length series of bytecodes,
+each representing a single operation. Work is underway to replace the member
+vector instructions with the smaller, simpler bytecodes.
 
-The member codes that represent immediate literal data (ET, EI, PT) are
-implemented using the corresponding EC or PC intermediate operation: they
-behave exactly as though that literal data had been pushed on the stack as a
-cell, then consumed by an ElemC* or PropC* operation.
+All bytecodes in this section produce and/or consume a value in the member base
+register (often referred to as MBR or just "member base"). The MBR is live
+starting after a Base* bytecode, modified by zero or more Dim* bytecodes, then
+finally consumed by a final operation:
 
-CGetM <loc-desc/M-vector>    [C..C]  ->  [C]
+  bytecode  | MBR in-state | MBR out-state
+  ----------+--------------+--------------
+  Base*     | dead         | live
+  Dim*      | live         | live
+  Final Ops | live         | dead
 
-  Get member as cell.
+The bytecodes in this section also refer to member operations in section 9 to
+describe their semantics.
 
-    location     Base*      member   intermediate   final
-    descriptor   operation  code     operation      operation
-    -----------+----------  -------+--------------+----------
-    C          | BaseC      EC     | ElemCW       | CGetElemC
-    R          | BaseR      PC     | PropCW       | CGetPropC
-    L          | BaseLW     EL     | ElemLW       | CGetElemL
-    NC         | BaseNCW    PL     | PropLW       | CGetPropL
-    NL         | BaseNLW    W      | N/A          | N/A
-    GC         | BaseGCW
-    GL         | BaseGLW
-    SC         | BaseSC
-    SL         | BaseSL
-    H          | BaseH
+10.1 Base Operations
+---------------------
 
-VGetM <loc-desc/M-vector>    [C..C]  ->  [V]
+BaseNC <stack index> <member op flags>    []  ->  []
+BaseNL <local id>    <member op flags>    []  ->  []
 
-  Get member as ref.
+FPassBaseNC <param id> <stack index>    []  ->  []
+FPassBaseNL <param id> <local id>       []  ->  []
 
-    location     Base*      member   intermediate   final
-    descriptor   operation  code     operation      operation
-    -----------+----------  -------+--------------+------------
-    C          | BaseC      EC     |  ElemCD      | VGetElemC
-    R          | BaseR      PC     |  PropCD      | VGetPropC
-    L          | BaseLD     EL     |  ElemLD      | VGetElemL
-    NC         | BaseNCD    PL     |  PropLD      | VGetPropL
-    NL         | BaseNLD    W      |  NewElem     | VGetNewElem
-    GC         | BaseGCD
-    GL         | BaseGLD
-    SC         | BaseSC
-    SL         | BaseSL
-    H          | BaseH
+  BaseN{C,L}{,W,D,WD} member operation, depending on the flags immediate or
+  reffiness of the specified parameter.
 
-FPassM <param id> <loc-desc/M-vector>    [C..C]  ->  [F]
+BaseGC <stack index> <member op flags>    []  ->  []
+BaseGL <local id>    <member op flags>    []  ->  []
 
-  FPI pass parameter. This instruction behaves as CGetM if parameter %1 is pass
-  by value, or it behaves like VGetM if parameter %1 is pass by reference. Then
-  it passes the value produced to the callee.
+FPassBaseGC <param id> <stack index>    []  ->  []
+FPassBaseGL <param id> <local id>       []  ->  []
 
-IssetM <loc-desc/M-vector>    [C..C]  ->  [C:Bool]
+  BaseG{C,L}{,W,D,WD} member operation, depending on the flags immediate or
+  reffiness of the specified parameter.
 
-  Isset member.
+BaseSC <stack index> <stack index>    [A CV?]  ->  [CV?]
+BaseSL <local id>    <stack index>    [A CV?]  ->  [CV?]
 
-    location     Base*      member   intermediate   final
-    descriptor   operation  code     operation      operation
-    -----------+----------  -------+--------------+-----------
-    C          | BaseC      EC     | ElemC        | IssetElemC
-    R          | BaseR      PC     | PropC        | IssetPropC
-    L          | BaseL      EL     | ElemL        | IssetElemL
-    NC         | BaseNC     PL     | PropL        | IssetPropL
-    NL         | BaseNL     W      | N/A          | N/A
-    GC         | BaseGC
-    GL         | BaseGL
-    SC         | BaseSC
-    SL         | BaseSL
-    H          | BaseH
+  BaseS{C,L} member operation. %1 gives the location of the static property
+  name, and %2 gives the index of the class input. The class is consumed from
+  the stack, leaving an optional cell or var above the class undisturbed.
 
-EmptyM <loc-desc/M-vector>    [C..C]  ->  [C:Bool]
+BaseL <local id> <member op flags>    []  ->  []
 
-  Empty member.
+FPassBaseL <param id> <local id>    []  ->  []
 
-    location     Base*      member   intermediate   final
-    descriptor   operation  code     operation      operation
-    -----------+----------  -------+--------------+-----------
-    C          | BaseC      EC     | ElemC        | EmptyElemC
-    R          | BaseR      PC     | PropC        | EmptyPropC
-    L          | BaseL      EL     | ElemL        | EmptyElemL
-    NC         | BaseNC     PL     | PropL        | EmptyPropL
-    NL         | BaseNL     W      | N/A          | N/A
-    GC         | BaseGC
-    GL         | BaseGL
-    SC         | BaseSC
-    SL         | BaseSL
-    H          | BaseH
+  Base{L,LW,LD,LWD} member operation, depending on the flags immediate or
+  reffiness of the specified parameter.
 
-SetM <loc-desc/M-vector>    [C..C C]  ->  [C]
+BaseC <stack index>    []  ->  []
+BaseR <stack index>    []  ->  []
 
-  Set member.
+  Base{C,R} member operation.
 
-    location     Base*      member   intermediate   final
-    descriptor   operation  code     operation      operation
-    -----------+----------  -------+--------------+-----------
-    C          | BaseC      EC     | ElemCD       | SetElemC
-    R          | BaseR      PC     | PropCD       | SetPropC
-    L          | BaseLD     EL     | ElemLD       | SetElemL
-    NC         | BaseNCD    PL     | PropLD       | SetPropL
-    NL         | BaseNLD    W      | NewElem      | SetNewElem
-    GC         | BaseGCD
-    GL         | BaseGLD
-    SC         | BaseSC
-    SL         | BaseSL
-    H          | BaseH
+BaseH    []  ->  []
 
-SetWithRefLM <loc-desc/M-vector> <local variable id> [C..C] -> []
+  BaseH member operation.
 
-  Set member preserving the reffiness of the local.
+10.2 Intermediate operations
+-----------------------------
 
-    location     Base*      member   intermediate   final
-    descriptor   operation  code     operation      operation
-    -----------+----------  -------+--------------+-----------
-    C          | BaseC      EC     | ElemCD       | SetWithRefElemC
-    R          | BaseR      PC     | PropCD       | SetPropC
-    L          | BaseLD     EL     | ElemLD       | SetWithRefElemL
-    NC         | BaseNCD    PL     | PropLD       | SetPropL
-    NL         | BaseNLD    W      | NewElem      | SetWithRefNewElem
-    GC         | BaseGCD
-    GL         | BaseGLD
-    SC         | BaseSC
-    SL         | BaseSL
-    H          | BaseH
+DimL   <local id>    <prop/elem op> <member op flags>    []  ->  []
+DimC   <stack index> <prop/elem op> <member op flags>    []  ->  []
+DimInt <int64>       <prop/elem op> <member op flags>    []  ->  []
+DimStr <litstr id>   <prop/elem op> <member op flags>    []  ->  []
 
-SetWithRefRM <loc-desc/M-vector> [C..C R] -> []
+FPassDimL   <param id> <local id>    <prop/elem op>    []  ->  []
+FPassDimC   <param id> <stack index> <prop/elem op>    []  ->  []
+FPassDimInt <param id> <int64>       <prop/elem op>    []  ->  []
+FPassDimStr <param id> <litstr id>   <prop/elem op>    []  ->  []
 
-  Set member preserving the reffiness of the stack element.
+  {Prop,Elem}{L,C,I,T}{W,D,WD,U} member operation, depending on the prop/elem
+  op and flags immediates or reffiness of the specified parameter.
 
-    location     Base*      member   intermediate   final
-    descriptor   operation  code     operation      operation
-    -----------+----------  -------+--------------+-----------
-    C          | BaseC      EC     | ElemCD       | SetWithRefElemC
-    R          | BaseR      PC     | PropCD       | SetPropC
-    L          | BaseLD     EL     | ElemLD       | SetWithRefElemL
-    NC         | BaseNCD    PL     | PropLD       | SetPropL
-    NL         | BaseNLD    W      | NewElem      | SetWithRefNewElem
-    GC         | BaseGCD
-    GL         | BaseGLD
-    SC         | BaseSC
-    SL         | BaseSL
-    H          | BaseH
+DimNewElem <member op flags>    []  ->  []
 
-SetOpM <op> <loc-desc/M-vector>    [C..C C]  ->  [C]
+FPassDimNewElem <param id>    []  ->  []
 
-  Set op member.
+  Fatal error or NewElem operation, depending on the flags immediate or
+  reffiness of the specified parameter.
 
-    location     Base*      member   intermediate   final
-    descriptor   operation  code     operation      operation
-    -----------+----------  -------+--------------+-------------
-    C          | BaseC      EC     | ElemCWD      | SetOpElemC
-    R          | BaseR      PC     | PropCWD      | SetOpPropC
-    L          | BaseLWD    EL     | ElemLWD      | SetOpElemL
-    NC         | BaseNCWD   PL     | PropLWD      | SetOpPropL
-    NL         | BaseNLWD   W      | NewElem      | SetOpNewElem
-    GC         | BaseGCWD
-    GL         | BaseGLWD
-    SC         | BaseSC
-    SL         | BaseSL
-    H          | BaseH
+10.3 Final operations
+----------------------
 
-IncDecM <op> <loc-desc/M-vector>    [C..C]  ->  [C]
+All final operations take a <stack count> immediate as %0, which indicates the
+number of member keys on the eval stack that must be consumed before pushing
+the final result, if any.
 
-  Increment/decrement member.
+QueryM <stack count> <query op> <member key>    [...]  ->  [C]
 
-    location     Base*      member   intermediate   final
-    descriptor   operation  code     operation      operation
-    -----------+----------  -------+--------------+--------------
-    C          | BaseC      EC     | ElemCWD      | IncDecElemC
-    R          | BaseR      PC     | PropCWD      | IncDecPropC
-    L          | BaseLWD    EL     | ElemLWD      | IncDecElemL
-    NC         | BaseNCWD   PL     | PropLWD      | IncDecPropL
-    NL         | BaseNLWD   W      | NewElem      | IncDecNewElem
-    GC         | BaseGCWD
-    GL         | BaseGLWD
-    SC         | BaseSC
-    SL         | BaseSL
-    H          | BaseH
+  {CGet,Isset,Empty}{Prop,Elem}{L,C,I,T} member operation.
 
-BindM <loc-desc/M-vector>    [C..C V]  ->  [V]
+VGetM <stack count> <member key>    [...]  ->  [V]
 
-  Bind member.
+  {VGet}{Prop,Elem}{L,C,I,T} or VGetNewElem member operation.
 
-    location     Base*      member   intermediate   final
-    descriptor   operation  code     operation      operation
-    -----------+----------  -------+--------------+------------
-    C          | BaseC      EC     | ElemCD       | BindElemC
-    R          | BaseR      PC     | PropCD       | BindPropC
-    L          | BaseLD     EL     | ElemLD       | BindElemL
-    NC         | BaseNCD    PL     | PropLD       | BindPropL
-    NL         | BaseNLD    W      | NewElem      | BindNewElem
-    GC         | BaseGCD
-    GL         | BaseGLD
-    SC         | BaseSC
-    SL         | BaseSL
-    H          | BaseH
+FPassM <param id> <stack count> <member key>    [...]  ->  [V]
 
-UnsetM <loc-desc/M-vector>    [C..C]  ->  []
+  {CGet,VGet}{Prop,Elem}{L,C,I,T} or VGetNewElem, member operation, depending
+  on the reffiness of the specified parameter.
 
-  Unset member.
+SetM <stack count> <member key>    [... C]  ->  [C]
 
-    location     Base*      member   intermediate   final
-    descriptor   operation  code     operation      operation
-    -----------+----------  -------+--------------+-----------
-    C          | BaseC      EC     | ElemCU       | UnsetElemC
-    R          | BaseR      PC     | PropCU       | UnsetPropC
-    L          | BaseL      EL     | ElemLU       | UnsetElemL
-    NC         | BaseNC     PL     | PropLU       | UnsetPropL
-    NL         | BaseNL     W      | N/A          | N/A
-    GC         | BaseGC
-    GL         | BaseGL
-    SC         | BaseSC
-    SL         | BaseSL
-    H          | BaseH
+  Set{Prop,Elem}{L,C,I,T} or SetNewElem member operation.
 
+IncDecM <stack count> <op> <member key>    [...]  ->  [C]
+
+  IncDec{Prop,Elem}{L,C,I,T} or IncDecNewElem member operation.
+
+SetOpM <stack count> <op> <member key>    [... C]  ->  [C]
+
+  SetOp{Prop,Elem}{L,C,I,T} or SetOpNewElem member operation.
+
+BindM <stack count> <member key>    [... V]  ->  [V]
+
+  Bind{Prop,Elem}{L,C,I,T} or BindNewElem member operation.
+
+UnsetM <stack count> <member key>    [...]  ->  []
+
+  Unset{Prop,Elem}{L,C,I,T} member operation.
+
+SetWithRefLML <local id> <local id>    []  ->  []
+
+  Set member %1, preserving reffiness of value in %2.
+
+SetWithRefRML <local id>    [R]  ->  []
+
+  Set member %1, preserving reffiness of stack input.
 
 11. Iterator instructions
 -------------------------
@@ -4214,6 +4174,12 @@ ContValid    []  ->  [C:Bool]
   Check generator validity. $this must be a Generator object. Pushes true
   onto the stack if the generator can be iterated further, false otherwise.
 
+ContStarted    []  ->  [C:Bool]
+
+  Check whether a generator was started. $this must be a Generator object.
+  Pushes true onto the stack if the generator has already been run once,
+  false otherwise.
+
 ContKey    []  ->  [C]
 
   Get generator key. $this must be a Generator object. Pushes the most
@@ -4224,10 +4190,97 @@ ContCurrent    []  ->  [C]
   Get generator value. $this must be a Generator object. Pushes the most
   recently yielded value from the generator onto the stack.
 
+ContGetReturn    [] -> [C]
+
+  Get generator's return value. $this must be a Generator object. Pushes the
+  return value of the generator onto the stack.
+
+14.1 Generator Delegation
+-------------------------
+
+The following bytecodes are used to implement the Generator Delegation feature
+of PHP7. Generator Delegation (which is exposed to programmers as `yield from`)
+allows generators to yield results from other generators (referred to as their
+"delegates") as if they were the ones yielding the value. For a full
+explanation of the feature, see https://wiki.php.net/rfc/generator-delegation.
+
+The important part of this feature is how it interacts with different inputs.
+The `yield from` pseudo-expression takes two different types of inputs, and
+interacts with them very differently. The first is other generators. When
+When the delegate is a generator we resume execution of the subgenerator and
+return to the caller of the delegating generator (the one containing
+`yield from`) when we encounter a yield. All of the features of generators
+(`send`, `throw`, etc) are piped through to the delegate, and the result of the
+`yield from` expression is the return value of the subgenerator.
+
+The second valid type of input to `yield from` is an object conforming to the
+Traversable interface. When the delegate of a generator is a Traversable the
+`send()` method does nothing more than continue execution of the delegating
+generator. The `throw()` method will throw from the context of the delegating
+generator, and the result of the `yield from` expression will always be NULL.
+At a high level, you can think of `yield from <traversable>` as being
+equivalent to `foreach(<traversable> as $val) { yield $val; }`.
+
+While the bytecodes implementing Generator Delegation have their own API and
+well defined contracts, they generally expect to be used in the following
+pattern:
+
+```
+ContAssignDelegate <expr>
+ContEnterDelegate
+YieldFromDelegate
+ContUnsetDelegate
+```
+
+ContAssignDelegate [C] -> []
+
+  This instruction may only appear in bodies of non-async generators. Stores $1
+  in the generator as it's delegate, for use later by the ContEnterDelegate
+  and YieldFromDelegate bytecodes. Throws an exception if $1 is not either a
+  Traversable or another Generator.
+
+ContEnterDelegate [C] -> []
+
+  This instruction may only appear in bodies of non-async generators, and the
+  delegate property of the current generator must be non-null. If the delegate
+  is a Generator, control flow is transfered to the saved resume offset of the
+  delegate. $1 describes the value given to either ContEnter or ContRaise when
+  execution of the current generator was resumed, and said value is then passed
+  to the delegate generator for use there.
+
+YieldFromDelegate [] -> [C]
+
+  This instruction may only appear in bodies of non-async generators, and the
+  delegate property of the current generator must be non-null. If the delegate
+  is a Traversable the current key/value pair is stored in the generator as
+  the result of the current iteration and the iterator is advanced. When the
+  delegate is a Generator, the ContCurrent and ContKey opcodes handle
+  returning the result from the deepest active generator. When iteration has
+  finished, this opcode continues executing the next instruction, otherwise it
+  sets the resume offset to the offset specified by its immediate and returns
+  control to the caller.
+
+ContUnsetDelegate <free iterator> [] -> []
+
+  This instruction may only appear in bodies of non-async generators. Removes
+  the currently assigned delegate of the generator. If <free iterator> is true
+  and the delegate is not another generator then this opcode is responsible for
+  freeing the internal iterator used by this group of opcodes. If false then it
+  is expected that the iterator is freed elsewhere. When the delegate is
+  another generator then it assumes that the iterator was never initialized
+  in the first place.
+
 15. Async functions
 -------------------
 
-Await  <number of iterators>   [C]  ->  [C]
+WHResult [C:Obj] -> [C]
+
+  If $1 is not a subclass of WaitHandle, raises a fatal error. If $1 succeeded,
+  this instruction pushes the result value from the WaitHandle. If $1 failed,
+  this instruction throws the exception stored in the WaitHandle. If $1 is not
+  finished, throws an Exception.
+
+Await    [C]  ->  [C]
 
   This instruction may only appear in bodies of async functions. Awaits
   a WaitHandle provided by $1, suspending the execution if the WaitHandle
@@ -4242,11 +4295,11 @@ Await  <number of iterators>   [C]  ->  [C]
   execution needs to be suspended:
 
   If the async function is executed eagerly, creates an AsyncFunctionWaitHandle
-  object, moves all local variables and first %1 iterators from the current
-  frame into the object, sets resume offset at the next opcode, marks the
+  object, moves all local variables and iterators from the current frame into
+  the object, sets resume offset at the next opcode, marks the
   AsyncFunctionWaitHandle as blocked on the WaitHandle provided by $1 and
-  suspends execution by transferring control flow back to the caller,
-  returning the AsyncFunctionWaitHandle object.
+  suspends execution by transferring control flow back to the caller, returning
+  the AsyncFunctionWaitHandle object.
 
   If the async function is executed in resumed mode, sets resume offset at
   the next opcode, marks the AsyncFunctionWaitHandle as blocked on the

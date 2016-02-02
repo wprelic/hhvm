@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -27,7 +27,7 @@
 
 #include <folly/io/async/AsyncServerSocket.h>
 #include <folly/io/async/EventBaseManager.h>
-#include <folly/wangle/acceptor/Acceptor.h>
+#include <wangle/acceptor/Acceptor.h>
 
 namespace HPHP {
 
@@ -39,20 +39,21 @@ class FastCGIServer;
  * FastCGIAcceptor accepts new connections from a listening socket, wrapping
  * each one in a FastCGISession.
  */
-struct FastCGIAcceptor : public folly::Acceptor {
-  FastCGIAcceptor(const folly::ServerSocketConfig& config,
+struct FastCGIAcceptor : public wangle::Acceptor {
+  FastCGIAcceptor(const wangle::ServerSocketConfig& config,
                   FastCGIServer *server)
-    : folly::Acceptor(config)
+    : wangle::Acceptor(config)
     , m_server(server)
   {}
 
   virtual ~FastCGIAcceptor() {}
 
   bool canAccept(const folly::SocketAddress& address) override;
-  void onNewConnection(folly::AsyncSocket::UniquePtr sock,
+  void onNewConnection(folly::AsyncTransportWrapper::UniquePtr sock,
                        const folly::SocketAddress* peerAddress,
                        const std::string& nextProtocolName,
-                       const folly::TransportInfo& tinfo) override;
+                       SecureTransportType secureProtocolType,
+                       const wangle::TransportInfo& tinfo) override;
   void onConnectionsDrained() override;
 
 private:
@@ -161,7 +162,7 @@ private:
   JobQueueDispatcher<FastCGIWorker> m_dispatcher;
 
   // Configuration for accepting webserver connections
-  folly::ServerSocketConfig m_socketConfig;
+  wangle::ServerSocketConfig m_socketConfig;
   std::unique_ptr<FastCGIAcceptor> m_acceptor;
 };
 

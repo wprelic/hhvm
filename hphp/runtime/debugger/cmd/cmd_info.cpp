@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -25,6 +25,7 @@
 #include "hphp/runtime/ext/string/ext_string.h"
 #include "hphp/runtime/base/comparisons.h"
 #include "hphp/runtime/base/preg.h"
+#include "hphp/runtime/vm/named-entity-defs.h"
 #include "hphp/util/logger.h"
 
 namespace HPHP { namespace Eval {
@@ -237,11 +238,10 @@ void getClassSymbolNames(
   auto& clsConstants =
     liveLists->get(DebuggerClient::AutoCompleteClassConstants);
 
-  for (AllCachedClasses ac; !ac.empty(); ) {
-    auto c = ac.popFront();
+  NamedEntity::foreach_cached_class([&](Class* c) {
     if (interface ? !(c->attrs() & AttrInterface) :
         c->attrs() & (AttrInterface | AttrTrait)) {
-      continue;
+      return; // continue
     }
     classes.push_back(c->name()->toCppString());
     for (Slot i = 0; i < c->numMethods(); i++) {
@@ -251,17 +251,17 @@ void getClassSymbolNames(
     }
     for (Slot i = 0; i < c->numDeclProperties(); i++) {
       auto& prop = c->declProperties()[i];
-      if (prop.m_class != c) continue;
-      auto prop_name = c->nameStr() + s_propSep + StrNR(prop.m_name);
+      if (prop.cls != c) continue;
+      auto prop_name = c->nameStr() + s_propSep + StrNR(prop.name);
       clsProperties.push_back(prop_name.get()->toCppString());
     }
     for (Slot i = 0; i < c->numConstants(); i++) {
       auto& cns = c->constants()[i];
-      if (cns.m_class != c) continue;
-      auto const_name = c->nameStr() + s_constSep + StrNR(cns.m_name);
+      if (cns.cls != c) continue;
+      auto const_name = c->nameStr() + s_constSep + StrNR(cns.name);
       clsConstants.push_back(const_name.get()->toCppString());
     }
-  }
+  });
 }
 
 /* Caches an estimate of the number of named entities we have. */
@@ -432,9 +432,9 @@ String CmdInfo::GetParams(const Array& params, bool varg,
         Object obj{defValue.asCell()->m_data.pobj};
         args.append(obj->o_get(s_msg).toString());
       } else if (detailed) {
-        args.append(DebuggerClient::FormatVariable(arg[s_default], -1));
-      } else {
         args.append(DebuggerClient::FormatVariable(arg[s_default]));
+      } else {
+        args.append(DebuggerClient::FormatVariableWithLimit(arg[s_default],80));
       }
     }
   }
@@ -468,9 +468,11 @@ bool CmdInfo::TryConstant(StringBuffer &sb, const Array& info,
                           const std::string &subsymbol) {
   String key = FindSubSymbol(info[s_constants].toArray(), subsymbol);
   if (!key.isNull()) {
-    sb.printf("  const %s = %s;\n", key.data(),
-              DebuggerClient::FormatVariable
-              (info[s_constants].toArray()[key], -1).data());
+    sb.printf(
+      "  const %s = %s;\n",
+      key.data(),
+      DebuggerClient::FormatVariable(info[s_constants].toArray()[key]).data()
+    );
     return true;
   }
   return false;
@@ -636,9 +638,11 @@ void CmdInfo::PrintInfo(DebuggerClient &client, StringBuffer &sb, const Array& i
   if (!info[s_constants].toArray().empty()) {
     sb.printf("  // constants\n");
     for (ArrayIter iter(info[s_constants].toArray()); iter; ++iter) {
-      sb.printf("  const %s = %s;\n",
-                iter.first().toString().data(),
-                DebuggerClient::FormatVariable(iter.second()).data());
+      sb.printf(
+        "  const %s = %s;\n",
+        iter.first().toString().data(),
+        DebuggerClient::FormatVariableWithLimit(iter.second(), 80).data()
+      );
     }
   }
 

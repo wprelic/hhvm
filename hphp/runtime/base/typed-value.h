@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -32,7 +32,7 @@ struct ArrayData;
 struct StringData;
 struct ObjectData;
 struct RefData;
-struct ResourceData;
+struct ResourceHdr;
 struct TypedValue;
 
 //////////////////////////////////////////////////////////////////////
@@ -45,10 +45,10 @@ struct TypedValue;
 union Value {
   int64_t       num;    // KindOfInt64, KindOfBool (must be zero-extended)
   double        dbl;    // KindOfDouble
-  StringData*   pstr;   // KindOfString, KindOfStaticString
+  StringData*   pstr;   // KindOfString, KindOfPersistentString
   ArrayData*    parr;   // KindOfArray
   ObjectData*   pobj;   // KindOfObject
-  ResourceData* pres;   // KindOfResource
+  ResourceHdr*  pres;   // KindOfResource
   Class*        pcls;   // only in vm stack, no type tag.
   RefData*      pref;   // KindOfRef
 };
@@ -61,10 +61,11 @@ struct ConstModifiers {
 };
 
 union AuxUnion {
-  int32_t u_hash;        // key type and hash for MixedArray and [Stable]Map
-  VarNrFlag u_varNrFlag; // magic number for asserts in VarNR
-  bool u_deepInit;       // used by Class::initPropsImpl for deep init
-  int32_t u_rdsHandle;   // used by unit.cpp to squirrel away rds handles TODO type
+  uint32_t u_fcallAwaitFlag;// true if we're suspending an FCallAwait
+  int32_t u_hash;           // key type and hash for MixedArray
+  VarNrFlag u_varNrFlag;    // magic number for asserts in VarNR
+  bool u_deepInit;          // used by Class::initPropsImpl for deep init
+  int32_t u_rdsHandle;      // used by unit.cpp to squirrel away rds handles TODO type
   ConstModifiers u_constModifiers; // used by Class::Const
 };
 
@@ -113,7 +114,7 @@ constexpr size_t alignTypedValue(size_t sz) {
  */
 struct TypedValueAux : TypedValue {
   static constexpr size_t auxOffset = offsetof(TypedValue, m_aux);
-  static const size_t auxSize = sizeof(m_aux);
+  static const size_t auxSize = sizeof(decltype(m_aux));
   int32_t& hash() { return m_aux.u_hash; }
   const int32_t& hash() const { return m_aux.u_hash; }
   int32_t& rdsHandle() { return m_aux.u_rdsHandle; }
@@ -169,11 +170,12 @@ X(KindOfBoolean,      bool);
 X(KindOfInt64,        int64_t);
 X(KindOfDouble,       double);
 X(KindOfArray,        ArrayData*);
+X(KindOfPersistentArray,  const ArrayData*);
 X(KindOfObject,       ObjectData*);
-X(KindOfResource,     ResourceData*);
+X(KindOfResource,     ResourceHdr*);
 X(KindOfRef,          RefData*);
 X(KindOfString,       StringData*);
-X(KindOfStaticString, const StringData*);
+X(KindOfPersistentString, const StringData*);
 
 #undef X
 
@@ -256,7 +258,8 @@ typename std::enable_if<
   typename DataTypeCPPType<DType>::type
 >::type unpack_tv(TypedValue *tv) {
   assert((DType == tv->m_type) ||
-         (IS_STRING_TYPE(DType) && IS_STRING_TYPE(tv->m_type)));
+         (isStringType(DType) && isStringType(tv->m_type)) ||
+         (isArrayType(DType) && isArrayType(tv->m_type)));
   return reinterpret_cast<typename DataTypeCPPType<DType>::type>
            (tv->m_data.pstr);
 }

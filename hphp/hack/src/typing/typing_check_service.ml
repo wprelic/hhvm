@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,7 +8,7 @@
  *
  *)
 
-
+open Core
 open Utils
 
 (*****************************************************************************)
@@ -16,7 +16,7 @@ open Utils
 (*****************************************************************************)
 
 module TypeCheckStore = GlobalStorage.Make(struct
-  type t = FileInfo.fast * Naming.env
+  type t = TypecheckerOptions.t
 end)
 
 let neutral = [], Relative_path.Set.empty
@@ -25,21 +25,19 @@ let neutral = [], Relative_path.Set.empty
 (* The job that will be run on the workers *)
 (*****************************************************************************)
 
-let type_fun nenv x =
+let type_fun tcopt x =
   try
-    let tcopt = Naming.typechecker_options nenv in
     let fun_ = Naming_heap.FunHeap.find_unsafe x in
     let tenv = Typing_env.empty tcopt (Pos.filename (fst fun_.Nast.f_name)) in
-    Typing.fun_def tenv nenv x fun_;
+    Typing.fun_def tenv x fun_;
   with Not_found -> ()
 
-let type_class nenv x =
+let type_class tcopt x =
   try
-    let tcopt = Naming.typechecker_options nenv in
     let class_ = Naming_heap.ClassHeap.find_unsafe x in
     let filename = Pos.filename (fst class_.Nast.c_name) in
     let tenv = Typing_env.empty tcopt filename in
-    Typing.class_def tenv nenv x class_
+    Typing.class_def tenv x class_
   with Not_found -> ()
 
 let check_typedef x =
@@ -54,7 +52,7 @@ let check_typedef x =
      * slightly larger change than I want to deal with right now. *)
     let tenv = Typing_env.set_mode tenv FileInfo.Mdecl in
     let tenv = Typing_env.set_root tenv (Typing_deps.Dep.Class x) in
-    Typing.typedef_def tenv typedef;
+    Typing.typedef_def tenv x typedef;
     Typing_variance.typedef x
   with Not_found ->
     ()
@@ -81,48 +79,47 @@ let check_const x =
   with Not_found ->
     ()
 
-let check_file nenv fast (errors, failed) fn =
-
+let check_file tcopt (errors, failed) (fn, file_infos) =
+  let { FileInfo.n_funs; n_classes; n_types; n_consts } = file_infos in
   let errors', () = Errors.do_
     begin fun () ->
-      match Relative_path.Map.get fn fast with
-      | None -> ()
-      | Some { FileInfo.n_funs; n_classes; n_types; n_consts } ->
-        SSet.iter (type_fun nenv) n_funs;
-        SSet.iter (type_class nenv) n_classes;
-        SSet.iter check_typedef n_types;
-        SSet.iter check_const n_consts;
+      SSet.iter (type_fun tcopt) n_funs;
+      SSet.iter (type_class tcopt) n_classes;
+      SSet.iter check_typedef n_types;
+      SSet.iter check_const n_consts;
     end  in
   let failed =
     if errors' <> [] then Relative_path.Set.add fn failed else failed in
   List.rev_append errors' errors, failed
 
-let check_files nenv fast (errors, failed) fnl =
+let check_files tcopt (errors, failed) fnl =
   SharedMem.invalidate_caches();
   let check_file =
     if !Utils.profile
-    then (fun fast acc fn ->
+    then (fun acc fn ->
       let t = Unix.gettimeofday () in
-      let result = check_file nenv fast acc fn in
+      let result = check_file tcopt acc fn in
       let t' = Unix.gettimeofday () in
       let msg =
-        Printf.sprintf "%f %s [type-check]" (t' -. t) (Relative_path.suffix fn) in
+        Printf.sprintf "%f %s [type-check]" (t' -. t)
+          (Relative_path.suffix (fst fn)) in
       !Utils.log msg;
       result)
-    else check_file nenv in
-  let errors, failed = List.fold_left (check_file fast) (errors, failed) fnl in
+    else check_file tcopt in
+  let errors, failed = List.fold_left fnl
+    ~f:check_file ~init:(errors, failed) in
   errors, failed
 
 let load_and_check_files acc fnl =
-  let fast, nenv = TypeCheckStore.load() in
-  check_files nenv fast acc fnl
+  let tcopt = TypeCheckStore.load() in
+  check_files tcopt acc fnl
 
 (*****************************************************************************)
 (* Let's go! That's where the action is *)
 (*****************************************************************************)
 
-let parallel_check workers nenv fast fnl =
-  TypeCheckStore.store (fast, nenv);
+let parallel_check workers tcopt fnl =
+  TypeCheckStore.store tcopt;
   let result =
     MultiWorker.call
       workers
@@ -134,8 +131,8 @@ let parallel_check workers nenv fast fnl =
   TypeCheckStore.clear();
   result
 
-let go workers nenv fast =
-  let fnl = Relative_path.Map.fold (fun x _ y -> x :: y) fast [] in
+let go workers tcopt fast =
+  let fnl = Relative_path.Map.elements fast in
   if List.length fnl < 10
-  then check_files nenv fast neutral fnl
-  else parallel_check workers nenv fast fnl
+  then check_files tcopt neutral fnl
+  else parallel_check workers tcopt fnl

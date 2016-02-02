@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -39,11 +39,11 @@
 #include "hphp/runtime/base/repo-auth-type-codec.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/base/stats.h"
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/unit-cache.h"
-#include "hphp/runtime/ext/ext_collections.h"
-#include "hphp/runtime/ext/ext_generator.h"
+#include "hphp/runtime/ext/collections/ext_collections-idl.h"
+#include "hphp/runtime/ext/generator/ext_generator.h"
 #include "hphp/runtime/vm/bytecode.h"
+#include "hphp/runtime/vm/hhbc-codec.h"
 #include "hphp/runtime/vm/hhbc.h"
 #include "hphp/runtime/vm/runtime.h"
 #include "hphp/runtime/vm/treadmill.h"
@@ -51,9 +51,10 @@
 #include "hphp/runtime/vm/bc-pattern.h"
 
 #include "hphp/runtime/vm/jit/annotation.h"
-#include "hphp/runtime/vm/jit/guard-relaxation.h"
+#include "hphp/runtime/vm/jit/inlining-decider.h"
 #include "hphp/runtime/vm/jit/ir-unit.h"
 #include "hphp/runtime/vm/jit/irgen-exit.h"
+#include "hphp/runtime/vm/jit/irgen.h"
 #include "hphp/runtime/vm/jit/mc-generator.h"
 #include "hphp/runtime/vm/jit/normalized-instruction.h"
 #include "hphp/runtime/vm/jit/print.h"
@@ -61,11 +62,10 @@
 #include "hphp/runtime/vm/jit/punt.h"
 #include "hphp/runtime/vm/jit/region-selection.h"
 #include "hphp/runtime/vm/jit/timer.h"
+#include "hphp/runtime/vm/jit/translate-region.h"
 #include "hphp/runtime/vm/jit/translator-inline.h"
 #include "hphp/runtime/vm/jit/type.h"
-#include "hphp/runtime/vm/jit/inlining-decider.h"
-#include "hphp/runtime/vm/jit/translate-region.h"
-#include "hphp/runtime/vm/jit/irgen.h"
+
 
 TRACE_SET_MOD(trans);
 
@@ -86,115 +86,116 @@ static const struct {
   InstrInfo info;
 } instrInfoSparse [] = {
 
-  // Op             Inputs            Outputs       OutputTypes    Stack delta
-  // --             ------            -------       -----------    -----------
+  // Op             Inputs            Outputs       OutputTypes
+  // --             ------            -------       -----------
 
   /*** 1. Basic instructions ***/
 
-  { OpPopA,        {Stack1,           None,         OutNone,          -1 }},
+  { OpPopA,        {Stack1,           None,         OutNone         }},
   { OpPopC,        {Stack1|
-                    DontGuardStack1,  None,         OutNone,          -1 }},
+                    DontGuardStack1,  None,         OutNone         }},
   { OpPopV,        {Stack1|
                     DontGuardStack1|
-                    IgnoreInnerType,  None,         OutNone,          -1 }},
+                    IgnoreInnerType,  None,         OutNone         }},
   { OpPopR,        {Stack1|
                     DontGuardStack1|
-                    IgnoreInnerType,  None,         OutNone,          -1 }},
-  { OpDup,         {Stack1,           StackTop2,    OutSameAsInput,    1 }},
-  { OpBox,         {Stack1,           Stack1,       OutVInput,         0 }},
-  { OpUnbox,       {Stack1,           Stack1,       OutCInput,         0 }},
-  { OpBoxR,        {Stack1,           Stack1,       OutVInput,         0 }},
-  { OpUnboxR,      {Stack1,           Stack1,       OutCInput,         0 }},
+                    IgnoreInnerType,  None,         OutNone         }},
+  { OpDup,         {Stack1,           StackTop2,    OutSameAsInput  }},
+  { OpBox,         {Stack1,           Stack1,       OutVInput       }},
+  { OpUnbox,       {Stack1,           Stack1,       OutCInput       }},
+  { OpBoxR,        {Stack1,           Stack1,       OutVInput       }},
+  { OpUnboxR,      {Stack1,           Stack1,       OutCInput       }},
 
   /*** 2. Literal and constant instructions ***/
 
-  { OpNull,        {None,             Stack1,       OutNull,           1 }},
-  { OpNullUninit,  {None,             Stack1,       OutNullUninit,     1 }},
-  { OpTrue,        {None,             Stack1,       OutBooleanImm,     1 }},
-  { OpFalse,       {None,             Stack1,       OutBooleanImm,     1 }},
-  { OpInt,         {None,             Stack1,       OutInt64,          1 }},
-  { OpDouble,      {None,             Stack1,       OutDouble,         1 }},
-  { OpString,      {None,             Stack1,       OutStringImm,      1 }},
-  { OpArray,       {None,             Stack1,       OutArrayImm,       1 }},
-  { OpNewArray,    {None,             Stack1,       OutArray,          1 }},
-  { OpNewMixedArray,  {None,          Stack1,       OutArray,          1 }},
-  { OpNewLikeArrayL,  {Local,         Stack1,       OutArray,          1 }},
-  { OpNewPackedArray, {StackN,        Stack1,       OutArray,          0 }},
-  { OpNewStructArray, {StackN,        Stack1,       OutArray,          0 }},
-  { OpAddElemC,    {StackTop3,        Stack1,       OutArray,         -2 }},
-  { OpAddElemV,    {StackTop3,        Stack1,       OutArray,         -2 }},
-  { OpAddNewElemC, {StackTop2,        Stack1,       OutArray,         -1 }},
-  { OpAddNewElemV, {StackTop2,        Stack1,       OutArray,         -1 }},
-  { OpNewCol,      {None,             Stack1,       OutObject,         1 }},
-  { OpColFromArray,   {Stack1,        Stack1,       OutObject,         0 }},
-  { OpMapAddElemC, {StackTop3,        Stack1,       OutObject,        -2 }},
-  { OpColAddNewElemC, {StackTop2,     Stack1,       OutObject,        -1 }},
-  { OpCns,         {None,             Stack1,       OutCns,            1 }},
-  { OpCnsE,        {None,             Stack1,       OutCns,            1 }},
-  { OpCnsU,        {None,             Stack1,       OutCns,            1 }},
-  { OpClsCns,      {Stack1,           Stack1,       OutUnknown,        0 }},
-  { OpClsCnsD,     {None,             Stack1,       OutUnknown,           1 }},
-  { OpFile,        {None,             Stack1,       OutString,         1 }},
-  { OpDir,         {None,             Stack1,       OutString,         1 }},
-  { OpNameA,       {Stack1,           Stack1,       OutString,         0 }},
+  { OpNull,        {None,             Stack1,       OutNull         }},
+  { OpNullUninit,  {None,             Stack1,       OutNullUninit   }},
+  { OpTrue,        {None,             Stack1,       OutBooleanImm   }},
+  { OpFalse,       {None,             Stack1,       OutBooleanImm   }},
+  { OpInt,         {None,             Stack1,       OutInt64        }},
+  { OpDouble,      {None,             Stack1,       OutDouble       }},
+  { OpString,      {None,             Stack1,       OutStringImm    }},
+  { OpArray,       {None,             Stack1,       OutArrayImm     }},
+  { OpNewArray,    {None,             Stack1,       OutArray        }},
+  { OpNewMixedArray,  {None,          Stack1,       OutArray        }},
+  { OpNewLikeArrayL,  {Local,         Stack1,       OutArray        }},
+  { OpNewPackedArray, {StackN,        Stack1,       OutArray        }},
+  { OpNewStructArray, {StackN,        Stack1,       OutArray        }},
+  { OpAddElemC,    {StackTop3,        Stack1,       OutArray        }},
+  { OpAddElemV,    {StackTop3,        Stack1,       OutArray        }},
+  { OpAddNewElemC, {StackTop2,        Stack1,       OutArray        }},
+  { OpAddNewElemV, {StackTop2,        Stack1,       OutArray        }},
+  { OpNewCol,      {None,             Stack1,       OutObject       }},
+  { OpColFromArray,   {Stack1,        Stack1,       OutObject       }},
+  { OpMapAddElemC, {StackTop3,        Stack1,       OutObject       }},
+  { OpColAddNewElemC, {StackTop2,     Stack1,       OutObject       }},
+  { OpCns,         {None,             Stack1,       OutCns          }},
+  { OpCnsE,        {None,             Stack1,       OutCns          }},
+  { OpCnsU,        {None,             Stack1,       OutCns          }},
+  { OpClsCns,      {Stack1,           Stack1,       OutUnknown      }},
+  { OpClsCnsD,     {None,             Stack1,       OutUnknown      }},
+  { OpFile,        {None,             Stack1,       OutString       }},
+  { OpDir,         {None,             Stack1,       OutString       }},
+  { OpNameA,       {Stack1,           Stack1,       OutString       }},
 
   /*** 3. Operator instructions ***/
 
   /* Binary string */
-  { OpConcat,      {StackTop2,        Stack1,       OutString,        -1 }},
-  { OpConcatN,     {StackN,           Stack1,       OutString,         0 }},
+  { OpConcat,      {StackTop2,        Stack1,       OutString       }},
+  { OpConcatN,     {StackN,           Stack1,       OutString       }},
   /* Arithmetic ops */
-  { OpAdd,         {StackTop2,        Stack1,       OutArith,         -1 }},
-  { OpSub,         {StackTop2,        Stack1,       OutArith,         -1 }},
-  { OpMul,         {StackTop2,        Stack1,       OutArith,         -1 }},
+  { OpAdd,         {StackTop2,        Stack1,       OutArith        }},
+  { OpSub,         {StackTop2,        Stack1,       OutArith        }},
+  { OpMul,         {StackTop2,        Stack1,       OutArith        }},
   /* Arithmetic ops that overflow ints to floats */
-  { OpAddO,        {StackTop2,        Stack1,       OutArithO,        -1 }},
-  { OpSubO,        {StackTop2,        Stack1,       OutArithO,        -1 }},
-  { OpMulO,        {StackTop2,        Stack1,       OutArithO,        -1 }},
+  { OpAddO,        {StackTop2,        Stack1,       OutArithO       }},
+  { OpSubO,        {StackTop2,        Stack1,       OutArithO       }},
+  { OpMulO,        {StackTop2,        Stack1,       OutArithO       }},
   /* Div and mod might return boolean false. Sigh. */
-  { OpDiv,         {StackTop2,        Stack1,       OutUnknown,       -1 }},
-  { OpMod,         {StackTop2,        Stack1,       OutUnknown,       -1 }},
-  { OpPow,         {StackTop2,        Stack1,       OutUnknown,       -1 }},
+  { OpDiv,         {StackTop2,        Stack1,       OutUnknown      }},
+  { OpMod,         {StackTop2,        Stack1,       OutUnknown      }},
+  { OpPow,         {StackTop2,        Stack1,       OutUnknown      }},
   /* Logical ops */
-  { OpXor,         {StackTop2,        Stack1,       OutBoolean,       -1 }},
-  { OpNot,         {Stack1,           Stack1,       OutBoolean,        0 }},
-  { OpSame,        {StackTop2,        Stack1,       OutBoolean,       -1 }},
-  { OpNSame,       {StackTop2,        Stack1,       OutBoolean,       -1 }},
-  { OpEq,          {StackTop2,        Stack1,       OutBoolean,       -1 }},
-  { OpNeq,         {StackTop2,        Stack1,       OutBoolean,       -1 }},
-  { OpLt,          {StackTop2,        Stack1,       OutBoolean,       -1 }},
-  { OpLte,         {StackTop2,        Stack1,       OutBoolean,       -1 }},
-  { OpGt,          {StackTop2,        Stack1,       OutBoolean,       -1 }},
-  { OpGte,         {StackTop2,        Stack1,       OutBoolean,       -1 }},
+  { OpXor,         {StackTop2,        Stack1,       OutBoolean      }},
+  { OpNot,         {Stack1,           Stack1,       OutBoolean      }},
+  { OpSame,        {StackTop2,        Stack1,       OutBoolean      }},
+  { OpNSame,       {StackTop2,        Stack1,       OutBoolean      }},
+  { OpEq,          {StackTop2,        Stack1,       OutBoolean      }},
+  { OpNeq,         {StackTop2,        Stack1,       OutBoolean      }},
+  { OpLt,          {StackTop2,        Stack1,       OutBoolean      }},
+  { OpLte,         {StackTop2,        Stack1,       OutBoolean      }},
+  { OpGt,          {StackTop2,        Stack1,       OutBoolean      }},
+  { OpGte,         {StackTop2,        Stack1,       OutBoolean      }},
+  { OpCmp,         {StackTop2,        Stack1,       OutInt64        }},
   /* Bitwise ops */
-  { OpBitAnd,      {StackTop2,        Stack1,       OutBitOp,         -1 }},
-  { OpBitOr,       {StackTop2,        Stack1,       OutBitOp,         -1 }},
-  { OpBitXor,      {StackTop2,        Stack1,       OutBitOp,         -1 }},
-  { OpBitNot,      {Stack1,           Stack1,       OutBitOp,          0 }},
-  { OpShl,         {StackTop2,        Stack1,       OutInt64,         -1 }},
-  { OpShr,         {StackTop2,        Stack1,       OutInt64,         -1 }},
+  { OpBitAnd,      {StackTop2,        Stack1,       OutBitOp        }},
+  { OpBitOr,       {StackTop2,        Stack1,       OutBitOp        }},
+  { OpBitXor,      {StackTop2,        Stack1,       OutBitOp        }},
+  { OpBitNot,      {Stack1,           Stack1,       OutBitOp        }},
+  { OpShl,         {StackTop2,        Stack1,       OutInt64        }},
+  { OpShr,         {StackTop2,        Stack1,       OutInt64        }},
   /* Cast instructions */
-  { OpCastBool,    {Stack1,           Stack1,       OutBoolean,        0 }},
-  { OpCastInt,     {Stack1,           Stack1,       OutInt64,          0 }},
-  { OpCastDouble,  {Stack1,           Stack1,       OutDouble,         0 }},
-  { OpCastString,  {Stack1,           Stack1,       OutString,         0 }},
-  { OpCastArray,   {Stack1,           Stack1,       OutArray,          0 }},
-  { OpCastObject,  {Stack1,           Stack1,       OutObject,         0 }},
-  { OpInstanceOf,  {StackTop2,        Stack1,       OutBoolean,       -1 }},
-  { OpInstanceOfD, {Stack1,           Stack1,       OutPredBool,       0 }},
-  { OpPrint,       {Stack1,           Stack1,       OutInt64,          0 }},
-  { OpClone,       {Stack1,           Stack1,       OutObject,         0 }},
-  { OpExit,        {Stack1,           Stack1,       OutNull,           0 }},
-  { OpFatal,       {Stack1,           None,         OutNone,          -1 }},
+  { OpCastBool,    {Stack1,           Stack1,       OutBoolean      }},
+  { OpCastInt,     {Stack1,           Stack1,       OutInt64        }},
+  { OpCastDouble,  {Stack1,           Stack1,       OutDouble       }},
+  { OpCastString,  {Stack1,           Stack1,       OutString       }},
+  { OpCastArray,   {Stack1,           Stack1,       OutArray        }},
+  { OpCastObject,  {Stack1,           Stack1,       OutObject       }},
+  { OpInstanceOf,  {StackTop2,        Stack1,       OutBoolean      }},
+  { OpInstanceOfD, {Stack1,           Stack1,       OutPredBool     }},
+  { OpPrint,       {Stack1,           Stack1,       OutInt64        }},
+  { OpClone,       {Stack1,           Stack1,       OutObject       }},
+  { OpExit,        {Stack1,           Stack1,       OutNull         }},
+  { OpFatal,       {Stack1,           None,         OutNone         }},
 
   /*** 4. Control flow instructions ***/
 
-  { OpJmp,         {None,             None,         OutNone,           0 }},
-  { OpJmpNS,       {None,             None,         OutNone,           0 }},
-  { OpJmpZ,        {Stack1,           None,         OutNone,          -1 }},
-  { OpJmpNZ,       {Stack1,           None,         OutNone,          -1 }},
-  { OpSwitch,      {Stack1,           None,         OutNone,          -1 }},
-  { OpSSwitch,     {Stack1,           None,         OutNone,          -1 }},
+  { OpJmp,         {None,             None,         OutNone         }},
+  { OpJmpNS,       {None,             None,         OutNone         }},
+  { OpJmpZ,        {Stack1,           None,         OutNone         }},
+  { OpJmpNZ,       {Stack1,           None,         OutNone         }},
+  { OpSwitch,      {Stack1,           None,         OutNone         }},
+  { OpSSwitch,     {Stack1,           None,         OutNone         }},
   /*
    * RetC and RetV are special. Their manipulation of the runtime stack are
    * outside the boundaries of the tracelet abstraction; since they always end
@@ -204,239 +205,270 @@ static const struct {
    * RetC and RetV consume a value from the stack, and this value's type needs
    * to be known at compile-time.
    */
-  { OpRetC,        {AllLocals,        None,         OutNone,           0 }},
-  { OpRetV,        {AllLocals,        None,         OutNone,           0 }},
-  { OpThrow,       {Stack1,           None,         OutNone,          -1 }},
-  { OpUnwind,      {None,             None,         OutNone,           0 }},
+  { OpRetC,        {AllLocals,        None,         OutNone         }},
+  { OpRetV,        {AllLocals,        None,         OutNone         }},
+  { OpThrow,       {Stack1,           None,         OutNone         }},
+  { OpUnwind,      {None,             None,         OutNone         }},
 
   /*** 5. Get instructions ***/
 
-  { OpCGetL,       {Local,            Stack1,       OutCInputL,        1 }},
-  { OpCGetL2,      {Stack1|Local,     StackIns1,    OutCInputL,        1 }},
-  { OpCGetL3,      {StackTop2|Local,  StackIns2,    OutCInputL,        1 }},
+  { OpCGetL,       {Local,            Stack1,       OutCInputL      }},
+  { OpCGetL2,      {Stack1|DontGuardStack1|
+                    Local,            StackIns1,    OutCInputL      }},
+  { OpCGetL3,      {StackTop2|Local,  StackIns2,    OutCInputL      }},
+  { OpCGetQuietL,  {Local,            Stack1,       OutCInputL      }},
   // In OpCUGetL we rely on OutCInputL returning TCell (which covers Uninit
   // values) instead of TInitCell.
-  { OpCUGetL,      {Local,            Stack1,       OutCInputL,        1 }},
-  { OpPushL,       {Local,            Stack1|Local, OutCInputL,        1 }},
-  { OpCGetN,       {Stack1,           Stack1,       OutUnknown,        0 }},
-  { OpCGetG,       {Stack1,           Stack1,       OutUnknown,        0 }},
-  { OpCGetS,       {StackTop2,        Stack1,       OutUnknown,       -1 }},
-  { OpCGetM,       {MVector,          Stack1,       OutUnknown,        1 }},
-  { OpVGetL,       {Local,            Stack1|Local, OutVInputL,        1 }},
-  { OpVGetN,       {Stack1,           Stack1|Local, OutVUnknown,       0 }},
+  { OpCUGetL,      {Local,            Stack1,       OutCInputL      }},
+  { OpPushL,       {Local,            Stack1|Local, OutCInputL      }},
+  { OpCGetN,       {Stack1,           Stack1,       OutUnknown      }},
+  { OpCGetQuietN,  {Stack1,           Stack1,       OutUnknown      }},
+  { OpCGetG,       {Stack1,           Stack1,       OutUnknown      }},
+  { OpCGetQuietG,  {Stack1,           Stack1,       OutUnknown      }},
+  { OpCGetS,       {StackTop2,        Stack1,       OutUnknown      }},
+  { OpVGetL,       {Local,            Stack1|Local, OutVInputL      }},
+  { OpVGetN,       {Stack1,           Stack1|Local, OutVUnknown     }},
   // TODO: In pseudo-main, the VGetG instruction invalidates what we know
   // about the types of the locals because it could cause any one of the
   // local variables to become "boxed". We need to add logic to tracelet
   // analysis to deal with this properly.
-  { OpVGetG,       {Stack1,           Stack1,       OutVUnknown,       0 }},
-  { OpVGetS,       {StackTop2,        Stack1,       OutVUnknown,      -1 }},
-  { OpVGetM,       {MVector,          Stack1|Local, OutVUnknown,       1 }},
-  { OpAGetC,       {Stack1,           Stack1,       OutClassRef,       0 }},
-  { OpAGetL,       {Local,            Stack1,       OutClassRef,       1 }},
+  { OpVGetG,       {Stack1,           Stack1,       OutVUnknown     }},
+  { OpVGetS,       {StackTop2,        Stack1,       OutVUnknown     }},
+  { OpAGetC,       {Stack1,           Stack1,       OutClassRef     }},
+  { OpAGetL,       {Local,            Stack1,       OutClassRef     }},
 
   /*** 6. Isset, Empty, and type querying instructions ***/
 
-  { OpAKExists,    {StackTop2,        Stack1,       OutBoolean,       -1 }},
-  { OpIssetL,      {Local,            Stack1,       OutBoolean,        1 }},
-  { OpIssetN,      {Stack1,           Stack1,       OutBoolean,        0 }},
-  { OpIssetG,      {Stack1,           Stack1,       OutBoolean,        0 }},
-  { OpIssetS,      {StackTop2,        Stack1,       OutBoolean,       -1 }},
-  { OpIssetM,      {MVector,          Stack1,       OutBoolean,        1 }},
-  { OpEmptyL,      {Local,            Stack1,       OutBoolean,        1 }},
-  { OpEmptyN,      {Stack1,           Stack1,       OutBoolean,        0 }},
-  { OpEmptyG,      {Stack1,           Stack1,       OutBoolean,        0 }},
-  { OpEmptyS,      {StackTop2,        Stack1,       OutBoolean,       -1 }},
-  { OpEmptyM,      {MVector,          Stack1,       OutBoolean,        1 }},
+  { OpAKExists,    {StackTop2,        Stack1,       OutBoolean      }},
+  { OpIssetL,      {Local,            Stack1,       OutBoolean      }},
+  { OpIssetN,      {Stack1,           Stack1,       OutBoolean      }},
+  { OpIssetG,      {Stack1,           Stack1,       OutBoolean      }},
+  { OpIssetS,      {StackTop2,        Stack1,       OutBoolean      }},
+  { OpEmptyL,      {Local,            Stack1,       OutBoolean      }},
+  { OpEmptyN,      {Stack1,           Stack1,       OutBoolean      }},
+  { OpEmptyG,      {Stack1,           Stack1,       OutBoolean      }},
+  { OpEmptyS,      {StackTop2,        Stack1,       OutBoolean      }},
   { OpIsTypeC,     {Stack1|
-                    DontGuardStack1,  Stack1,       OutBoolean,        0 }},
-  { OpIsTypeL,     {Local,            Stack1,       OutIsTypeL,        1 }},
+                    DontGuardStack1,  Stack1,       OutBoolean      }},
+  { OpIsTypeL,     {Local,            Stack1,       OutIsTypeL      }},
 
   /*** 7. Mutator instructions ***/
 
-  { OpSetL,        {Stack1|Local,     Stack1|Local, OutSameAsInput,    0 }},
-  { OpSetN,        {StackTop2,        Stack1|Local, OutSameAsInput,   -1 }},
-  { OpSetG,        {StackTop2,        Stack1,       OutSameAsInput,   -1 }},
-  { OpSetS,        {StackTop3,        Stack1,       OutSameAsInput,   -2 }},
-  { OpSetM,        {MVector|Stack1,   Stack1|Local, OutUnknown,        0 }},
-  { OpSetWithRefLM,{MVector|Local ,   Local,        OutNone,           0 }},
-  { OpSetWithRefRM,{MVector|Stack1,   Local,        OutNone,          -1 }},
-  { OpSetOpL,      {Stack1|Local,     Stack1|Local, OutSetOp,          0 }},
-  { OpSetOpN,      {StackTop2,        Stack1|Local, OutUnknown,       -1 }},
-  { OpSetOpG,      {StackTop2,        Stack1,       OutUnknown,       -1 }},
-  { OpSetOpS,      {StackTop3,        Stack1,       OutUnknown,       -2 }},
-  { OpSetOpM,      {MVector|Stack1,   Stack1|Local, OutUnknown,        0 }},
-  { OpIncDecL,     {Local,            Stack1|Local, OutIncDec,         1 }},
-  { OpIncDecN,     {Stack1,           Stack1|Local, OutUnknown,        0 }},
-  { OpIncDecG,     {Stack1,           Stack1,       OutUnknown,        0 }},
-  { OpIncDecS,     {StackTop2,        Stack1,       OutUnknown,       -1 }},
-  { OpIncDecM,     {MVector,          Stack1|Local, OutUnknown,        1 }},
+  { OpSetL,        {Stack1|Local,     Stack1|Local, OutSameAsInput  }},
+  { OpSetN,        {StackTop2,        Stack1|Local, OutSameAsInput  }},
+  { OpSetG,        {StackTop2,        Stack1,       OutSameAsInput  }},
+  { OpSetS,        {StackTop3,        Stack1,       OutSameAsInput  }},
+  { OpSetOpL,      {Stack1|Local,     Stack1|Local, OutSetOp        }},
+  { OpSetOpN,      {StackTop2,        Stack1|Local, OutUnknown      }},
+  { OpSetOpG,      {StackTop2,        Stack1,       OutUnknown      }},
+  { OpSetOpS,      {StackTop3,        Stack1,       OutUnknown      }},
+  { OpIncDecL,     {Local,            Stack1|Local, OutIncDec       }},
+  { OpIncDecN,     {Stack1,           Stack1|Local, OutUnknown      }},
+  { OpIncDecG,     {Stack1,           Stack1,       OutUnknown      }},
+  { OpIncDecS,     {StackTop2,        Stack1,       OutUnknown      }},
   { OpBindL,       {Stack1|Local|
-                    IgnoreInnerType,  Stack1|Local, OutSameAsInput,    0 }},
-  { OpBindN,       {StackTop2,        Stack1|Local, OutSameAsInput,   -1 }},
-  { OpBindG,       {StackTop2,        Stack1,       OutSameAsInput,   -1 }},
-  { OpBindS,       {StackTop3,        Stack1,       OutSameAsInput,   -2 }},
-  { OpBindM,       {MVector|Stack1,   Stack1|Local, OutSameAsInput,    0 }},
-  { OpUnsetL,      {Local,            Local,        OutNone,           0 }},
-  { OpUnsetN,      {Stack1,           Local,        OutNone,          -1 }},
-  { OpUnsetG,      {Stack1,           None,         OutNone,          -1 }},
-  { OpUnsetM,      {MVector,          Local,        OutNone,           0 }},
+                    IgnoreInnerType,  Stack1|Local, OutSameAsInput  }},
+  { OpBindN,       {StackTop2,        Stack1|Local, OutSameAsInput  }},
+  { OpBindG,       {StackTop2,        Stack1,       OutSameAsInput  }},
+  { OpBindS,       {StackTop3,        Stack1,       OutSameAsInput  }},
+  { OpUnsetL,      {Local,            Local,        OutNone         }},
+  { OpUnsetN,      {Stack1,           Local,        OutNone         }},
+  { OpUnsetG,      {Stack1,           None,         OutNone         }},
 
   /*** 8. Call instructions ***/
 
-  { OpFPushFunc,   {Stack1,           FStack,       OutFDesc,
-                                                     kNumActRecCells - 1 }},
-  { OpFPushFuncD,  {None,             FStack,       OutFDesc,
-                                                         kNumActRecCells }},
-  { OpFPushFuncU,  {None,             FStack,       OutFDesc,
-                                                         kNumActRecCells }},
+  { OpFPushFunc,   {Stack1,           FStack,       OutFDesc        }},
+  { OpFPushFuncD,  {None,             FStack,       OutFDesc        }},
+  { OpFPushFuncU,  {None,             FStack,       OutFDesc        }},
   { OpFPushObjMethod,
-                   {StackTop2,        FStack,       OutFDesc,
-                                                     kNumActRecCells - 2 }},
+                   {StackTop2,        FStack,       OutFDesc        }},
   { OpFPushObjMethodD,
-                   {Stack1,           FStack,       OutFDesc,
-                                                     kNumActRecCells - 1 }},
+                   {Stack1,           FStack,       OutFDesc        }},
   { OpFPushClsMethod,
-                   {StackTop2,        FStack,       OutFDesc,
-                                                     kNumActRecCells - 2 }},
+                   {StackTop2,        FStack,       OutFDesc        }},
   { OpFPushClsMethodF,
-                   {StackTop2,        FStack,       OutFDesc,
-                                                     kNumActRecCells - 2 }},
+                   {StackTop2,        FStack,       OutFDesc        }},
   { OpFPushClsMethodD,
-                   {None,             FStack,       OutFDesc,
-                                                         kNumActRecCells }},
-  { OpFPushCtor,   {Stack1,           Stack1|FStack,OutObject,
-                                                         kNumActRecCells }},
-  { OpFPushCtorD,  {None,             Stack1|FStack,OutObject,
-                                                     kNumActRecCells + 1 }},
-  { OpFPushCufIter,{None,             FStack,       OutFDesc,
-                                                         kNumActRecCells }},
-  { OpFPushCuf,    {Stack1,           FStack,       OutFDesc,
-                                                     kNumActRecCells - 1 }},
-  { OpFPushCufF,   {Stack1,           FStack,       OutFDesc,
-                                                     kNumActRecCells - 1 }},
+                   {None,             FStack,       OutFDesc        }},
+  { OpFPushCtor,   {Stack1,           Stack1|FStack,OutObject       }},
+  { OpFPushCtorD,  {None,             Stack1|FStack,OutObject       }},
+  { OpFPushCufIter,{None,             FStack,       OutFDesc        }},
+  { OpFPushCuf,    {Stack1,           FStack,       OutFDesc        }},
+  { OpFPushCufF,   {Stack1,           FStack,       OutFDesc        }},
   { OpFPushCufSafe,{StackTop2|DontGuardAny,
-                                      StackTop2|FStack, OutFPushCufSafe,
-                                                         kNumActRecCells }},
-  { OpFPassCW,     {FuncdRef,         None,         OutSameAsInput,    0 }},
-  { OpFPassCE,     {FuncdRef,         None,         OutSameAsInput,    0 }},
-  { OpFPassV,      {Stack1|FuncdRef,  Stack1,       OutUnknown,        0 }},
-  { OpFPassR,      {Stack1|FuncdRef,  Stack1,       OutFInputR,        0 }},
-  { OpFPassL,      {Local|FuncdRef,   Stack1,       OutFInputL,        1 }},
-  { OpFPassN,      {Stack1|FuncdRef,  Stack1,       OutUnknown,        0 }},
-  { OpFPassG,      {Stack1|FuncdRef,  Stack1,       OutUnknown,        0 }},
+                                      StackTop2|FStack,
+                                                    OutFPushCufSafe }},
+  { OpFPassCW,     {FuncdRef,         None,         OutSameAsInput  }},
+  { OpFPassCE,     {FuncdRef,         None,         OutSameAsInput  }},
+  { OpFPassV,      {Stack1|FuncdRef,  Stack1,       OutUnknown      }},
+  { OpFPassR,      {Stack1|FuncdRef,  Stack1,       OutFInputR      }},
+  { OpFPassL,      {Local|FuncdRef,   Stack1,       OutFInputL      }},
+  { OpFPassN,      {Stack1|FuncdRef,  Stack1,       OutUnknown      }},
+  { OpFPassG,      {Stack1|FuncdRef,  Stack1,       OutUnknown      }},
   { OpFPassS,      {StackTop2|FuncdRef,
-                                      Stack1,       OutUnknown,       -1 }},
-  { OpFPassM,      {MVector|FuncdRef, Stack1|Local, OutUnknown,        1 }},
+                                      Stack1,       OutUnknown      }},
   /*
    * FCall is special. Like the Ret* instructions, its manipulation of the
    * runtime stack are outside the boundaries of the tracelet abstraction.
    */
-  { OpFCall,       {FStack,           Stack1,       OutUnknown,        0 }},
-  { OpFCallD,      {FStack,           Stack1,       OutUnknown,        0 }},
-  { OpFCallUnpack, {FStack,           Stack1,       OutUnknown,        0 }},
-  { OpFCallArray,  {FStack,           Stack1,       OutUnknown,
-                                                   -(int)kNumActRecCells }},
-  { OpFCallBuiltin,{BStackN,          Stack1,       OutUnknown,        0 }},
+  { OpFCall,       {FStack,           Stack1,       OutUnknown      }},
+  { OpFCallD,      {FStack,           Stack1,       OutUnknown      }},
+  { OpFCallAwait,  {FStack,           Stack1,       OutUnknown      }},
+  { OpFCallUnpack, {FStack,           Stack1,       OutUnknown      }},
+  { OpFCallArray,  {FStack,           Stack1,       OutUnknown      }},
+  { OpFCallBuiltin,{BStackN|DontGuardAny,
+                                      Stack1,       OutUnknown      }},
   { OpCufSafeArray,{StackTop3|DontGuardAny,
-                                      Stack1,       OutArray,         -2 }},
+                                      Stack1,       OutArray        }},
   { OpCufSafeReturn,{StackTop3|DontGuardAny,
-                                      Stack1,       OutUnknown,       -2 }},
-  { OpDecodeCufIter,{Stack1,          None,         OutNone,          -1 }},
+                                      Stack1,       OutUnknown      }},
+  { OpDecodeCufIter,{Stack1,          None,         OutNone         }},
 
   /*** 11. Iterator instructions ***/
 
-  { OpIterInit,    {Stack1,           Local,        OutUnknown,       -1 }},
-  { OpMIterInit,   {Stack1,           Local,        OutUnknown,       -1 }},
-  { OpWIterInit,   {Stack1,           Local,        OutUnknown,       -1 }},
-  { OpIterInitK,   {Stack1,           Local,        OutUnknown,       -1 }},
-  { OpMIterInitK,  {Stack1,           Local,        OutUnknown,       -1 }},
-  { OpWIterInitK,  {Stack1,           Local,        OutUnknown,       -1 }},
-  { OpIterNext,    {None,             Local,        OutUnknown,        0 }},
-  { OpMIterNext,   {None,             Local,        OutUnknown,        0 }},
-  { OpWIterNext,   {None,             Local,        OutUnknown,        0 }},
-  { OpIterNextK,   {None,             Local,        OutUnknown,        0 }},
-  { OpMIterNextK,  {None,             Local,        OutUnknown,        0 }},
-  { OpWIterNextK,  {None,             Local,        OutUnknown,        0 }},
-  { OpIterFree,    {None,             None,         OutNone,           0 }},
-  { OpMIterFree,   {None,             None,         OutNone,           0 }},
-  { OpCIterFree,   {None,             None,         OutNone,           0 }},
-  { OpIterBreak,   {None,             None,         OutNone,           0 }},
+  { OpIterInit,    {Stack1,           Local,        OutUnknown      }},
+  { OpMIterInit,   {Stack1,           Local,        OutUnknown      }},
+  { OpWIterInit,   {Stack1,           Local,        OutUnknown      }},
+  { OpIterInitK,   {Stack1,           Local,        OutUnknown      }},
+  { OpMIterInitK,  {Stack1,           Local,        OutUnknown      }},
+  { OpWIterInitK,  {Stack1,           Local,        OutUnknown      }},
+  { OpIterNext,    {None,             Local,        OutUnknown      }},
+  { OpMIterNext,   {None,             Local,        OutUnknown      }},
+  { OpWIterNext,   {None,             Local,        OutUnknown      }},
+  { OpIterNextK,   {None,             Local,        OutUnknown      }},
+  { OpMIterNextK,  {None,             Local,        OutUnknown      }},
+  { OpWIterNextK,  {None,             Local,        OutUnknown      }},
+  { OpIterFree,    {None,             None,         OutNone         }},
+  { OpMIterFree,   {None,             None,         OutNone         }},
+  { OpCIterFree,   {None,             None,         OutNone         }},
+  { OpIterBreak,   {None,             None,         OutNone         }},
 
   /*** 12. Include, eval, and define instructions ***/
 
-  { OpIncl,        {Stack1,           Stack1,       OutUnknown,        0 }},
-  { OpInclOnce,    {Stack1,           Stack1,       OutUnknown,        0 }},
-  { OpReq,         {Stack1,           Stack1,       OutUnknown,        0 }},
-  { OpReqOnce,     {Stack1,           Stack1,       OutUnknown,        0 }},
-  { OpReqDoc,      {Stack1,           Stack1,       OutUnknown,        0 }},
-  { OpEval,        {Stack1,           Stack1,       OutUnknown,        0 }},
-  { OpDefFunc,     {None,             None,         OutNone,           0 }},
-  { OpDefTypeAlias,{None,             None,         OutNone,           0 }},
-  { OpDefCls,      {None,             None,         OutNone,           0 }},
-  { OpDefCns,      {Stack1,           Stack1,       OutBoolean,        0 }},
+  { OpIncl,        {Stack1,           Stack1,       OutUnknown      }},
+  { OpInclOnce,    {Stack1,           Stack1,       OutUnknown      }},
+  { OpReq,         {Stack1,           Stack1,       OutUnknown      }},
+  { OpReqOnce,     {Stack1,           Stack1,       OutUnknown      }},
+  { OpReqDoc,      {Stack1,           Stack1,       OutUnknown      }},
+  { OpEval,        {Stack1,           Stack1,       OutUnknown      }},
+  { OpDefFunc,     {None,             None,         OutNone         }},
+  { OpDefTypeAlias,{None,             None,         OutNone         }},
+  { OpDefCls,      {None,             None,         OutNone         }},
+  { OpDefCns,      {Stack1,           Stack1,       OutBoolean      }},
 
   /*** 13. Miscellaneous instructions ***/
 
-  { OpThis,        {None,             Stack1,       OutThisObject,     1 }},
-  { OpBareThis,    {None,             Stack1,       OutUnknown,        1 }},
-  { OpCheckThis,   {This,             None,         OutNone,           0 }},
+  { OpThis,        {None,             Stack1,       OutThisObject   }},
+  { OpBareThis,    {None,             Stack1,       OutUnknown      }},
+  { OpCheckThis,   {This,             None,         OutNone         }},
   { OpInitThisLoc,
-                   {None,             Local,        OutUnknown,        0 }},
+                   {None,             Local,        OutUnknown      }},
   { OpStaticLoc,
-                   {None,             Stack1,       OutBoolean,        1 }},
+                   {None,             Stack1,       OutBoolean      }},
   { OpStaticLocInit,
-                   {Stack1,           Local,        OutVUnknown,      -1 }},
-  { OpCatch,       {None,             Stack1,       OutObject,         1 }},
+                   {Stack1,           Local,        OutVUnknown     }},
+  { OpCatch,       {None,             Stack1,       OutObject       }},
   { OpVerifyParamType,
-                   {Local,            Local,        OutUnknown,        0 }},
+                   {Local,            Local,        OutUnknown      }},
   { OpVerifyRetTypeV,
-                   {Stack1,           Stack1,       OutSameAsInput,    0 }},
+                   {Stack1,           Stack1,       OutSameAsInput  }},
   { OpVerifyRetTypeC,
-                   {Stack1,           Stack1,       OutSameAsInput,    0 }},
+                   {Stack1,           Stack1,       OutSameAsInput  }},
   { OpOODeclExists,
-                   {StackTop2,        Stack1,       OutBoolean,       -1 }},
-  { OpSelf,        {None,             Stack1,       OutClassRef,       1 }},
-  { OpParent,      {None,             Stack1,       OutClassRef,       1 }},
-  { OpLateBoundCls,{None,             Stack1,       OutClassRef,       1 }},
-  { OpNativeImpl,  {None,             None,         OutNone,           0 }},
-  { OpCreateCl,    {BStackN,          Stack1,       OutObject,         1 }},
-  { OpStrlen,      {Stack1,           Stack1,       OutStrlen,         0 }},
-  { OpIncStat,     {None,             None,         OutNone,           0 }},
-  { OpIdx,         {StackTop3,        Stack1,       OutUnknown,       -2 }},
-  { OpArrayIdx,    {StackTop3,        Stack1,       OutUnknown,       -2 }},
-  { OpCheckProp,   {None,             Stack1,       OutBoolean,        1 }},
-  { OpInitProp,    {Stack1,           None,         OutNone,          -1 }},
+                   {StackTop2,        Stack1,       OutBoolean      }},
+  { OpSelf,        {None,             Stack1,       OutClassRef     }},
+  { OpParent,      {None,             Stack1,       OutClassRef     }},
+  { OpLateBoundCls,{None,             Stack1,       OutClassRef     }},
+  { OpNativeImpl,  {None,             None,         OutNone         }},
+  { OpCreateCl,    {BStackN,          Stack1,       OutObject       }},
+  { OpIncStat,     {None,             None,         OutNone         }},
+  { OpIdx,         {StackTop3,        Stack1,       OutUnknown      }},
+  { OpArrayIdx,    {StackTop3,        Stack1,       OutUnknown      }},
+  { OpCheckProp,   {None,             Stack1,       OutBoolean      }},
+  { OpInitProp,    {Stack1,           None,         OutNone         }},
   { OpSilence,     {Local|DontGuardAny,
-                                      Local,        OutNone,           0 }},
-  { OpAssertRATL,  {None,             None,         OutNone,           0 }},
-  { OpAssertRATStk,{None,             None,         OutNone,           0 }},
-  { OpBreakTraceHint,{None,           None,         OutNone,           0 }},
-  { OpGetMemoKey,  {Stack1,           Stack1,       OutUnknown,        0 }},
+                                      Local,        OutNone         }},
+  { OpAssertRATL,  {None,             None,         OutNone         }},
+  { OpAssertRATStk,{None,             None,         OutNone         }},
+  { OpBreakTraceHint,{None,           None,         OutNone         }},
+  { OpGetMemoKey,  {Stack1,           Stack1,       OutUnknown      }},
 
   /*** 14. Generator instructions ***/
 
-  { OpCreateCont,  {None,             Stack1,       OutNull,           1 }},
-  { OpContEnter,   {Stack1,           Stack1,       OutUnknown,        0 }},
-  { OpContRaise,   {Stack1,           Stack1,       OutUnknown,        0 }},
-  { OpYield,       {Stack1,           Stack1,       OutUnknown,        0 }},
-  { OpYieldK,      {StackTop2,        Stack1,       OutUnknown,       -1 }},
-  { OpContCheck,   {None,             None,         OutNone,           0 }},
-  { OpContValid,   {None,             Stack1,       OutBoolean,        1 }},
-  { OpContKey,     {None,             Stack1,       OutUnknown,        1 }},
-  { OpContCurrent, {None,             Stack1,       OutUnknown,        1 }},
+  { OpCreateCont,  {None,             Stack1,       OutNull         }},
+  { OpContEnter,   {Stack1,           Stack1,       OutUnknown      }},
+  { OpContRaise,   {Stack1,           Stack1,       OutUnknown      }},
+  { OpYield,       {Stack1,           Stack1,       OutUnknown      }},
+  { OpYieldK,      {StackTop2,        Stack1,       OutUnknown      }},
+  { OpContAssignDelegate,
+                   {Stack1,           None,         OutNone         }},
+  { OpContEnterDelegate,
+                   {Stack1,           None,         OutNone         }},
+  { OpYieldFromDelegate,
+                   {None,             Stack1,       OutUnknown      }},
+  { OpContUnsetDelegate,
+                   {None,             None,         OutNone         }},
+  { OpContCheck,   {None,             None,         OutNone         }},
+  { OpContValid,   {None,             Stack1,       OutBoolean      }},
+  { OpContStarted, {None,             Stack1,       OutBoolean      }},
+  { OpContKey,     {None,             Stack1,       OutUnknown      }},
+  { OpContCurrent, {None,             Stack1,       OutUnknown      }},
+  { OpContGetReturn,
+                   {None,             Stack1,       OutUnknown      }},
 
   /*** 15. Async functions instructions ***/
 
-  { OpAwait,       {Stack1,           Stack1,       OutUnknown,        0 }},
+  { OpWHResult,    {Stack1,           Stack1,       OutUnknown      }},
+  { OpAwait,       {Stack1,           Stack1,       OutUnknown      }},
+
+  /*** 16. Member instructions ***/
+
+  { OpBaseNC,      {StackI,           MBase,        OutNone         }},
+  { OpBaseNL,      {Local,            MBase,        OutNone         }},
+  { OpBaseGC,      {StackI,           MBase,        OutNone         }},
+  { OpBaseGL,      {Local,            MBase,        OutNone         }},
+  { OpFPassBaseNC, {StackI|FuncdRef,  MBase,        OutNone         }},
+  { OpFPassBaseNL, {Local|FuncdRef,   MBase,        OutNone         }},
+  { OpFPassBaseGC, {StackI|FuncdRef,  MBase,        OutNone         }},
+  { OpFPassBaseGL, {Local|FuncdRef,   MBase,        OutNone         }},
+  { OpBaseSC,      {StackI|IdxA,      MBase|IdxA,   OutUnknown      }},
+  { OpBaseSL,      {Local|IdxA,       MBase|IdxA,   OutUnknown      }},
+  { OpBaseL,       {Local,            MBase,        OutNone         }},
+  { OpFPassBaseL,  {Local|FuncdRef,   MBase,        OutNone         }},
+  { OpBaseC,       {StackI,           MBase,        OutNone         }},
+  { OpBaseR,       {StackI,           MBase,        OutNone         }},
+  { OpBaseH,       {None,             MBase,        OutNone         }},
+  { OpDim,         {MBase|MKey,       MBase,        OutNone         }},
+  { OpFPassDim,    {MBase|MKey|FuncdRef,
+                                      MBase,        OutNone         }},
+  { OpQueryM,      {BStackN|MBase|MKey,
+                                      Stack1,       OutUnknown      }},
+  { OpVGetM,       {BStackN|MBase|MKey,
+                                      Stack1,       OutVUnknown     }},
+  { OpFPassM,      {BStackN|MBase|MKey|FuncdRef,
+                                      Stack1,       OutUnknown      }},
+  { OpSetM,        {Stack1|BStackN|MBase|MKey,
+                                      Stack1,       OutUnknown      }},
+  { OpIncDecM,     {BStackN|MBase|MKey,
+                                      Stack1,       OutUnknown      }},
+  { OpSetOpM,      {Stack1|BStackN|MBase|MKey,
+                                      Stack1,       OutUnknown      }},
+  { OpBindM,       {Stack1|BStackN|MBase|MKey,
+                                      Stack1,       OutSameAsInput  }},
+  { OpUnsetM,      {BStackN|MBase|MKey,
+                                      None,         OutNone         }},
+  { OpSetWithRefLML,
+                   {MBase,            None,         OutNone         }},
+  { OpSetWithRefRML,
+                   {Stack1|MBase,     None,         OutNone         }},
 };
 
 static hphp_hash_map<Op, InstrInfo> instrInfo;
 static bool instrInfoInited;
 static void initInstrInfo() {
   if (!instrInfoInited) {
-    for (size_t i = 0; i < sizeof(instrInfoSparse) / sizeof(instrInfoSparse[0]);
-         i++) {
-      instrInfo[instrInfoSparse[i].op] = instrInfoSparse[i].info;
+    for (auto& info : instrInfoSparse) {
+      instrInfo[info.op] = info.info;
     }
     if (!RuntimeOption::EvalCheckReturnTypeHints) {
       for (size_t j = 0; j < 2; ++j) {
@@ -454,15 +486,11 @@ const InstrInfo& getInstrInfo(Op op) {
   return instrInfo[op];
 }
 
-static int numHiddenStackInputs(const NormalizedInstruction& ni) {
-  assertx(ni.immVec.isValid());
-  return ni.immVec.numStackValues();
-}
-
 namespace {
 int64_t countOperands(uint64_t mask) {
   const uint64_t ignore = FuncdRef | Local | Iter | AllLocals |
-    DontGuardStack1 | IgnoreInnerType | DontGuardAny | This;
+    DontGuardStack1 | IgnoreInnerType | DontGuardAny | This |
+    MBase | StackI | IdxA | MKey;
   mask &= ~ignore;
 
   static const uint64_t counts[][2] = {
@@ -487,18 +515,35 @@ int64_t countOperands(uint64_t mask) {
 }
 
 int64_t getStackPopped(PC pc) {
-  auto const op = *reinterpret_cast<const Op*>(pc);
+  auto const op = peek_op(pc);
   switch (op) {
-    case Op::FCall:        return getImm((Op*)pc, 0).u_IVA + kNumActRecCells;
-    case Op::FCallD:       return getImm((Op*)pc, 0).u_IVA + kNumActRecCells;
+    case Op::FCall:        return getImm(pc, 0).u_IVA + kNumActRecCells;
+    case Op::FCallD:       return getImm(pc, 0).u_IVA + kNumActRecCells;
+    case Op::FCallAwait:   return getImm(pc, 0).u_IVA + kNumActRecCells;
     case Op::FCallArray:   return kNumActRecCells + 1;
 
+    case Op::QueryM:
+    case Op::VGetM:
+    case Op::IncDecM:
+    case Op::UnsetM:
     case Op::NewPackedArray:
     case Op::ConcatN:
     case Op::FCallBuiltin:
-    case Op::CreateCl:     return getImm((Op*)pc, 0).u_IVA;
+    case Op::CreateCl:
+      return getImm(pc, 0).u_IVA;
 
-    case Op::NewStructArray: return getImmVector((Op*)pc).size();
+    case Op::FPassM:
+      // imm[0] is argument index
+      return getImm(pc, 1).u_IVA;
+
+    case Op::SetM:
+    case Op::SetOpM:
+    case Op::BindM:
+      return getImm(pc, 0).u_IVA + 1;
+
+    case Op::NewStructArray: return getImmVector(pc).size();
+
+    case Op::BaseSC: case Op::BaseSL: return getImm(pc, 1).u_IVA + 1;
 
     default:             break;
   }
@@ -509,49 +554,14 @@ int64_t getStackPopped(PC pc) {
   // All instructions with these properties are handled above
   assertx((mask & (StackN | BStackN)) == 0);
 
-  if (mask & MVector) {
-    count += getImmVector((Op*)pc).numStackValues();
-    mask &= ~MVector;
-  }
-
   return count + countOperands(mask);
 }
 
 int64_t getStackPushed(PC pc) {
-  return countOperands(getInstrInfo(*reinterpret_cast<const Op*>(pc)).out);
-}
+  auto const op = peek_op(pc);
+  if (op == Op::BaseSC || op == Op::BaseSL) return getImm(pc, 1).u_IVA;
 
-int getStackDelta(const NormalizedInstruction& ni) {
-  int hiddenStackInputs = 0;
-  initInstrInfo();
-  auto op = ni.op();
-  switch (op) {
-    case Op::FCall:
-    case Op::FCallD:
-      {
-        int numArgs = ni.imm[0].u_IVA;
-        return 1 - numArgs - kNumActRecCells;
-      }
-
-    case Op::NewPackedArray:
-    case Op::ConcatN:
-    case Op::FCallBuiltin:
-    case Op::CreateCl:
-      return 1 - ni.imm[0].u_IVA;
-
-    case Op::NewStructArray:
-      return 1 - ni.immVec.numStackValues();
-
-    default:
-      break;
-  }
-  const InstrInfo& info = instrInfo[op];
-  if (info.in & MVector) {
-    hiddenStackInputs = numHiddenStackInputs(ni);
-    SKTRACE(2, ni.source, "Has %d hidden stack inputs\n", hiddenStackInputs);
-  }
-  int delta = instrInfo[op].numPushed - hiddenStackInputs;
-  return delta;
+  return countOperands(getInstrInfo(op).out);
 }
 
 bool isAlwaysNop(Op op) {
@@ -572,217 +582,171 @@ bool isAlwaysNop(Op op) {
   }
 }
 
-static void addMVectorInputs(NormalizedInstruction& ni,
-                             int& currentStackOffset,
-                             std::vector<InputInfo>& inputs) {
-  assertx(ni.immVec.isValid());
-  ni.immVecM.reserve(ni.immVec.size());
+#define NA
+#define ONE(a) a(0)
+#define TWO(a, b) a(0) b(1)
+#define THREE(a, b, c) a(0) b(1) c(2)
+#define FOUR(a, b, c, d) a(0) b(1) c(2) d(3)
+// Iterator bytecodes have multiple local immediates but not the Local flag, so
+// they should never flow through this function.
+#define LA(n) assert(idx == 0xff); idx = n;
+#define MA(n)
+#define BLA(n)
+#define SLA(n)
+#define ILA(n)
+#define IVA(n)
+#define I64A(n)
+#define IA(n)
+#define DA(n)
+#define SA(n)
+#define AA(n)
+#define RATA(n)
+#define BA(n)
+#define OA(op) BA
+#define VSA(n)
+#define KA(n)
+#define O(name, imm, ...) case Op::name: imm break;
 
-  int UNUSED stackCount = 0;
-  int UNUSED localCount = 0;
-
-  currentStackOffset -= ni.immVec.numStackValues();
-  int localStackOffset = currentStackOffset;
-
-  auto push_stack = [&] {
-    ++stackCount;
-    inputs.emplace_back(Location(BCSPOffset{localStackOffset++}));
-  };
-  auto push_local = [&] (int imm) {
-    ++localCount;
-    inputs.emplace_back(Location(Location::Local, imm));
-  };
-
-  /*
-   * Note that we have to push as we go so that the arguments come in
-   * the order expected for the M-vector.
-   */
-
-  /*
-   * Also note: if we eventually have immediates that are not local
-   * ids (i.e. string ids), this analysis step is going to have to be
-   * a bit wiser.
-   */
-  auto opPtr = (const Op*)ni.source.pc();
-  auto const location = getMLocation(opPtr);
-  auto const lcode = location.lcode;
-
-  const bool trailingClassRef = lcode == LSL || lcode == LSC;
-
-  switch (numLocationCodeStackVals(lcode)) {
-  case 0: {
-    if (lcode == LH) {
-      inputs.emplace_back(Location(Location::This));
-    } else {
-      assertx(lcode == LL || lcode == LGL || lcode == LNL);
-      if (location.hasImm()) {
-        push_local(location.imm);
-      }
-    }
-  } break;
-  case 1:
-    if (lcode == LSL) {
-      // We'll get the trailing stack value after pushing all the
-      // member vector elements.
-      assertx(location.hasImm());
-      push_local(location.imm);
-    } else {
-      push_stack();
-    }
-    break;
-  case 2:
-    push_stack();
-    if (!trailingClassRef) {
-      // This one is actually at the back.
-      push_stack();
-    }
-    break;
-  default: not_reached();
+size_t localImmIdx(Op op) {
+  size_t idx = 0xff;
+  switch (op) {
+    OPCODES
   }
-
-  // Now push all the members in the correct order.
-  for (auto const& member : getMVector(opPtr)) {
-    auto const mcode = member.mcode;
-    ni.immVecM.push_back(mcode);
-
-    if (mcode == MW) {
-      // No stack and no locals.
-      continue;
-    } else if (member.hasImm()) {
-      int64_t imm = member.imm;
-      if (memberCodeImmIsLoc(mcode)) {
-        push_local(imm);
-      } else if (memberCodeImmIsString(mcode)) {
-        inputs.emplace_back(Location(Location::Litstr, imm));
-      } else {
-        assertx(memberCodeImmIsInt(mcode));
-        inputs.emplace_back(Location(Location::Litint, imm));
-      }
-    } else {
-      push_stack();
-    }
-    inputs.back().dontGuardInner = true;
-  }
-
-  if (trailingClassRef) {
-    push_stack();
-  }
-
-  assertx(stackCount == ni.immVec.numStackValues());
-
-  SKTRACE(2, ni.source, "M-vector using %d hidden stack "
-                        "inputs, %d locals\n", stackCount, localCount);
+  assert(idx != 0xff);
+  return idx;
 }
 
+size_t memberKeyImmIdx(Op op) {
+  size_t idx = 0xff;
+  switch (op) {
+#undef LA
+#undef KA
+#define LA(n)
+#define KA(n) assert(idx == 0xff); idx = n;
+    OPCODES
+  }
+  assert(idx != 0xff);
+  return idx;
+}
+
+#undef ONE
+#undef TWO
+#undef THREE
+#undef FOUR
+#undef LA
+#undef MA
+#undef BLA
+#undef SLA
+#undef ILA
+#undef IVA
+#undef I64A
+#undef IA
+#undef DA
+#undef SA
+#undef AA
+#undef RATA
+#undef BA
+#undef OA
+#undef VSA
+#undef KA
+#undef O
+
 /*
- * getInputsImpl --
+ * getInputs --
  *   Returns locations for this instruction's inputs.
- *
- * Throws:
- *   TranslationFailedExc:
- *     Unimplemented functionality, probably an opcode.
- *
- *   UnknownInputExc:
- *     Consumed a datum whose type or value could not be constrained at
- *     translation time, because the tracelet has already modified it.
- *     Truncate the tracelet at the preceding instruction, which must
- *     exists because *something* modified something in it.
  */
-static void getInputsImpl(NormalizedInstruction* ni,
-                          int& currentStackOffset,
-                          InputInfoVec& inputs) {
-#ifdef USE_TRACE
-  auto sk = ni->source;
-#endif
-  if (isAlwaysNop(ni->op())) return;
+InputInfoVec getInputs(NormalizedInstruction& ni) {
+  InputInfoVec inputs;
+  auto UNUSED sk = ni.source;
+  if (isAlwaysNop(ni.op())) return inputs;
 
   assertx(inputs.empty());
   always_assert_flog(
-    instrInfo.count(ni->op()),
+    instrInfo.count(ni.op()),
     "Invalid opcode in getInputsImpl: {}\n",
-    opcodeToName(ni->op())
+    opcodeToName(ni.op())
   );
-  const InstrInfo& info = instrInfo[ni->op()];
+  const InstrInfo& info = instrInfo[ni.op()];
   Operands input = info.in;
+  BCSPOffset spOff{0};
   if (input & FuncdRef) {
     inputs.needsRefCheck = true;
   }
   if (input & Iter) {
-    inputs.emplace_back(Location(Location::Iter, ni->imm[0].u_IVA));
+    inputs.emplace_back(Location(Location::Iter, ni.imm[0].u_IVA));
   }
   if (input & FStack) {
-    currentStackOffset -= ni->imm[0].u_IVA; // arguments consumed
-    currentStackOffset -= kNumActRecCells; // ActRec is torn down as well
+    spOff += ni.imm[0].u_IVA; // arguments consumed
+    spOff += kNumActRecCells; // ActRec is torn down as well
   }
-  if (input & IgnoreInnerType) ni->ignoreInnerType = true;
+  if (input & IgnoreInnerType) ni.ignoreInnerType = true;
   if (input & Stack1) {
-    SKTRACE(1, sk, "getInputs: stack1 %d\n", currentStackOffset - 1);
-    inputs.emplace_back(Location(BCSPOffset{--currentStackOffset}));
+    SKTRACE(1, sk, "getInputs: stack1 %d\n", spOff.offset);
+    inputs.emplace_back(Location(spOff++));
     if (input & DontGuardStack1) inputs.back().dontGuard = true;
     if (input & Stack2) {
-      SKTRACE(1, sk, "getInputs: stack2 %d\n", currentStackOffset - 1);
-      inputs.emplace_back(Location(BCSPOffset{--currentStackOffset}));
+      SKTRACE(1, sk, "getInputs: stack2 %d\n", spOff.offset);
+      inputs.emplace_back(Location(spOff++));
       if (input & Stack3) {
-        SKTRACE(1, sk, "getInputs: stack3 %d\n", currentStackOffset - 1);
-        inputs.emplace_back(Location(BCSPOffset{--currentStackOffset}));
+        SKTRACE(1, sk, "getInputs: stack3 %d\n", spOff.offset);
+        inputs.emplace_back(Location(spOff++));
       }
     }
   }
+  if (input & StackI) {
+    inputs.emplace_back(Location(BCSPOffset{ni.imm[0].u_IVA}));
+  }
   if (input & StackN) {
-    int numArgs = (ni->op() == Op::NewPackedArray ||
-                   ni->op() == Op::ConcatN)
-      ? ni->imm[0].u_IVA
-      : ni->immVec.numStackValues();
+    int numArgs = (ni.op() == Op::NewPackedArray ||
+                   ni.op() == Op::ConcatN)
+      ? ni.imm[0].u_IVA
+      : ni.immVec.numStackValues();
 
-    SKTRACE(1, sk, "getInputs: stackN %d %d\n",
-            currentStackOffset - 1, numArgs);
+    SKTRACE(1, sk, "getInputs: stackN %d %d\n", spOff.offset, numArgs);
     for (int i = 0; i < numArgs; i++) {
-      inputs.emplace_back(Location(BCSPOffset{--currentStackOffset}));
+      inputs.emplace_back(Location(spOff++));
       inputs.back().dontGuard = true;
       inputs.back().dontBreak = true;
     }
   }
   if (input & BStackN) {
-    int numArgs = ni->imm[0].u_IVA;
-    SKTRACE(1, sk, "getInputs: BStackN %d %d\n", currentStackOffset - 1,
-            numArgs);
+    int numArgs = ni.imm[0].u_IVA;
+    SKTRACE(1, sk, "getInputs: BStackN %d %d\n", spOff.offset, numArgs);
     for (int i = 0; i < numArgs; i++) {
-      inputs.emplace_back(Location(BCSPOffset{--currentStackOffset}));
+      inputs.emplace_back(Location(spOff++));
     }
-  }
-  if (input & MVector) {
-    addMVectorInputs(*ni, currentStackOffset, inputs);
   }
   if (input & Local) {
     // (Almost) all instructions that take a Local have its index at
     // their first immediate.
-    int loc;
-    auto insertAt = inputs.end();
-    switch (ni->op()) {
-      case OpSetWithRefLM:
-        insertAt = inputs.begin();
-        // fallthrough
-      case OpFPassL:
-        loc = ni->imm[1].u_IVA;
+    auto const loc = ni.imm[localImmIdx(ni.op())].u_IVA;
+    SKTRACE(1, sk, "getInputs: local %d\n", loc);
+    inputs.emplace_back(Location(Location::Local, loc));
+  }
+  if (input & MKey) {
+    auto mk = ni.imm[memberKeyImmIdx(ni.op())].u_KA;
+    switch (mk.mcode) {
+      case MEL: case MPL:
+        inputs.emplace_back(Location(Location::Local, mk.iva));
         break;
-
-      default:
-        loc = ni->imm[0].u_IVA;
+      case MEC: case MPC:
+        inputs.emplace_back(Location(BCSPOffset{int32_t(mk.iva)}));
+        break;
+      case MW: case MEI: case MET: case MPT: case MQT:
+        // The inputs vector is only used for deciding when to break the
+        // tracelet, which can never happen for these cases.
         break;
     }
-    SKTRACE(1, sk, "getInputs: local %d\n", loc);
-    inputs.emplace(insertAt, Location(Location::Local, loc));
   }
-
   if (input & AllLocals) {
-    ni->ignoreInnerType = true;
+    ni.ignoreInnerType = true;
   }
 
-  SKTRACE(1, sk, "stack args: virtual sfo now %d\n", currentStackOffset);
+  SKTRACE(1, sk, "stack args: virtual sfo now %d\n", spOff.offset);
   TRACE(1, "%s\n", Trace::prettyNode("Inputs", inputs).c_str());
 
   if (inputs.size() &&
-      ((input & DontGuardAny) || dontGuardAnyInputs(ni->op()))) {
+      ((input & DontGuardAny) || dontGuardAnyInputs(ni.op()))) {
     for (int i = inputs.size(); i--; ) {
       inputs[i].dontGuard = true;
     }
@@ -790,21 +754,7 @@ static void getInputsImpl(NormalizedInstruction* ni,
   if (input & This) {
     inputs.emplace_back(Location(Location::This));
   }
-}
-
-InputInfoVec getInputs(NormalizedInstruction& inst) {
-  InputInfoVec infos;
-  // MCGenerator expected top of stack to be index -1, with indexes growing
-  // down from there. hhir defines top of stack to be index 0, with indexes
-  // growing up from there. To compensate we start with a stack offset of 1 and
-  // negate the index of any stack input after the call to getInputs.
-  int stackOff = 1;
-  getInputsImpl(&inst, stackOff, infos);
-  for (auto& info : infos) {
-    if (!info.loc.isStack()) continue;
-    info.loc.bcRelOffset = -info.loc.bcRelOffset;
-  }
-  return infos;
+  return inputs;
 }
 
 bool dontGuardAnyInputs(Op op) {
@@ -827,21 +777,10 @@ bool dontGuardAnyInputs(Op op) {
   case Op::JmpNZ:
   case Op::Jmp:
   case Op::JmpNS:
-  case Op::BindM:
-  case Op::CGetM:
-  case Op::EmptyM:
-  case Op::FPassM:
-  case Op::IncDecM:
-  case Op::IssetM:
-  case Op::SetM:
-  case Op::SetOpM:
-  case Op::SetWithRefLM:
-  case Op::SetWithRefRM:
-  case Op::UnsetM:
-  case Op::VGetM:
   case Op::FCallArray:
   case Op::FCall:
   case Op::FCallD:
+  case Op::FCallAwait:
   case Op::ClsCnsD:
   case Op::FPassCW:
   case Op::FPassCE:
@@ -858,6 +797,7 @@ bool dontGuardAnyInputs(Op op) {
   case Op::Lte:
   case Op::Gt:
   case Op::Gte:
+  case Op::Cmp:
   case Op::SetOpL:
   case Op::InitProp:
   case Op::BreakTraceHint:
@@ -906,7 +846,9 @@ bool dontGuardAnyInputs(Op op) {
   case Op::BindS:
   case Op::BitNot:
   case Op::CGetG:
+  case Op::CGetQuietG:
   case Op::CGetL:
+  case Op::CGetQuietL:
   case Op::CGetL2:
   case Op::CGetS:
   case Op::CUGetL:
@@ -931,6 +873,8 @@ bool dontGuardAnyInputs(Op op) {
   case Op::ContCurrent:
   case Op::ContKey:
   case Op::ContValid:
+  case Op::ContStarted:
+  case Op::ContGetReturn:
   case Op::CreateCl:
   case Op::DefCns:
   case Op::DefFunc:
@@ -995,7 +939,6 @@ bool dontGuardAnyInputs(Op op) {
   case Op::StaticLoc:
   case Op::StaticLocInit:
   case Op::String:
-  case Op::Strlen:
   case Op::This:
   case Op::True:
   case Op::Unbox:
@@ -1007,7 +950,35 @@ bool dontGuardAnyInputs(Op op) {
   case Op::VerifyParamType:
   case Op::VerifyRetTypeC:
   case Op::VerifyRetTypeV:
+  case Op::WHResult:
   case Op::Xor:
+  case Op::BaseNC:
+  case Op::BaseNL:
+  case Op::BaseGC:
+  case Op::BaseGL:
+  case Op::FPassBaseNC:
+  case Op::FPassBaseNL:
+  case Op::FPassBaseGC:
+  case Op::FPassBaseGL:
+  case Op::BaseSC:
+  case Op::BaseSL:
+  case Op::BaseL:
+  case Op::FPassBaseL:
+  case Op::BaseC:
+  case Op::BaseR:
+  case Op::BaseH:
+  case Op::Dim:
+  case Op::FPassDim:
+  case Op::QueryM:
+  case Op::VGetM:
+  case Op::FPassM:
+  case Op::SetM:
+  case Op::IncDecM:
+  case Op::SetOpM:
+  case Op::BindM:
+  case Op::UnsetM:
+  case Op::SetWithRefLML:
+  case Op::SetWithRefRML:
     return false;
 
   // These are instructions that are always interp-one'd, or are always no-ops.
@@ -1027,6 +998,7 @@ bool dontGuardAnyInputs(Op op) {
   case Op::Throw:
   case Op::CGetL3:
   case Op::CGetN:
+  case Op::CGetQuietN:
   case Op::VGetN:
   case Op::IssetN:
   case Op::EmptyN:
@@ -1057,77 +1029,14 @@ bool dontGuardAnyInputs(Op op) {
   case Op::DefTypeAlias:
   case Op::Catch:
   case Op::HighInvalid:
+  case Op::ContAssignDelegate:
+  case Op::ContEnterDelegate:
+  case Op::YieldFromDelegate:
+  case Op::ContUnsetDelegate:
     return true;
   }
 
   always_assert_flog(0, "invalid opcode {}\n", static_cast<uint32_t>(op));
-}
-
-const StaticString s_http_response_header("http_response_header");
-const StaticString s_php_errormsg("php_errormsg");
-const StaticString s_extract("extract");
-const StaticString s_extractNative("__SystemLib\\extract");
-const StaticString s_parse_str("parse_str");
-const StaticString s_parse_strNative("__SystemLib\\parse_str");
-const StaticString s_assert("assert");
-const StaticString s_assertNative("__SystemLib\\assert");
-const StaticString s_set_frame_metadata("HH\\set_frame_metadata");
-
-bool funcByNameDestroysLocals(const StringData* fname) {
-  if (!fname) return false;
-  return fname->isame(s_extract.get()) ||
-         fname->isame(s_extractNative.get()) ||
-         fname->isame(s_parse_str.get()) ||
-         fname->isame(s_parse_strNative.get()) ||
-         fname->isame(s_assert.get()) ||
-         fname->isame(s_assertNative.get()) ||
-         fname->isame(s_set_frame_metadata.get());
-}
-
-bool builtinFuncDestroysLocals(const Func* callee) {
-  assertx(callee && callee->isCPPBuiltin());
-  auto const fname = callee->name();
-  return funcByNameDestroysLocals(fname);
-}
-
-bool callDestroysLocals(const NormalizedInstruction& inst,
-                        const Func* caller) {
-  // We don't handle these two cases, because we don't compile functions
-  // containing them:
-  assertx(caller->lookupVarId(s_php_errormsg.get()) == -1);
-  assertx(caller->lookupVarId(s_http_response_header.get()) == -1);
-
-  auto* unit = caller->unit();
-  auto checkTaintId = [&](Id id) {
-    auto const str = unit->lookupLitstrId(id);
-    return funcByNameDestroysLocals(str);
-  };
-
-  if (inst.op() == OpFCallBuiltin) return checkTaintId(inst.imm[2].u_SA);
-  if (!isFCallStar(inst.op()))     return false;
-
-  const FPIEnt *fpi = caller->findFPI(inst.source.offset());
-  assertx(fpi);
-  Op* fpushPc = (Op*)unit->at(fpi->m_fpushOff);
-  auto const op = *fpushPc;
-
-  if (op == OpFPushFunc) {
-    // If the call has any arguments, the FPushFunc will be in a different
-    // tracelet -- the tracelet will break on every FPass* because the reffiness
-    // of the callee isn't knowable. So we have to say the call destroys locals,
-    // to be conservative. If there aren't any arguments, then it can't destroy
-    // locals -- even if the call is to extract(), there's no argument, so it
-    // won't do anything.
-    auto const numArgs = inst.imm[0].u_IVA;
-    return (numArgs != 0);
-  }
-  if (op == OpFPushFuncD) return checkTaintId(getImm(fpushPc, 1).u_SA);
-  if (op == OpFPushFuncU) {
-    return checkTaintId(getImm(fpushPc, 1).u_SA) ||
-           checkTaintId(getImm(fpushPc, 2).u_SA);
-  }
-
-  return false;
 }
 
 bool instrBreaksProfileBB(const NormalizedInstruction* inst) {
@@ -1150,8 +1059,7 @@ Translator::Translator()
   , m_createdTime(HPHP::Timer::GetCurrentTimeMicros())
   , m_mode(TransKind::Invalid)
   , m_profData(nullptr)
-  , m_useAHot(RuntimeOption::RepoAuthoritative &&
-              RuntimeOption::EvalJitAHotSize > 0)
+  , m_useAHot(RuntimeOption::RepoAuthoritative && CodeCache::AHotSize > 0)
 {
   initInstrInfo();
   if (RuntimeOption::EvalJitPGO) {
@@ -1173,13 +1081,12 @@ Translator::isSrcKeyInBL(SrcKey sk) {
   // opcodes.
   PC pc = nullptr;
   do {
-    pc = (pc == nullptr) ?
-      unit->at(sk.offset()) : pc + instrLen((Op*) pc);
+    pc = (pc == nullptr) ? unit->at(sk.offset()) : pc + instrLen(pc);
     if (m_dbgBLPC.checkPC(pc)) {
       m_dbgBLSrcKey.insert(sk);
       return true;
     }
-  } while (!opcodeBreaksBB(*reinterpret_cast<const Op*>(pc)));
+  } while (!opcodeBreaksBB(peek_op(pc)));
   return false;
 }
 
@@ -1212,7 +1119,6 @@ const char* show(TranslateResult r) {
 
 //////////////////////////////////////////////////////////////////////
 
-#define IMM_MA(n)      0 /* ignored, but we need something (for commas) */
 #define IMM_BLA(n)     ni.immVec
 #define IMM_SLA(n)     ni.immVec
 #define IMM_ILA(n)     ni.immVec
@@ -1228,6 +1134,7 @@ const char* show(TranslateResult r) {
 #define IMM_BA(n)      ni.imm[n].u_BA
 #define IMM_OA_IMPL(n) ni.imm[n].u_OA
 #define IMM_OA(subop)  (subop)IMM_OA_IMPL
+#define IMM_KA(n)      ni.imm[n].u_KA
 
 #define ONE(x0)           , IMM_##x0(0)
 #define TWO(x0,x1)        , IMM_##x0(0), IMM_##x1(1)
@@ -1248,7 +1155,6 @@ static void translateDispatch(IRGS& irgs,
 #undef ONE
 #undef NA
 
-#undef IMM_MA
 #undef IMM_BLA
 #undef IMM_SLA
 #undef IMM_ILA
@@ -1264,6 +1170,7 @@ static void translateDispatch(IRGS& irgs,
 #undef IMM_OA_IMPL
 #undef IMM_OA
 #undef IMM_VSA
+#undef IMM_KA
 
 //////////////////////////////////////////////////////////////////////
 
@@ -1278,206 +1185,9 @@ Type flavorToType(FlavorDesc f) {
     case UV: return TUninit;
     case VV: return TBoxedInitCell;
     case AV: return TCls;
-    case RV: case FV: case CVV: case CVUV: return TGen;
+    case RV: case CRV: case FV: case CVV: case CVUV: return TGen;
   }
   not_reached();
-}
-
-Type typeToCheckForInput(
-  IRGS& irgs,
-  const NormalizedInstruction& ni,
-  int32_t opndIdx,
-  Type predictedType
-) {
-  auto opc = ni.op();
-  auto tc = TypeConstraint(DataTypeSpecific);
-  switch (opc) {
-    case OpSetS:
-    case OpSetG:
-    case OpSetL: {
-      // stack value
-      if (opndIdx == 0) {
-        tc = DataTypeCountness;
-        break;
-      }
-      if (opc == OpSetL) {
-        // old local value is dec-refed
-        assert(opndIdx == 1);
-        tc = DataTypeCountness;
-        break;
-      }
-      tc = DataTypeSpecific;
-      break;
-    }
-
-    case OpUnsetL: {
-      tc = DataTypeCountness;
-      break;
-    }
-
-    case OpCGetL:
-    case OpVGetL:
-    case OpFPassL: {
-      tc = DataTypeCountnessInit;
-      break;
-    }
-
-    case OpCUGetL: {
-      tc = DataTypeCountness;
-      break;
-    }
-
-    case OpPushL:
-    case OpContEnter:
-    case OpContRaise: {
-      tc = DataTypeGeneric;
-      break;
-    }
-
-    case OpRetC:
-    case OpRetV: {
-      tc = DataTypeCountness;
-      break;
-    }
-
-    case OpFCallArray: {
-      tc = DataTypeGeneric;
-      break;
-    }
-
-    case OpPopC:
-    case OpPopV:
-    case OpPopR: {
-      tc = DataTypeCountness;
-      break;
-    }
-
-    case OpYield:
-    case OpYieldK: {
-      // The stack input is teleported to the continuation's m_value field
-      tc = DataTypeGeneric;
-      break;
-    }
-
-    case OpAddElemC: {
-      // The stack input is teleported to the array
-      tc = opndIdx == 0 ? DataTypeGeneric : DataTypeSpecific;
-      break;
-    }
-
-    case OpIdx:
-    case OpArrayIdx: {
-      // The default value (w/ opndIdx 0) is simply passed to a helper,
-      // which takes care of dec-refing it if needed
-      tc = opndIdx == 0 ? DataTypeGeneric : DataTypeSpecific;
-      break;
-    }
-
-    case OpNewPackedArray: {
-      tc = DataTypeGeneric;
-      break;
-    }
-
-    case OpIterInit:
-    case OpIterInitK:
-    case OpMIterInit:
-    case OpMIterInitK:
-    case OpWIterInit:
-    case OpWIterInitK: {
-      // We care about the type of the stack input but not the locals.
-      tc = opndIdx == 0 ? DataTypeSpecific : DataTypeGeneric;
-      break;
-    }
-
-    case OpIterNext:
-    case OpIterNextK:
-    case OpMIterNext:
-    case OpMIterNextK:
-    case OpWIterNext:
-    case OpWIterNextK: {
-      // Don't care about local input types; all we do is pass their address to
-      // helpers.
-      tc = DataTypeGeneric;
-      break;
-    }
-
-    default: {
-      break;
-    }
-  }
-
-  if (hasMVector(opc) && opndIdx == getMInstrInfo(ni.mInstrOp()).valCount()) {
-    tc = irgen::mInstrBaseConstraint(irgs, predictedType);
-  }
-
-  return relaxType(predictedType, tc);
-}
-
-void emitInputChecks(
-  IRGS& irgs,
-  const NormalizedInstruction& ni,
-  bool checkOuterTypeOnly
-) {
-  FTRACE(4, "\n{}: {}\n", ni.offset(), opcodeToName(ni.op()));
-  if (isAlwaysNop(ni.op())) return;
-
-  for (auto i = 0; i < ni.inputs.size(); ++i) {
-    FTRACE(4, "Input {}: ", i);
-    auto loc = ni.inputs[i];
-    if (!loc.isLocal() && !loc.isStack()) {
-      FTRACE(4, "!isLocal && !isStack, skipping\n");
-      continue;
-    }
-    auto const predictedType = irgen::predictedTypeFromLocation(irgs, loc);
-    FTRACE(4, "predicted {}\n", predictedType);
-
-    if (!(predictedType <= TGen) && !(predictedType <= TCls)) {
-      FTRACE(4, "predictedType ({}) !<= TGen|TCls, skipping\n", predictedType);
-      continue;
-    }
-
-    assertx(predictedType != TBottom);
-
-    auto typeToCheck = predictedType <= TCls
-      ? predictedType
-      : typeToCheckForInput(irgs, ni, i, predictedType);
-
-    // Make sure typeToCheck is checkable.
-    if (!(typeToCheck <= TCell || typeToCheck <= TBoxedInitCell)) {
-      FTRACE(4, "typeToCheck isn't checkable, skipping\n");
-      continue;
-    }
-
-    if (typeToCheck == TCountedStr) {
-      FTRACE(4, "typeToCheck is CountedStr, widening to Str\n");
-      typeToCheck = TStr;
-    } else if (typeToCheck <= TStaticArr) {
-      FTRACE(4, "typeToCheck is StaticArr, widening to Arr\n");
-      typeToCheck = TArr;
-    } else if (typeToCheck.clsSpec() &&
-        !(typeToCheck.clsSpec().cls()->attrs() & AttrNoOverride)) {
-      FTRACE(4, "class specialization could be overridden, widening to Obj\n");
-      typeToCheck = TObj;
-    } else if (typeToCheck.arrSpec() && typeToCheck.arrSpec().type()) {
-      FTRACE(4, "array specialization is RAT, widening to Arr\n");
-      typeToCheck = TArr;
-    }
-
-    if (loc.isLocal()) {
-      FTRACE(4, "Checking local {} for type {}\n", loc.offset, typeToCheck);
-      irgen::checkTypeLocal(irgs, loc.offset, typeToCheck, ni.source.offset(),
-        checkOuterTypeOnly);
-    } else {
-      FTRACE(4, "Checking stack offset {} for type {}\n",
-          loc.bcRelOffset.offset, typeToCheck);
-      irgen::checkTypeStack(irgs, loc.bcRelOffset, typeToCheck,
-        ni.source.offset(), checkOuterTypeOnly);
-    }
-  }
-  // Calling checkTypeStack with a Type t such that t <= BoxedCell causes us to
-  // spill the stack, so we need to sync the stack with an exception stack
-  // boundary here.
-  irgs.irb->exceptionStackBoundary();
 }
 
 }
@@ -1486,7 +1196,7 @@ void translateInstr(
   IRGS& irgs,
   const NormalizedInstruction& ni,
   bool checkOuterTypeOnly,
-  bool needsExitPlaceholder
+  bool firstInst
 ) {
   irgen::prepareForNextHHBC(
     irgs,
@@ -1495,26 +1205,29 @@ void translateInstr(
     ni.endsRegion && !irgen::isInlining(irgs)
   );
 
-  auto pc = reinterpret_cast<const Op*>(ni.pc());
+  const Func* builtinFunc = nullptr;
+  if (ni.op() == OpFCallBuiltin) {
+    auto str = ni.m_unit->lookupLitstrId(ni.imm[2].u_SA);
+    builtinFunc = Unit::lookupFunc(str);
+  }
+  auto pc = ni.pc();
   for (auto i = 0, num = instrNumPops(pc); i < num; ++i) {
-    auto const type = flavorToType(instrInputFlavor(pc, i));
+    auto const type =
+      !builtinFunc ? flavorToType(instrInputFlavor(pc, i)) :
+      builtinFunc->byRef(num - i - 1) ? TGen : TCell;
     // TODO(#5706706): want to use assertTypeLocation, but Location::Stack
     // is a little unsure of itself.
     irgen::assertTypeStack(irgs, BCSPOffset{i}, type);
   }
 
-  if (RuntimeOption::EvalHHIRConstrictGuards) {
-    emitInputChecks(irgs, ni, checkOuterTypeOnly);
-  }
-
-  FTRACE(1, "\n{:-^60}\n", folly::format("Translating {}: {} with stack:\n{}",
-                                         ni.offset(), ni.toString(),
-                                         show(irgs)));
-
-  if (needsExitPlaceholder) irgen::makeExitPlaceholder(irgs);
+  FTRACE(1, "\nTranslating {}: {} with state:\n{}\n",
+         ni.offset(), ni, show(irgs));
 
   irgen::ringbufferEntry(irgs, Trace::RBTypeBytecodeStart, ni.source, 2);
   irgen::emitIncStat(irgs, Stats::Instr_TC, 1);
+  if (Stats::enableInstrCount()) {
+    irgen::emitIncStat(irgs, Stats::opToTranslStat(ni.op()), 1);
+  }
   if (Trace::moduleEnabledRelease(Trace::llvm_count, 1) ||
       RuntimeOption::EvalJitLLVMCounters) {
     irgen::gen(irgs, CountBytecode);
@@ -1527,6 +1240,9 @@ void translateInstr(
   }
 
   translateDispatch(irgs, ni);
+
+  FTRACE(3, "\nTranslated {}: {} with state:\n{}\n",
+         ni.offset(), ni, show(irgs));
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -1554,7 +1270,7 @@ void Translator::addTranslation(const TransRec& transRec) {
     Trace::traceRelease("New translation: %" PRId64 " %s %u %u %d\n",
                         HPHP::Timer::GetCurrentTimeMicros() - m_createdTime,
                         folly::format("{}:{}:{}",
-                          transRec.src.unit()->filepath()->data(),
+                          transRec.src.unit()->filepath(),
                           transRec.src.funcID(),
                           transRec.src.offset()).str().c_str(),
                         transRec.aLen,
@@ -1600,8 +1316,7 @@ const Func* lookupImmutableMethod(const Class* cls, const StringData* name,
   if (!cls || RuntimeOption::EvalJitEnableRenameFunction) return nullptr;
   if (cls->attrs() & AttrInterface) return nullptr;
   bool privateOnly = false;
-  if (!RuntimeOption::RepoAuthoritative ||
-      !(cls->preClass()->attrs() & AttrUnique)) {
+  if (!(cls->attrs() & AttrUnique)) {
     if (!ctx || !ctx->classof(cls)) {
       return nullptr;
     }
@@ -1663,18 +1378,22 @@ const Func* lookupImmutableMethod(const Class* cls, const StringData* name,
 }
 
 const Func* lookupImmutableCtor(const Class* cls, const Class* ctx) {
-  if (!RuntimeOption::RepoAuthoritative ||
-      RuntimeOption::EvalJitEnableRenameFunction ||
-      !cls || !(cls->attrs() & AttrUnique)) {
-    return nullptr;
+  if (!cls || RuntimeOption::EvalJitEnableRenameFunction) return nullptr;
+  if (!(cls->attrs() & AttrUnique)) {
+    if (!ctx || !ctx->classof(cls)) {
+      return nullptr;
+    }
   }
 
   auto const func = cls->getCtor();
-  if (func && !(func->attrs() & AttrPublic) && cls != ctx) {
-    if (!ctx) return nullptr;
-    if ((func->attrs() & AttrPrivate) ||
-        !(ctx->classof(cls) || cls->classof(ctx))) {
-      return nullptr;
+  if (func && !(func->attrs() & AttrPublic)) {
+    auto fcls = func->cls();
+    if (fcls != ctx) {
+      if (!ctx) return nullptr;
+      if ((func->attrs() & AttrPrivate) ||
+          !(ctx->classof(fcls) || fcls->classof(ctx))) {
+        return nullptr;
+      }
     }
   }
 

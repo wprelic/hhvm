@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -128,6 +128,8 @@ void incTransCounter(IRGS&);
 void incProfCounter(IRGS&, TransID);
 void checkCold(IRGS&, TransID);
 
+uint64_t curProfCount(const IRGS& env);
+
 /*
  * If ringbuffer tracing is enabled, generate a ringbuffer entry associated
  * with a SrcKey or string.
@@ -168,27 +170,12 @@ void prepareForNextHHBC(IRGS&,
 void finishHHBC(IRGS&);
 
 /*
- * This is called before emitting instructions that can jump to a
- * block corresponding to a control-flow merge point at the bytecode
- * level.
- */
-void prepareForHHBCMergePoint(IRGS&);
-
-/*
- * This is called by the region translator to force the stack to be
- * spilled due to a potential side exit.  This is just an
- * optimization, which enables smashing a branch in the main code
- * region.
- */
-void prepareForSideExit(IRGS&);
-
-/*
  * When done translating a region, or a block in a region, these calls are
  * made.
  */
 void endRegion(IRGS&);
 void endRegion(IRGS&, SrcKey);
-void endBlock(IRGS&, Offset next, bool nextIsMerge);
+void endBlock(IRGS&, Offset next);
 
 /*
  * When we're done creating the IRUnit, this function must be called to ensure
@@ -205,7 +192,14 @@ void sealUnit(IRGS&);
 bool beginInlining(IRGS&,
                    unsigned numParams,
                    const Func* target,
-                   Offset returnBcOffset);
+                   Offset returnBcOffset,
+                   Block* returnTarget,
+                   bool multipleReturns);
+
+/*
+ * Called when all blocks of the inner most inlined frame have been emitted
+ */
+void endInlining(IRGS& env);
 
 /*
  * Returns whether the IRGS is currently inlining or not.
@@ -220,8 +214,8 @@ bool isInlining(const IRGS&);
  * This is exposed publically because the region translator drives inlining
  * decisions.
  */
-void inlSingletonSProp(IRGS&, const Func*, const Op* clsOp, const Op* propOp);
-void inlSingletonSLoc(IRGS&, const Func*, const Op* op);
+void inlSingletonSProp(IRGS&, const Func*, PC clsOp, PC propOp);
+void inlSingletonSLoc(IRGS&, const Func*, PC op);
 
 //////////////////////////////////////////////////////////////////////
 
@@ -256,11 +250,10 @@ Type provenTypeFromLocal(const IRGS&, uint32_t locId);
 Type provenTypeFromStack(const IRGS&, BCSPOffset slot);
 
 /*
- * Assuming env is ready to translate a member instruction, analyze the type of
- * the base value and return an appropriately-specialized TypeConstraint if a
- * supported operation is detected.
+ * Returns the TypeConstraint that should be used to constrain baseType for an
+ * Idx bytecode.
  */
-TypeConstraint mInstrBaseConstraint(const IRGS& env, Type predicted);
+TypeConstraint idxBaseConstraint(Type baseType, Type keyType);
 
 //////////////////////////////////////////////////////////////////////
 
@@ -270,7 +263,6 @@ TypeConstraint mInstrBaseConstraint(const IRGS& env, Type predicted);
  * The arguments to the functions are pre-unpacked bytecode immediates.
  */
 
-#define IMM_MA         int /* unused dummy placeholder */
 #define IMM_BLA        const ImmVector&
 #define IMM_SLA        const ImmVector&
 #define IMM_ILA        const ImmVector&
@@ -285,6 +277,7 @@ TypeConstraint mInstrBaseConstraint(const IRGS& env, Type predicted);
 #define IMM_AA         const ArrayData*
 #define IMM_BA         Offset
 #define IMM_OA(subop)  subop
+#define IMM_KA         MemberKey
 
 #define NA /*  */
 #define ONE(x0)              , IMM_##x0
@@ -317,6 +310,7 @@ TypeConstraint mInstrBaseConstraint(const IRGS& env, Type predicted);
 #undef IMM_AA
 #undef IMM_BA
 #undef IMM_OA
+#undef IMM_KA
 
 //////////////////////////////////////////////////////////////////////
 

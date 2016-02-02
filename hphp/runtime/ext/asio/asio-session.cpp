@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -23,15 +23,16 @@
 #include <folly/String.h>
 
 #include "hphp/runtime/base/array-init.h"
-#include "hphp/runtime/ext/asio/async-function-wait-handle.h"
-#include "hphp/runtime/ext/asio/await-all-wait-handle.h"
-#include "hphp/runtime/ext/asio/condition-wait-handle.h"
-#include "hphp/runtime/ext/asio/external-thread-event-wait-handle.h"
-#include "hphp/runtime/ext/asio/gen-array-wait-handle.h"
-#include "hphp/runtime/ext/asio/gen-map-wait-handle.h"
-#include "hphp/runtime/ext/asio/gen-vector-wait-handle.h"
-#include "hphp/runtime/ext/asio/sleep-wait-handle.h"
-#include "hphp/runtime/ext/asio/wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_async-function-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_await-all-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_condition-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_external-thread-event-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_gen-array-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_gen-map-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_gen-vector-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_sleep-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_wait-handle.h"
+#include "hphp/runtime/ext/std/ext_std_closure.h"
 #include "hphp/runtime/vm/bytecode.h"
 #include "hphp/runtime/vm/event-hook.h"
 #include "hphp/system/systemlib.h"
@@ -45,7 +46,7 @@ namespace {
   const context_idx_t MAX_CONTEXT_DEPTH =
     std::numeric_limits<context_idx_t>::max();
 
-  ObjectData* checkCallback(const Variant& callback, char* name) {
+  Object checkCallback(const Variant& callback, char* name) {
     if (!callback.isNull() &&
         (!callback.isObject() ||
          !callback.getObjectData()->instanceof(c_Closure::classof()))) {
@@ -55,7 +56,7 @@ namespace {
       ).str();
       SystemLib::throwInvalidArgumentExceptionObject(msg);
     }
-    return callback.getObjectDataOrNull();
+    return Object{callback.getObjectDataOrNull()};
   }
 
   void runCallback(const Object& function, const Array& params, char* name) {
@@ -395,8 +396,9 @@ bool AsioSession::processSleepEvents() {
     if (wh->getWakeTime() > now) {
       break;
     }
-    woken = true;
-    wh->process();
+    if (wh->process()) {
+      woken = true;
+    }
     decRefObj(wh);
     std::pop_heap(m_sleepEvents.begin(), m_sleepEvents.end(), sleep_compare);
     m_sleepEvents.pop_back();
@@ -406,8 +408,9 @@ bool AsioSession::processSleepEvents() {
 }
 
 AsioSession::TimePoint AsioSession::sleepWakeTime() {
-  return m_sleepEvents.empty() ? getLatestWakeTime() :
-         m_sleepEvents.front()->getWakeTime();
+  auto const timeout = getLatestWakeTime();
+  return m_sleepEvents.empty() ? timeout :
+         min(timeout, m_sleepEvents.front()->getWakeTime());
 }
 
 ///////////////////////////////////////////////////////////////////////////////

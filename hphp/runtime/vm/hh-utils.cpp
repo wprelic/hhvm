@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -23,6 +23,7 @@
 #include "hphp/runtime/base/builtin-functions.h"
 #include "hphp/runtime/base/runtime-error.h"
 #include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/vm/debugger-hook.h"
 #include "hphp/runtime/vm/unit.h"
 #include "hphp/system/systemlib.h"
 
@@ -34,14 +35,15 @@ void checkHHConfig(const Unit* unit) {
   if (RuntimeOption::RepoAuthoritative ||
       !RuntimeOption::LookForTypechecker ||
       s_foundHHConfig ||
-      !unit->isHHFile()) {
+      !unit->isHHFile() ||
+      isDebuggerAttached()) {
     return;
   }
 
   const std::string &s = unit->filepath()->toCppString();
   boost::filesystem::path p(s);
 
-  while (p != "/") {
+  while (p != "/" && p != "") {
     p.remove_filename();
     p /= ".hhconfig";
 
@@ -52,14 +54,15 @@ void checkHHConfig(const Unit* unit) {
     p.remove_filename();
   }
 
-  if (p == "/") {
+  if (p == "/" || p == "") {
     raise_error(
       "%s appears to be a Hack file, but you do not appear to be running "
       "the Hack typechecker. See the documentation at %s for information on "
-      "getting it running. You can also set Hack.Lang.LookForTypechecker=0 "
+      "getting it running. You can also set "
+      "`-d hhvm.hack.lang.look_for_typechecker=0` "
       "to disable this check (not recommended).",
       s.c_str(),
-      "http://docs.hhvm.com/manual/en/install.hack.bootstrapping.php"
+      "http://docs.hhvm.com/hack/typechecker/setup"
     );
   } else {
     s_foundHHConfig = true;
@@ -102,12 +105,14 @@ void autoTypecheck(const Unit* unit) {
   if (RuntimeOption::RepoAuthoritative ||
       !RuntimeOption::AutoTypecheck ||
       tl_doneAutoTypecheck ||
-      !unit->isHHFile()) {
+      !unit->isHHFile() ||
+      isDebuggerAttached()) {
     return;
   }
   tl_doneAutoTypecheck = true;
 
-  vm_call_user_func("\\HH\\Client\\typecheck_and_error", staticEmptyArray());
+  vm_call_user_func("\\HH\\Client\\typecheck_and_error",
+                    Variant{staticEmptyArray()});
 }
 
 }

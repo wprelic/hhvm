@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -93,7 +93,7 @@ void OfflineX86Code::xedInit() {
   xed_state_init(&xed_state, XED_MACHINE_MODE_LONG_64,
                  XED_ADDRESS_WIDTH_64b, XED_ADDRESS_WIDTH_64b);
   xed_tables_init();
-  xed_syntax = getenv("HHVM_ATT_DISAS") ? XED_SYNTAX_ATT : XED_SYNTAX_INTEL;
+  xed_syntax = getenv("HHVM_INTEL_DISAS") ? XED_SYNTAX_INTEL : XED_SYNTAX_ATT;
 }
 
 
@@ -388,7 +388,7 @@ void OfflineX86Code::loadSymbolsMapNm() {
 // just returns the address
 string OfflineX86Code::getSymbolName(TCA addr) {
   string sym;
-  Addr2SymMap::iterator it = addr2SymMap.find(addr);
+  auto it = addr2SymMap.find(addr);
   if (it != addr2SymMap.end()) {
     sym = "  # " + it->second;
   } else {
@@ -444,8 +444,7 @@ size_t OfflineX86Code::printBCMapping(BCMappingInfo bcMappingInfo,
 
   if (currBC < mappingSize && x86Start == ip) {
     if (auto currUnit = g_repo->getUnit(curr.md5)) {
-      auto bcPast = curr.bcStart + instrLen(
-        reinterpret_cast<const Op*>(currUnit->at(curr.bcStart)));
+      auto bcPast = curr.bcStart + instrLen(currUnit->at(curr.bcStart));
 
       currUnit->prettyPrint(std::cout,
                             Unit::PrintOpts().range(curr.bcStart,

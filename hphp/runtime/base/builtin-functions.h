@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -29,6 +29,8 @@ namespace HPHP {
 extern const StaticString s_self;
 extern const StaticString s_parent;
 extern const StaticString s_static;
+
+extern const StaticString s_cmpWithCollection;
 
 ///////////////////////////////////////////////////////////////////////////////
 // operators
@@ -57,7 +59,7 @@ inline bool is_bool(const Variant& v)   { return v.is(KindOfBoolean);}
 inline bool is_int(const Variant& v)    { return v.isInteger();}
 inline bool is_double(const Variant& v) { return v.is(KindOfDouble);}
 inline bool is_string(const Variant& v) { return v.isString();}
-inline bool is_array(const Variant& v)  { return v.is(KindOfArray);}
+inline bool is_array(const Variant& v)  { return v.isArray();}
 
 inline bool is_object(const Variant& var) {
   if (!var.is(KindOfObject)) {
@@ -77,7 +79,7 @@ inline bool is_empty_string(const Variant& v) {
 
 /*
  * Semantics of is_callable defined here:
- * http://docs.hhvm.com/manual/en/function.is-callable.php
+ * http://php.net/manual/en/function.is-callable.php
  */
 bool is_callable(const Variant& v, bool syntax_only, RefData* name);
 /*
@@ -117,20 +119,31 @@ Variant o_invoke_failed(const char *cls, const char *meth,
 bool is_constructor_name(const char* func);
 void throw_instance_method_fatal(const char *name);
 
-void throw_iterator_not_valid() ATTRIBUTE_NORETURN;
-void throw_collection_modified() ATTRIBUTE_NORETURN;
-void throw_collection_property_exception() ATTRIBUTE_NORETURN;
-void throw_collection_compare_exception() ATTRIBUTE_NORETURN;
-void throw_param_is_not_container() ATTRIBUTE_NORETURN;
-void throw_cannot_modify_immutable_object(const char* className)
-  ATTRIBUTE_NORETURN;
-void check_collection_compare(ObjectData* obj);
-void check_collection_compare(ObjectData* obj1, ObjectData* obj2);
+ATTRIBUTE_NORETURN void throw_invalid_operation_exception(StringData*);
+ATTRIBUTE_NORETURN void throw_arithmetic_error(StringData*);
+ATTRIBUTE_NORETURN void throw_division_by_zero_error(StringData*);
+ATTRIBUTE_NORETURN void throw_iterator_not_valid();
+ATTRIBUTE_NORETURN void throw_collection_modified();
+ATTRIBUTE_NORETURN void throw_collection_property_exception();
+ATTRIBUTE_NORETURN void throw_collection_compare_exception();
+ATTRIBUTE_NORETURN void throw_param_is_not_container();
+ATTRIBUTE_NORETURN
+void throw_cannot_modify_immutable_object(const char* className);
+void check_collection_compare(const ObjectData* obj);
+void check_collection_compare(const ObjectData* obj1, const ObjectData* obj2);
 void check_collection_cast_to_array();
 
 Object create_object_only(const String& s);
 Object create_object(const String& s, const Array &params, bool init = true);
 Object init_object(const String& s, const Array &params, ObjectData* o);
+
+ATTRIBUTE_NORETURN
+void throw_object(const Object& e);
+
+ATTRIBUTE_NORETURN inline
+void throw_object(const String& s, const Array& params, bool init = true) {
+  throw_object(create_object(s, params, init));
+}
 
 /**
  * Argument count handling.
@@ -165,11 +178,12 @@ void handle_destructor_exception(const char* situation = "Destructor");
  *
  * Don't use in new code.
  */
-void throw_bad_type_exception(const char *fmt, ...) ATTRIBUTE_PRINTF(1,2);
+void throw_bad_type_exception(ATTRIBUTE_PRINTF_STRING const char *fmt, ...)
+  ATTRIBUTE_PRINTF(1,2);
 void throw_expected_array_exception(const char* fn = nullptr);
 void throw_expected_array_or_collection_exception(const char* fn = nullptr);
-void throw_invalid_argument(const char *fmt, ...) ATTRIBUTE_PRINTF(1,2)
-   __attribute__((__cold__));
+void throw_invalid_argument(ATTRIBUTE_PRINTF_STRING const char *fmt, ...)
+  ATTRIBUTE_PRINTF(1,2) __attribute__((__cold__));
 
 /**
  * Unsetting ClassName::StaticProperty.
@@ -188,21 +202,21 @@ char const kUnserializableString[] = "\x01";
 String f_serialize(const Variant& value);
 Variant unserialize_ex(const String& str,
                        VariableUnserializer::Type type,
-                       const Array& class_whitelist = null_array);
+                       const Array& options = null_array);
 Variant unserialize_ex(const char* str, int len,
                        VariableUnserializer::Type type,
-                       const Array& class_whitelist = null_array);
+                       const Array& options = null_array);
 
 inline Variant unserialize_from_buffer(const char* str, int len,
-                                       const Array& class_whitelist = null_array) {
+                                       const Array& options = null_array) {
   return unserialize_ex(str, len,
                         VariableUnserializer::Type::Serialize,
-                        class_whitelist);
+                        options);
 }
 
 inline Variant unserialize_from_string(const String& str,
-                                       const Array& class_whitelist = null_array) {
-  return unserialize_from_buffer(str.data(), str.size(), class_whitelist);
+                                       const Array& options = null_array) {
+  return unserialize_from_buffer(str.data(), str.size(), options);
 }
 
 String resolve_include(const String& file, const char* currentDir,

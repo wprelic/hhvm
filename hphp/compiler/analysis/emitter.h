@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -21,6 +21,7 @@
 #include "hphp/compiler/statement/statement.h"
 #include "hphp/compiler/statement/use_trait_statement.h"
 #include "hphp/compiler/statement/class_require_statement.h"
+#include "hphp/compiler/statement/class_statement.h"
 #include "hphp/compiler/statement/trait_prec_statement.h"
 #include "hphp/compiler/statement/trait_alias_statement.h"
 #include "hphp/compiler/statement/typedef_statement.h"
@@ -107,7 +108,6 @@ public:
   IMM_##typ1, IMM_##typ2, IMM_##typ3
 #define FOUR(typ1, typ2, typ3, typ4) \
   IMM_##typ1, IMM_##typ2, IMM_##typ3, IMM_##typ4
-#define IMM_MA std::vector<unsigned char>
 #define IMM_BLA std::vector<Label*>&
 #define IMM_SLA std::vector<StrOff>&
 #define IMM_ILA std::vector<IterPair>&
@@ -122,6 +122,7 @@ public:
 #define IMM_BA Label&
 #define IMM_OA(type) type
 #define IMM_VSA std::vector<std::string>&
+#define IMM_KA MemberKey
 #define O(name, imm, pop, push, flags) void name(imm);
   OPCODES
 #undef O
@@ -145,6 +146,7 @@ public:
 #undef IMM_BA
 #undef IMM_OA
 #undef IMM_VSA
+#undef IMM_KA
 
 private:
   ConstructPtr m_node;
@@ -162,11 +164,6 @@ struct SymbolicStack {
     CLS_STRING_NAME,   // name is the string to use
     CLS_SELF,
     CLS_PARENT
-  };
-
-  enum MetaType {
-    META_NONE,
-    META_LITSTR,
   };
 
 private:
@@ -188,17 +185,14 @@ private:
   struct SymEntry {
     explicit SymEntry(char s = 0)
       : sym(s)
-      , metaType(META_NONE)
+      , name(nullptr)
       , className(nullptr)
       , intval(-1)
       , unnamedLocalStart(InvalidAbsoluteOffset)
       , clsBaseType(CLS_INVALID)
     {}
     char sym;
-    MetaType metaType;
-    union {
-      const StringData* name;   // META_LITSTR
-    }   metaData;
+    const StringData* name;
     const StringData* className;
     int64_t intval; // used for L and I symbolic flavors
 
@@ -212,6 +206,8 @@ private:
     // early.  How this works depends on the type of class base---see
     // emitResolveClsBase for details.
     ClassBaseType clsBaseType;
+
+    std::string pretty() const;
   };
   std::vector<SymEntry> m_symStack;
 
@@ -251,7 +247,8 @@ public:
   bool isCls(int index) const;
   bool isTypePredicted(int index = -1 /* stack top */) const;
   void set(int index, char sym);
-  unsigned size() const;
+  size_t size() const;
+  size_t actualSize() const;
   bool empty() const;
   void clear();
 
@@ -439,6 +436,7 @@ class EmitterVisitor {
   friend class FuncFinisher;
 public:
   typedef std::vector<int> IndexChain;
+  typedef std::pair<ExpressionPtr, IndexChain> IndexPair;
   typedef Emitter::IterPair IterPair;
   typedef std::vector<IterPair> IterVec;
 
@@ -455,9 +453,9 @@ public:
 
   void listAssignmentVisitLHS(Emitter& e, ExpressionPtr exp,
                               IndexChain& indexChain,
-                              std::vector<IndexChain*>& chainList);
+                              std::vector<IndexPair>& chainList);
   void listAssignmentAssignElements(Emitter& e,
-                                    std::vector<IndexChain*>& indexChains,
+                                    std::vector<IndexPair>& indexChains,
                                     std::function<void()> emitSrc);
 
   void visitIfCondition(ExpressionPtr cond, Emitter& e, Label& tru, Label& fals,
@@ -469,8 +467,8 @@ public:
     m_evalStackIsUnknown = false;
   }
   bool evalStackIsUnknown() { return m_evalStackIsUnknown; }
-  void popEvalStack(char symFlavor, int arg = -1, int pos = -1);
-  void popSymbolicLocal(Op opcode, int arg = -1, int pos = -1);
+  void popEvalStack(char symFlavor);
+  void popSymbolicLocal(Op opcode);
   void popEvalStackMMany();
   void popEvalStackMany(int len, char symFlavor);
   void popEvalStackCVMany(int len);
@@ -613,8 +611,12 @@ private:
       Offset m_fpOff;
   };
 
-  struct SwitchState : private boost::noncopyable {
+  struct SwitchState {
     SwitchState() : nonZeroI(-1), defI(-1) {}
+
+    SwitchState(const SwitchState&) = delete;
+    SwitchState& operator=(const SwitchState&) = delete;
+
     std::map<int64_t, int> cases; // a map from int (or litstr id) to case index
     std::vector<StrCase> caseOrder; // for string switches, a list of the
                                     // <litstr id, case index> in the order
@@ -622,6 +624,16 @@ private:
     int nonZeroI;
     int defI;
   };
+
+  void allocPipeLocal(Id pipeVar) { m_pipeVars.emplace(pipeVar); }
+  void releasePipeLocal(Id pipeVar) {
+    assert(!m_pipeVars.empty() && m_pipeVars.top() == pipeVar);
+    m_pipeVars.pop();
+  }
+  folly::Optional<Id> getPipeLocal() {
+    if (m_pipeVars.empty()) return folly::none;
+    return m_pipeVars.top();
+  }
 
 private:
   static constexpr size_t kMinStringSwitchCases = 8;
@@ -667,15 +679,50 @@ private:
   // Unnamed local variables used by the "finally router" logic
   Id m_stateLocal;
   Id m_retLocal;
+  // stack of nested unnamed pipe variables
+  std::stack<Id> m_pipeVars;
 
 public:
   bool checkIfStackEmpty(const char* forInstruction) const;
   void unexpectedStackSym(char sym, const char* where) const;
 
   int scanStackForLocation(int iLast);
-  void buildVectorImm(std::vector<unsigned char>& vectorImm,
-                      int iFirst, int iLast, bool allowW,
-                      Emitter& e);
+
+  /*
+   * Emit bytecodes for the base and intermediate dims, returning the number of
+   * eval stack slots containing member keys that should be consumed by the
+   * final operation.
+   */
+  struct MInstrOpts {
+    explicit MInstrOpts(MOpFlags flags)
+      : allowW{flags & MOpFlags::Define}
+      , flags{flags}
+    {}
+
+    explicit MInstrOpts(int32_t paramId)
+      : allowW{true}
+      , fpass{true}
+      , paramId{paramId}
+    {}
+
+    MInstrOpts& rhs() {
+      rhsVal = true;
+      return *this;
+    }
+
+    bool allowW{false};
+    bool rhsVal{false};
+    bool fpass{false};
+    union {
+      MOpFlags flags;
+      int32_t paramId;
+    };
+  };
+
+  MemberKey symToMemberKey(Emitter& e, int i, bool allowW);
+  size_t emitMOp(int iFirst, int& iLast, Emitter& e, MInstrOpts opts);
+  void emitQueryMOp(int iFirst, int iLast, Emitter& e, QueryMOp op);
+
   enum class PassByRefKind {
     AllowCell,
     WarnOnCell,
@@ -689,7 +736,8 @@ public:
   void emitCGetL3(Emitter& e);
   void emitPushL(Emitter& e);
   void emitCGet(Emitter& e);
-  void emitVGet(Emitter& e);
+  void emitCGetQuiet(Emitter& e);
+  bool emitVGet(Emitter& e, bool skipCells = false);
   void emitIsset(Emitter& e);
   void emitIsType(Emitter& e, IsTypeOp op);
   void emitEmpty(Emitter& e);
@@ -749,6 +797,10 @@ public:
                           FuncEmitter *fe,
                           bool &allowOverride);
   void bindNativeFunc(MethodStatementPtr meth, FuncEmitter *fe);
+  int32_t emitNativeOpCodeImpl(MethodStatementPtr meth,
+                               const char* funcName,
+                               const char* className,
+                               FuncEmitter* fe);
   void emitMethodMetadata(MethodStatementPtr meth,
                           ClosureUseVarVec* useVars,
                           bool top);
@@ -759,10 +811,11 @@ public:
   void emitDeprecationWarning(Emitter& e, MethodStatementPtr meth);
   void emitMethod(MethodStatementPtr meth);
   void emitMemoizeProp(Emitter& e, MethodStatementPtr meth, Id localID,
-                       const std::vector<Id>& paramIDs, uint numParams);
+                       const std::vector<Id>& paramIDs, uint32_t numParams);
   void addMemoizeProp(MethodStatementPtr meth);
   void emitMemoizeMethod(MethodStatementPtr meth, const StringData* methName);
-  void emitConstMethodCallNoParams(Emitter& e, string name);
+  void emitConstMethodCallNoParams(Emitter& e, const std::string& name);
+  bool emitInlineGenva(Emitter& e, const ExpressionPtr);
   bool emitHHInvariant(Emitter& e, SimpleFunctionCallPtr);
   void emitMethodDVInitializers(Emitter& e,
                                 MethodStatementPtr& meth,
@@ -793,13 +846,13 @@ public:
                     ExpressionListPtr paramsOverride = nullptr);
   void emitFuncCallArg(Emitter& e, ExpressionPtr exp, int paramId,
                        bool isUnpack);
-  void emitBuiltinCallArg(Emitter& e, ExpressionPtr exp, int paramId,
-                         bool byRef);
+  bool emitBuiltinCallArg(Emitter& e, ExpressionPtr exp, int paramId,
+                          bool byRef, bool mustBeRef);
   void emitLambdaCaptureArg(Emitter& e, ExpressionPtr exp);
   void emitBuiltinDefaultArg(Emitter& e, Variant& v,
                              MaybeDataType t, int paramId);
   void emitClass(Emitter& e, ClassScopePtr cNode, bool topLevel);
-  void emitTypedef(Emitter& e, TypedefStatementPtr);
+  Id emitTypedef(Emitter& e, TypedefStatementPtr);
   void emitForeachListAssignment(Emitter& e,
                                  ListAssignmentPtr la,
                                  std::function<void()> emitSrc);
@@ -822,6 +875,8 @@ public:
   void emitBreak(Emitter& e, int depth, StatementPtr s);
   void emitContinue(Emitter& e, int depth, StatementPtr s);
   void emitGoto(Emitter& e, StringData* name, StatementPtr s);
+
+  void emitYieldFrom(Emitter& e, ExpressionPtr exp);
 
   // Helper methods for emitting IterFree instructions
   void emitIterFree(Emitter& e, IterVec& iters);
@@ -881,8 +936,8 @@ public:
   void newFPIRegion(Offset start, Offset end, Offset fpOff);
   void copyOverCatchAndFaultRegions(FuncEmitter* fe);
   void copyOverFPIRegions(FuncEmitter* fe);
-  void saveMaxStackCells(FuncEmitter* fe);
-  void finishFunc(Emitter& e, FuncEmitter* fe);
+  void saveMaxStackCells(FuncEmitter* fe, int32_t stackPad);
+  void finishFunc(Emitter& e, FuncEmitter* fe, int32_t stackPad);
   void initScalar(TypedValue& tvVal, ExpressionPtr val,
                   folly::Optional<CollectionType> ct = folly::none);
   bool requiresDeepInit(ExpressionPtr initExpr) const;

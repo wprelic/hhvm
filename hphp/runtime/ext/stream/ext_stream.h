@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -21,6 +21,13 @@
 #include "hphp/runtime/ext/extension.h"
 
 namespace HPHP {
+
+  const int64_t k_PSFS_ERR_FATAL = 0;
+  const int64_t k_PSFS_FEED_ME = 1;
+  const int64_t k_PSFS_FLAG_FLUSH_CLOSE = 2;
+  const int64_t k_PSFS_FLAG_FLUSH_INC = 1;
+  const int64_t k_PSFS_FLAG_NORMAL = 0;
+  const int64_t k_PSFS_PASS_ON = 2;
 
   const int64_t k_STREAM_CLIENT_CONNECT = 4;
   const int64_t k_STREAM_CLIENT_ASYNC_CONNECT = 2;
@@ -114,6 +121,11 @@ struct StreamContext final : ResourceData {
   static bool validateParams(const Variant& params);
   void mergeParams(const Array& params);
   Array getParams() const;
+
+  /*void vscan(IMarker& mark) const override {
+    mark(m_options);
+    mark(m_params);
+  }*/
 
 private:
   static StaticString s_options_key;
@@ -240,6 +252,12 @@ Variant HHVM_FUNCTION(stream_socket_client,
                       double timeout = -1.0,
                       int flags = 0,
                       const Variant& context = null_variant);
+
+bool HHVM_FUNCTION(stream_socket_enable_crypto,
+                   const Resource& socket,
+                   bool enable,
+                   int cryptotype,
+                   const Variant& sessionstream);
 
 Variant HHVM_FUNCTION(stream_socket_get_name,
                       const Resource& handle,

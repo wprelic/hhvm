@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,19 +8,6 @@
  *
  *)
 
-
-(* ClassStatus is something that we want to be able to access very quickly.
- * Workers in the "declaration" phase need to be able to know if their parent
- * class has already been declared or not.
- * They will lookup the status of a class (declared, error, or todo) very
- * frequently.
- * That's why we are dissociating ClassStatus from ClassHeap.
- * If the status of the class was in ClassHeap, we would have to deserialize
- * a tree every time a parent class has been successfully declared.
- * It would be horribly slow.
- * Using a cache is not an option since the class status are updated
- * concurrently.
- *)
 
 open Utils
 
@@ -41,5 +28,46 @@ end)
 
 module ConstHeap = SharedMem.NoCache (String) (struct
   type t = Nast.gconst
+  let prefix = Prefix.make()
+end)
+
+(* Mapping the canonical name (lower case form) to the actual name *)
+module type CanonHeap =
+  SharedMem.S with type t = string
+               and type key = string
+               and module KeySet = Set.Make (String)
+
+module ClassCanonHeap : CanonHeap = SharedMem.NoCache (String) (struct
+  type t = string
+  let prefix = Prefix.make()
+end)
+
+module FunCanonHeap : CanonHeap = SharedMem.NoCache (String) (struct
+  type t = string
+  let prefix = Prefix.make()
+end)
+
+module type PosHeap =
+  SharedMem.S with type t = Pos.t
+               and type key = string
+               and module KeySet = Set.Make (String)
+
+module ClassPosHeap : PosHeap = SharedMem.NoCache (String) (struct
+  type t = Pos.t
+  let prefix = Prefix.make()
+end)
+
+module FunPosHeap : PosHeap = SharedMem.NoCache (String) (struct
+  type t = Pos.t
+  let prefix = Prefix.make()
+end)
+
+module TypedefPosHeap : PosHeap = SharedMem.NoCache (String) (struct
+  type t = Pos.t
+  let prefix = Prefix.make()
+end)
+
+module ConstPosHeap : PosHeap = SharedMem.NoCache (String) (struct
+  type t = Pos.t
   let prefix = Prefix.make()
 end)

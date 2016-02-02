@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -84,18 +84,25 @@ class SoapData final : public RequestEventHandler {
     sdlPtr sdl;
     time_t time;
   };
-  typedef hphp_string_hash_map<std::shared_ptr<sdlCacheBucket>,sdlCacheBucket>
-          sdlCache;
+  using sdlCache =
+        hphp_string_hash_map<std::shared_ptr<sdlCacheBucket>,sdlCacheBucket>;
 
 public:
   SoapData();
 
-  sdl *get_sdl(const char *uri, long cache_wsdl, HttpClient *http = NULL);
+  sdl *get_sdl(const char *uri, long cache_wsdl, HttpClient *http = nullptr);
   encodeMap *register_typemap(encodeMapPtr typemap);
   void register_encoding(xmlCharEncodingHandlerPtr encoding);
 
   void requestInit() override { reset(); }
   void requestShutdown() override { reset(); }
+  void vscan(IMarker& mark) const override {
+    mark(m_classmap);
+    mark(m_error_object);
+    mark(m_ref_map);
+    // TODO t7925358 m_defEnc, m_typemap, m_sdls, and m_typemaps hold
+    // Variants in std:: containers.
+  }
 
 private:
   sdlPtr get_sdl_impl(const char *uri, long cache_wsdl, HttpClient *http);
@@ -160,8 +167,9 @@ public:
   DECLARE_RESOURCE_ALLOCATION_NO_SWEEP(soapHeader);
 
   CLASSNAME_IS("soapHeader")
-  // overriding ResourceData
-  virtual const String& o_getClassNameHook() const { return classnameof(); }
+  const String& o_getClassNameHook() const override {
+    return classnameof();
+  }
 
   sdlFunction                      *function;
   String                            function_name;
@@ -175,7 +183,8 @@ public:
 
 class SoapException : public ExtendedException {
 public:
-  SoapException(const char *fmt, ...) ATTRIBUTE_PRINTF(2,3);
+  SoapException(ATTRIBUTE_PRINTF_STRING const char *fmt, ...)
+    ATTRIBUTE_PRINTF(2,3);
 };
 
 ///////////////////////////////////////////////////////////////////////////////

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,7 +17,7 @@
 #define incl_HPHP_CONTAINER_FUNCTIONS_H_
 
 #include "hphp/runtime/base/type-variant.h"
-#include "hphp/runtime/ext/ext_collections.h"
+#include "hphp/runtime/ext/collections/ext_collections-idl.h"
 
 namespace HPHP {
 
@@ -25,7 +25,7 @@ namespace HPHP {
 
 inline bool isContainer(const Cell c) {
   assert(cellIsPlausible(c));
-  return c.m_type == KindOfArray ||
+  return isArrayType(c.m_type) ||
          (c.m_type == KindOfObject && c.m_data.pobj->isCollection());
 }
 
@@ -35,7 +35,7 @@ inline bool isContainer(const Variant& v) {
 
 inline bool isContainerOrNull(const Cell c) {
   assert(cellIsPlausible(c));
-  return IS_NULL_TYPE(c.m_type) || c.m_type == KindOfArray ||
+  return isNullType(c.m_type) || isArrayType(c.m_type) ||
          (c.m_type == KindOfObject && c.m_data.pobj->isCollection());
 }
 
@@ -45,7 +45,7 @@ inline bool isContainerOrNull(const Variant& v) {
 
 inline bool isMutableContainer(const Cell c) {
   assert(cellIsPlausible(c));
-  return c.m_type == KindOfArray ||
+  return isArrayType(c.m_type) ||
          (c.m_type == KindOfObject && c.m_data.pobj->isMutableCollection());
 }
 
@@ -55,11 +55,11 @@ inline bool isMutableContainer(const Variant& v) {
 
 inline size_t getContainerSize(const Cell c) {
   assert(isContainer(c));
-  if (c.m_type == KindOfArray) {
+  if (isArrayType(c.m_type)) {
     return c.m_data.parr->size();
   }
   assert(c.m_type == KindOfObject && c.m_data.pobj->isCollection());
-  return getCollectionSize(c.m_data.pobj);
+  return collections::getSize(c.m_data.pobj);
 }
 
 inline size_t getContainerSize(const Variant& v) {
@@ -68,7 +68,7 @@ inline size_t getContainerSize(const Variant& v) {
 
 inline bool isPackedContainer(const Cell c) {
   assert(isContainer(c));
-  if (c.m_type == KindOfArray) {
+  if (isArrayType(c.m_type)) {
     return c.m_data.parr->isPacked();
   }
 

@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -103,6 +103,7 @@ let is_associative = function
   | Eqeq | EQeqeq | Diff | Diff2 | Ltlt
   | Gtgt | Percent | Eq _ -> false
 
+module Unparse = struct
 (*
   unparsers for simple and predefined types.
 *)
@@ -159,8 +160,7 @@ let u_of_smap _ _ = u_todo "smap"  (fun () -> StrEmpty)
 let is_empty_ns ns =
     if (ns = Namespace_env.empty) then true else false
 
-let unparser _env =
-  let rec u_program v = u_of_list_spc u_def v
+let rec u_program v = u_of_list_spc u_def v
   and u_in_mode _ f = u_todo "mode" f
   and u_def =
     function
@@ -176,13 +176,18 @@ let unparser _env =
         let strProgram = u_program program
         in StrWords [Str "namespace"; u_id id; StrBraces strProgram]
     | NamespaceUse uses ->
-        let u_use ((p1, ns), (p2, name)) =
+        let u_use (kind, (p1, ns), (p2, name)) =
           let ns_end = List.last_exn (R.split (R.regexp "\\\\") ns) in
           let qualifier = if ns_end <> name
                           then [Str "as"; u_id (p2, name)]
                           else [] in
-          StrWords (u_id (p1, ns) :: qualifier) in
-        StrStatement [Str "use"; (u_of_list_comma u_use uses)]
+          let id_and_qualifier = u_id (p1, ns) :: qualifier in
+          let kind_id_and_qualifier = match kind with
+            | NSClass -> id_and_qualifier
+            | NSFun -> Str "function" :: id_and_qualifier
+            | NSConst -> Str "const" :: id_and_qualifier in
+          StrStatement (Str "use" :: kind_id_and_qualifier) in
+        u_of_list_spc u_use uses
   and
     u_typedef {
                 t_id = (pos, _) as v_t_id;
@@ -370,6 +375,8 @@ let unparser _env =
         StrStatement [kindStr; hintStr; varStr]
     | XhpAttr _ ->
         u_todo "XhpAttr" (fun () -> StrEmpty)
+    | XhpCategory _ ->
+        u_todo "XhpCategory" (fun () -> StrEmpty)
     | Method m -> u_method_ kind m
     | TypeConst _ -> u_todo "TypeConst" (fun () -> StrEmpty)
 
@@ -736,13 +743,13 @@ let unparser _env =
       | String2 _
       | List _
       | Obj_get _
-      | Ref _
       | Unsafeexpr _ -> res
       | Collection _
       | Cast _
       | Unop _
       | Binop _
       | Eif _
+      | NullCoalesce _
       | InstanceOf _
       | New _
       | Efun _
@@ -818,9 +825,12 @@ let unparser _env =
       in StrList [ funStr; paramStr ]
     | Int i -> u_pstring i
     | Float f -> u_pstring f
-    | String s -> StrList [Str "'"; u_pstring s; Str "'"]
-    | String2 (_exprList, pstring) ->
-        StrList [ Str "\""; u_pstring pstring; Str "\""]
+    | String (p, s) ->
+      StrList [Str "\""; u_pstring (p, Php_escaping.escape s); Str "\""]
+    | String2 elems ->
+      (* build the string back by concatenating the parts *)
+      List.map ~f:u_expr elems |>
+      fun els -> StrList (List.intersperse ~sep:(Str ".") els)
     | Yield afield ->
         StrWords [Str "yield"; u_afield afield]
     | Yield_break -> u_todo "Yield_break" (fun () -> StrEmpty)
@@ -840,6 +850,12 @@ let unparser _env =
           Str "?";
           u_of_option u_expr_nested trueExprOption;
           Str ":";
+          u_expr_nested falseExpr;
+        ]
+    | NullCoalesce (trueExpr, falseExpr) ->
+        StrWords [
+          u_expr_nested trueExpr;
+          Str "??";
           u_expr_nested falseExpr;
         ]
     | InstanceOf (instExpr, hintExpr) ->
@@ -885,8 +901,6 @@ let unparser _env =
         StrWords [Str "/* UNSAFE_EXPR */"; u_expr expr]
     | Import (flavor, expr) ->
         StrWords [u_import_flavor flavor; StrParens (u_expr expr)]
-    | Ref expr ->
-        StrList [Str "&"; u_expr expr]
   and u_import_flavor =
     function
     | Require -> Str "require"
@@ -952,6 +966,7 @@ let unparser _env =
         | Uminus -> prefix_with "-"
         | Uincr -> prefix_with "++"
         | Udecr -> prefix_with "--"
+        | Uref -> prefix_with "&"
   and u_case v =
     let case_expr name block =
       StrWords [name; Str ":"; u_naked_block block;] in
@@ -959,8 +974,11 @@ let unparser _env =
     | Default block ->
         case_expr (Str "default") block
     | Case (expr, block) ->
-        case_expr (StrWords [Str "case"; u_expr expr;]) block in
-  u_program
+        case_expr (StrWords [Str "case"; u_expr expr;]) block
+      let unparser _env = u_program
+end
+
+open Unparse
 
 let unparse_internal program =
   (*

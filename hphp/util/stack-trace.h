@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -24,7 +24,9 @@
 #include "hphp/util/portability.h"
 #include "hphp/util/compatibility.h"
 
+#ifndef _MSC_VER
 #include <dlfcn.h>
+#endif
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
@@ -83,6 +85,23 @@ public:
     std::string toString() const;
   };
 
+  struct PerfMap {
+    void rebuild();
+    bool translate(const void* addr, Frame* f) const;
+
+    struct Range {
+      uintptr_t base;
+      uintptr_t past;
+      struct Cmp {
+        bool operator() (const Range& a, const Range& b) const {
+          return a.past <= b.base;
+        }
+      };
+    };
+    bool m_built = false;
+    std::map<Range,std::string,Range::Cmp> m_map;
+  };
+
 public:
 
   explicit StackTrace(bool trace = true) ;
@@ -90,7 +109,7 @@ public:
   /**
    * Translate a frame pointer to file name and line number pair.
    */
-  static std::shared_ptr<Frame> Translate(void *bt);
+  static std::shared_ptr<Frame> Translate(void *bt, PerfMap* pm=nullptr);
 
   /**
    * Translate the frame pointer of a PHP function using the perf map.

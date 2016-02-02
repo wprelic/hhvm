@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -55,8 +55,11 @@ struct IntervalTimer final {
   void stop();
   void run();
 
+  template<class F> void scan(F& mark) const {
+    mark(m_callback);
+  }
+
 private:
-  template <typename F> friend void scan(const IntervalTimer&, F&);
   double m_interval;
   double m_initial;
   Variant m_callback;

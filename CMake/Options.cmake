@@ -11,6 +11,9 @@ option(EXECUTION_PROFILER "Enable the execution profiler" OFF)
 option(ENABLE_FULL_SETLINE "Enable full setline function for debugger and code-coverage" OFF)
 
 option(USE_JEMALLOC "Use jemalloc" ON)
+option(ENABLE_HHPROF "Enable HHProf" OFF)
+
+option(CLANG_FORCE_LIBSTDCXX "Force libstdc++ when building against Clang/LLVM" OFF)
 
 option(USE_TCMALLOC "Use tcmalloc (if jemalloc is not used)" ON)
 option(USE_GOOGLE_HEAP_PROFILER "Use Google heap profiler" OFF)
@@ -29,3 +32,8 @@ option(ENABLE_COTIRE "Speed up the build by precompiling headers" OFF)
 option(ENABLE_ASYNC_MYSQL "Build the async_mysql extension" ON)
 option(ENABLE_MCROUTER "Build the mcrouter library and extension" ON)
 option(ENABLE_PROXYGEN_SERVER "Build the Proxygen HTTP server" ON)
+
+IF (NOT DEFAULT_CONFIG_DIR)
+  set(DEFAULT_CONFIG_DIR "/etc/hhvm/" CACHE STRING
+    "Default directory to find php.ini")
+ENDIF()

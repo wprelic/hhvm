@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -36,10 +36,10 @@ public:
   void rewind() override;
 
 private:
-  const Func* m_DirOpen;
-  const Func* m_DirClose;
-  const Func* m_DirRead;
-  const Func* m_DirRewind;
+  LowPtr<const Func> m_DirOpen;
+  LowPtr<const Func> m_DirClose;
+  LowPtr<const Func> m_DirRead;
+  LowPtr<const Func> m_DirRewind;
 };
 
 }

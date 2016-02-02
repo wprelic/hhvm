@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -7,9 +7,6 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  *
  *)
-open Utils
-
-val remove_classes: SSet.t -> unit
 
 (*
  * This function works by side effects. It is adding in the
@@ -22,12 +19,9 @@ val remove_classes: SSet.t -> unit
  * in Typing_env.Class, Typing_env.Fun, and Typing_env.Typedef.
  *)
 val name_and_declare_types_program:
-  Naming.env -> Relative_path.Set.t SMap.t (* set of classes in all files *) ->
-  Ast.program -> unit
+  TypecheckerOptions.t -> Ast.program -> unit
 
-val make_env:
-  Naming.env -> Relative_path.Set.t SMap.t ->
-  Relative_path.t -> unit
+val make_env: TypecheckerOptions.t -> Relative_path.t -> unit
 
 val class_decl:
   TypecheckerOptions.t -> Nast.class_ -> unit

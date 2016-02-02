@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    | Copyright (c) 1997-2010 The PHP Group                                |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
@@ -17,10 +17,11 @@
 
 #include "hphp/runtime/ext/asio/ext_asio.h"
 
-#include "hphp/runtime/ext/ext_closure.h"
 #include "hphp/runtime/ext/asio/asio-context.h"
 #include "hphp/runtime/ext/asio/asio-session.h"
-#include "hphp/runtime/ext/asio/resumable-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_external-thread-event-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_sleep-wait-handle.h"
+#include "hphp/runtime/ext/asio/ext_resumable-wait-handle.h"
 #include "hphp/runtime/vm/vm-regs.h"
 #include "hphp/system/systemlib.h"
 
@@ -47,10 +48,10 @@ Object HHVM_FUNCTION(asio_get_running_in_context, int ctx_idx) {
 
   if (ctx_idx < session->getCurrentContextIdx()) {
     auto fp = session->getContext(ctx_idx + 1)->getSavedFP();
-    return c_ResumableWaitHandle::getRunning(fp);
+    return Object{c_ResumableWaitHandle::getRunning(fp)};
   } else {
     VMRegAnchor _;
-    return c_ResumableWaitHandle::getRunning(vmfp());
+    return Object{c_ResumableWaitHandle::getRunning(vmfp())};
   }
 }
 
@@ -58,23 +59,39 @@ Object HHVM_FUNCTION(asio_get_running_in_context, int ctx_idx) {
 
 Object HHVM_FUNCTION(asio_get_running) {
   VMRegAnchor _;
-  return c_ResumableWaitHandle::getRunning(vmfp());
+  return Object{c_ResumableWaitHandle::getRunning(vmfp())};
 }
 
-class AsioExtension final : public Extension {
-  public:
-   AsioExtension() : Extension("asio", "0.1") {}
+bool HHVM_FUNCTION(cancel, const Object& obj, const Object& exception) {
+  if (!obj->instanceof(c_WaitHandle::classof())) {
+    SystemLib::throwInvalidArgumentExceptionObject(
+      "Cancellation unsupported for user-land Awaitable");
+  }
+  auto handle = wait_handle<c_WaitHandle>(obj.get());
 
-   void moduleInit() override {
-     HHVM_FALIAS(
-        HH\\asio_get_current_context_idx,
-        asio_get_current_context_idx);
-     HHVM_FALIAS(HH\\asio_get_running_in_context, asio_get_running_in_context);
-     HHVM_FALIAS(HH\\asio_get_running, asio_get_running);
-     loadSystemlib();
-   }
+  switch(handle->getKind()) {
+    case c_WaitHandle::Kind::ExternalThreadEvent:
+      return handle->asExternalThreadEvent()->cancel(exception);
+    case c_WaitHandle::Kind::Sleep:
+      return handle->asSleep()->cancel(exception);
+    default:
+      SystemLib::throwInvalidArgumentExceptionObject(
+        "Cancellation unsupported for " +
+        HHVM_MN(WaitHandle, getName) (handle)
+      );
+  }
+}
 
-} s_asio_extension;
+static AsioExtension s_asio_extension;
+
+void AsioExtension::initFunctions() {
+  HHVM_FALIAS(
+    HH\\asio_get_current_context_idx,
+    asio_get_current_context_idx);
+  HHVM_FALIAS(HH\\asio_get_running_in_context, asio_get_running_in_context);
+  HHVM_FALIAS(HH\\asio_get_running, asio_get_running);
+  HHVM_FALIAS(HH\\Asio\\cancel, cancel);
+}
 
 ///////////////////////////////////////////////////////////////////////////////
 }

@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -78,8 +78,8 @@ void optimizeJmps(Vunit& unit) {
             const auto jcc_origin = code.back().origin;
             code.pop_back();
             code.emplace_back(
-              fallbackcc{jcc_i.cc, jcc_i.sf, fb_i.dest,
-                fb_i.trflags, fb_i.args}
+              fallbackcc{jcc_i.cc, jcc_i.sf, fb_i.target,
+                         fb_i.spOff, fb_i.trflags, fb_i.args}
             );
             code.back().origin = jcc_origin;
             code.emplace_back(jmp{t0});

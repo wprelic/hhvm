@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,     |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,18 +17,18 @@
 #ifndef incl_HPHP_CONFIG_H_
 #define incl_HPHP_CONFIG_H_
 
-#include <folly/dynamic.h>
 #include "hphp/util/hdf.h"
 
 namespace HPHP {
 ///////////////////////////////////////////////////////////////////////////////
-
-typedef folly::dynamic IniSettingMap;
+class Variant;
+class IniSettingMap;
 typedef std::vector<std::string> ConfigVector;
 typedef std::map<std::string, std::string> ConfigMap;
 typedef std::set<std::string> ConfigSet;
 // with comparer
 typedef std::set<std::string, stdltistr> ConfigSetC;
+typedef std::map<std::string, std::string, stdltistr> ConfigMapC;
 typedef boost::container::flat_set<std::string> ConfigFlatSet;
 typedef hphp_string_imap<std::string> ConfigIMap;
 
@@ -57,19 +57,21 @@ struct Config {
                              const bool prepend_hhvm = true);
 
   static void ParseConfigFile(const std::string &filename, IniSettingMap &ini,
-                              Hdf &hdf);
+                              Hdf &hdf, const bool is_system = true);
 
-  static void ParseIniFile(const std::string &filename);
+  static void ParseIniFile(const std::string &filename,
+                           const bool is_system = true);
   static void ParseIniFile(const std::string &filename, IniSettingMap &ini,
-                           const bool constants_only = false);
+                           const bool constants_only = false,
+                           const bool is_system = true);
 
   static void ParseHdfFile(const std::string &filename, Hdf &hdf);
 
   // Parse and process a .ini string (e.g., -d)
-  static void ParseIniString(const std::string iniStr, IniSettingMap &ini);
+  static void ParseIniString(const std::string &iniStr, IniSettingMap &ini);
 
   // Parse and process a .hdf string (e.g., -v)
-  static void ParseHdfString(const std::string hdfStr, Hdf &hdf);
+  static void ParseHdfString(const std::string &hdfStr, Hdf &hdf);
 
   /**
    * Prefer the Bind() over the GetFoo() as it makes ini_get() work too.
@@ -134,6 +136,10 @@ struct Config {
   static void Bind(ConfigMap& loc, const IniSettingMap& ini, const Hdf& config,
                    const std::string& name = "",
                    const ConfigMap& defValue = ConfigMap(),
+                   const bool prepend_hhvm = true);
+  static void Bind(ConfigMapC& loc, const IniSettingMap& ini, const Hdf& config,
+                   const std::string& name = "",
+                   const ConfigMapC& defValue = ConfigMapC(),
                    const bool prepend_hhvm = true);
   static void Bind(ConfigSet& loc, const IniSettingMap& ini, const Hdf& config,
                    const std::string& name = "",
@@ -212,6 +218,10 @@ struct Config {
                           const std::string& name = "",
                           const ConfigMap& defValue = ConfigMap(),
                           const bool prepend_hhvm = true);
+  static ConfigMapC GetMapC(const IniSettingMap& ini, const Hdf& config,
+                          const std::string& name = "",
+                          const ConfigMapC& defValue = ConfigMapC(),
+                          const bool prepend_hhvm = true);
   static ConfigSet GetSet(const IniSettingMap& ini, const Hdf& config,
                           const std::string& name = "",
                           const ConfigSet& defValue = ConfigSet(),
@@ -249,7 +259,8 @@ struct Config {
   private:
 
   static void SetParsedIni(IniSettingMap &ini, const std::string confStr,
-                           const std::string filename, bool extensions_only);
+                           const std::string &filename, bool constants_only,
+                           bool is_system);
 
   static void StringInsert(std::vector<std::string> &values,
                            const std::string &key,
@@ -276,11 +287,20 @@ struct Config {
                            const std::string &value) {
     values[key] = value;
   }
+  static void StringInsert(std::map<std::string, std::string,
+                           stdltistr> &values,
+                           const std::string &key,
+                           const std::string &value) {
+    values[key] = value;
+  }
   static void StringInsert(hphp_string_imap<std::string> &values,
                            const std::string &key,
                            const std::string &value) {
     values[key] = value;
   }
+  static void ReplaceIncludesWithIni(const std::string& original_ini_filename,
+                                     const std::string& iniStr,
+                                     std::string& with_includes);
 };
 
 }

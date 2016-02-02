@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -32,19 +32,7 @@ module Fun = struct
 end
 
 module Typedef = struct
-
-  type visibility =
-    | Public
-    | Private
-
-  type tdef =
-    visibility * Typing_defs.tparam list * decl ty option * decl ty * Pos.t
-
-  type tdef_or_error =
-    | Error
-    | Ok of tdef
-
-  type t = tdef_or_error
+  type t = Typing_defs.typedef_type
   let prefix = Prefix.make()
 end
 

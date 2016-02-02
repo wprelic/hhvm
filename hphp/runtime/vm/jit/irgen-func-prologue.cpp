@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -16,7 +16,6 @@
 
 #include "hphp/runtime/vm/jit/irgen-func-prologue.h"
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/attr.h"
 #include "hphp/runtime/base/runtime-option.h"
 #include "hphp/runtime/vm/bytecode.h"
@@ -115,26 +114,27 @@ SSATmp* juggle_closure_ctx(IRGS& env) {
  */
 void init_use_vars(IRGS& env, SSATmp* closure) {
   auto const func = env.context.func;
+  auto const cls = func->implCls();
   auto const nparams = func->numParams();
 
   assertx(func->isClosureBody());
 
   // Closure object properties are the use vars followed by the static locals
   // (which are per-instance).
-  auto const nuse = func->implCls()->numDeclProperties() -
-                    func->numStaticLocals();
+  auto const nuse = cls->numDeclProperties() - func->numStaticLocals();
 
-  int use_var_off = sizeof(ObjectData) + func->implCls()->builtinODTailSize();
+  int use_var_off = sizeof(ObjectData) + cls->builtinODTailSize();
 
   for (auto i = 0; i < nuse; ++i, use_var_off += sizeof(Cell)) {
+    auto const ty = typeFromRAT(cls->declPropRepoAuthType(i));
     auto const addr = gen(
       env,
       LdPropAddr,
       PropOffset { use_var_off },
-      TPtrToPropGen,
+      ty.ptr(Ptr::Prop),
       closure
     );
-    auto const prop = gen(env, LdMem, TGen, addr);
+    auto const prop = gen(env, LdMem, ty, addr);
     gen(env, StLoc, LocalId{nparams + 1 + i}, fp(env), prop);
     gen(env, IncRef, prop);
   }
@@ -303,7 +303,7 @@ void emitPrologueBody(IRGS& env, uint32_t argc, TransID transID) {
     ReqBindJmp,
     ReqBindJmpData {
       SrcKey { func, func->getEntryForNumArgs(argc), false },
-      FPInvOffset{func->numSlotsInFrame()},
+      FPInvOffset { func->numSlotsInFrame() },
       offsetFromIRSP(env, BCSPOffset{0}),
       TransFlags{}
     },
@@ -314,13 +314,107 @@ void emitPrologueBody(IRGS& env, uint32_t argc, TransID transID) {
 
 ///////////////////////////////////////////////////////////////////////////////
 
+void emitMagicFuncPrologue(IRGS& env, uint32_t argc, TransID transID) {
+  DEBUG_ONLY auto const func = env.context.func;
+  assertx(func->isMagic());
+  assertx(func->numParams() == 2);
+  assertx(!func->hasVariadicCaptureParam());
+
+  Block* two_arg_prologue = nullptr;
+
+  emitPrologueEntry(env, argc);
+
+  // If someone just called __call() or __callStatic() directly, branch to a
+  // normal non-magic prologue.
+  ifThen(
+    env,
+    [&] (Block* taken) {
+      gen(env, CheckARMagicFlag, taken, fp(env));
+      if (argc == 2) two_arg_prologue = taken;
+    },
+    [&] {
+      emitPrologueBody(env, argc, transID);
+    }
+  );
+
+  // Pack the passed args into an array, then store it as the second param.
+  // This has to happen before we write the first param.
+  auto const args_arr = (argc == 0)
+    ? cns(env, staticEmptyArray())
+    : gen(env, PackMagicArgs, fp(env));
+  gen(env, StLoc, LocalId{1}, fp(env), args_arr);
+
+  // Store the name of the called function to the first param, then null it out
+  // on the ActRec.
+  auto const inv_name = gen(env, LdARInvName, fp(env));
+  gen(env, StLoc, LocalId{0}, fp(env), inv_name);
+  gen(env, StARInvName, fp(env), cns(env, nullptr));
+
+  // We set m_numArgsAndFlags even if `argc == 2' in order to reset the flags.
+  gen(env, StARNumArgsAndFlags, fp(env), cns(env, 2));
+
+  // Jmp to the two-argument prologue, or emit it if it doesn't exist yet.
+  if (two_arg_prologue) {
+    gen(env, Jmp, two_arg_prologue);
+  } else {
+    emitPrologueBody(env, 2, transID);
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
 }
 
 ///////////////////////////////////////////////////////////////////////////////
 
 void emitFuncPrologue(IRGS& env, uint32_t argc, TransID transID) {
+  if (env.context.func->isMagic()) {
+    return emitMagicFuncPrologue(env, argc, transID);
+  }
   emitPrologueEntry(env, argc);
   emitPrologueBody(env, argc, transID);
+}
+
+void emitFuncBodyDispatch(IRGS& env, const DVFuncletsVec& dvs) {
+  auto const func = env.context.func;
+  auto const num_args = gen(env, LdARNumParams, fp(env));
+
+  for (auto const& dv : dvs) {
+    ifThen(
+      env,
+      [&] (Block* taken) {
+        auto const lte = gen(env, LteInt, num_args, cns(env, dv.first));
+        gen(env, JmpNZero, taken, lte);
+      },
+      [&] {
+        gen(
+          env,
+          ReqBindJmp,
+          ReqBindJmpData {
+            SrcKey { func, dv.second, false },
+            FPInvOffset { func->numSlotsInFrame() },
+            offsetFromIRSP(env, BCSPOffset{0}),
+            TransFlags{}
+          },
+          sp(env),
+          fp(env)
+        );
+      }
+    );
+  }
+
+  gen(
+    env,
+    ReqBindJmp,
+    ReqBindJmpData {
+      SrcKey { func, func->base(), false },
+      FPInvOffset { func->numSlotsInFrame() },
+      offsetFromIRSP(env, BCSPOffset{0}),
+      TransFlags{}
+    },
+    sp(env),
+    fp(env)
+  );
 }
 
 ///////////////////////////////////////////////////////////////////////////////

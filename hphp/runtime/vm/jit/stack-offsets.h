@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2015 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -118,7 +118,7 @@ struct BCSPOffset {
   }
 
   BCSPOffset operator++(int) {
-    auto before = BCSPOffset{offset};
+    auto before = *this;
     offset++;
     return before;
   }
@@ -131,6 +131,12 @@ struct BCSPOffset {
   BCSPOffset operator-() const { return BCSPOffset{-offset}; }
 
   BCSPOffset operator-(int32_t delta) { return BCSPOffset{offset - delta}; }
+
+  BCSPOffset operator--(int) {
+    auto before = *this;
+    offset--;
+    return before;
+  }
 };
 
 struct FPInvOffset {

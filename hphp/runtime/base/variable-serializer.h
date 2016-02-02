@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,9 +17,10 @@
 #ifndef incl_HPHP_VARIABLE_SERIALIZER_H_
 #define incl_HPHP_VARIABLE_SERIALIZER_H_
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/string-buffer.h"
-#include "hphp/runtime/base/smart-containers.h"
+#include "hphp/runtime/base/string-data.h"
+#include "hphp/runtime/base/runtime-option.h"
+#include "hphp/runtime/base/req-containers.h"
 #include "hphp/runtime/vm/class.h"
 
 namespace HPHP {
@@ -31,8 +32,7 @@ class ClassInfo;
  * Maintaining states during serialization of a variable. We use this single
  * class to uniformly serialize variables according to different formats.
  */
-class VariableSerializer {
-public:
+struct VariableSerializer {
   /**
    * Supported formats.
    */
@@ -57,6 +57,7 @@ public:
     if (m_arrayIds) delete m_arrayIds;
   }
 
+  // Use UnlimitSerializationScope to suspend this temporarily.
   static __thread int64_t serializationSizeLimit;
 
   /**
@@ -116,13 +117,13 @@ public:
   Type getType() const { return m_type; }
 
 private:
-  typedef smart::hash_map<void*, int, pointer_hash<void> > SmartPtrCtrMap;
+  using ReqPtrCtrMap = req::hash_map<void*, int, pointer_hash<void>>;
   Type m_type;
   int m_option;                  // type specific extra options
   StringBuffer *m_buf;
   int m_indent;
-  SmartPtrCtrMap m_counts;       // counting seen arrays for recursive levels
-  SmartPtrCtrMap *m_arrayIds;    // reference ids for objs/arrays
+  ReqPtrCtrMap m_counts;         // counting seen arrays for recursive levels
+  ReqPtrCtrMap *m_arrayIds;      // reference ids for objs/arrays
   int m_valueCount;              // Current ref index
   bool m_referenced;             // mark current array element as reference
   int m_refCount;                // current variable's reference count
@@ -144,7 +145,7 @@ private:
     int  indent_delta;  // the extra indent to serialize this object
     int  size;          // the number of elements in the array
   };
-  smart::vector<ArrayInfo> m_arrayInfos;
+  req::vector<ArrayInfo> m_arrayInfos;
 
   struct ObjectInfo {
     String objClass;
@@ -153,7 +154,7 @@ private:
     String rsrcName;
     int    rsrcId;
   };
-  smart::vector<ObjectInfo> m_objectInfos;
+  req::vector<ObjectInfo> m_objectInfos;
 
   // The func parameter will be invoked only if there is no overflow.
   // Otherwise, writeOverflow will be invoked instead.
@@ -161,17 +162,22 @@ private:
   void writePropertyKey(const String& prop);
 };
 
-/*
- * Serialize a Variant recursively.
- * The last param noQuotes indicates to serializer to not put the output in
- * double quotes (used when printing the output of a __toDebugDisplay() of
- * an object when it is a string.
- */
-void serializeVariant(const Variant&,
-                      VariableSerializer *serializer,
-                      bool isArrayKey = false,
-                      bool skipNestCheck = false,
-                      bool noQuotes = false);
+// TODO: Move to util/folly?
+template<typename T> struct TmpAssign {
+  TmpAssign(T& v, const T tmp) : cur(v), save(cur) { cur = tmp; }
+  ~TmpAssign() { cur = save; }
+  T& cur;
+  const T save;
+};
+
+struct UnlimitSerializationScope {
+  static constexpr int32_t kTmpLimit = StringData::MaxSize;
+  TmpAssign<int64_t> v{VariableSerializer::serializationSizeLimit, kTmpLimit};
+  TmpAssign<int64_t> rs{RuntimeOption::SerializationSizeLimit, kTmpLimit};
+  TmpAssign<int32_t> rm{RuntimeOption::MaxSerializedStringSize, kTmpLimit};
+};
+
+extern const StaticString s_serializedNativeDataKey;
 
 ///////////////////////////////////////////////////////////////////////////////
 }

@@ -1,5 +1,5 @@
 (**
- * Copyright (c) 2014, Facebook, Inc.
+ * Copyright (c) 2015, Facebook, Inc.
  * All rights reserved.
  *
  * This source code is licensed under the BSD-style license found in the
@@ -8,13 +8,13 @@
  *
  *)
 
+open Core
 open ClientCommand
 open ClientEnv
 open Utils
 
 let rec guess_root config start recursion_limit : Path.t option =
-  let fs_root = Path.make "/" in
-  if start = fs_root then None
+  if start = Path.parent start then None (* Reach fs root, nothing to do. *)
   else if Wwwroot.is_www_directory ~config start then Some start
   else if recursion_limit <= 0 then None
   else guess_root config (Path.parent start) (recursion_limit - 1)
@@ -28,7 +28,7 @@ let parse_command () =
   | "stop" -> CKStop
   | "restart" -> CKRestart
   | "build" -> CKBuild
-  | "prolog" -> CKProlog
+  | "ide" -> CKIde
   | _ -> CKNone
 
 let parse_without_command options usage command =
@@ -56,8 +56,8 @@ let get_root ?(config=".hhconfig") path_opt =
  * there, but keep what's there up to date please. *)
 let parse_check_args cmd =
   (* arg parse output refs *)
-  let mode = ref MODE_UNSPECIFIED in
-  let retries = ref 3 in
+  let mode = ref None in
+  let retries = ref 800 in
   let output_json = ref false in
   let retry_if_init = ref true in
   let no_load = ref false in
@@ -65,13 +65,18 @@ let parse_check_args cmd =
   let autostart = ref true in
   let from = ref "" in
   let version = ref false in
+  let ide_logname = ref false in
+  let monitor_logname = ref false in
+  let logname = ref false in
+  let refactor_mode = ref "" in
+  let refactor_before = ref "" in
 
   (* custom behaviors *)
   let set_from x () = from := x in
   let set_mode x () =
-    if !mode <> MODE_UNSPECIFIED
+    if !mode <> None
     then raise (Arg.Bad "only a single mode should be specified")
-    else mode := x
+    else mode := Some x
   in
 
   (* parse args *)
@@ -117,6 +122,7 @@ let parse_check_args cmd =
       " (mode) list all files with their associated hack modes";
     "--auto-complete", Arg.Unit (set_mode MODE_AUTO_COMPLETE),
       " (mode) auto-completes the text on stdin";
+    "--colour", Arg.String (fun x -> set_mode (MODE_COLORING x) ()), " ";
     "--color", Arg.String (fun x -> set_mode (MODE_COLORING x) ()),
       " (mode) pretty prints the file content showing what is checked (give '-' for stdin)";
     "--coverage", Arg.String (fun x -> set_mode (MODE_COVERAGE x) ()),
@@ -138,10 +144,22 @@ let parse_check_args cmd =
        *    ]
        *  Note: results list can be in any order *)
       "";
+    "--dump-ai-info", Arg.String (fun files ->
+        set_mode (MODE_DUMP_AI_INFO files) ()),
+        (* Just like --dump-symbol-info, but uses the AI to obtain info *)
+        "";
     "--identify-function", Arg.String (fun x -> set_mode (MODE_IDENTIFY_FUNCTION x) ()),
       " (mode) print the full function name at the position [line:character] of the text on stdin";
-    "--refactor", Arg.Unit (set_mode MODE_REFACTOR),
-      "";
+    "--refactor", Arg.Tuple ([
+        Arg.Symbol (
+          ["Class"; "Function"; "Method"],
+          (fun x -> refactor_mode := x));
+        Arg.String (fun x -> refactor_before := x);
+        Arg.String (fun x ->
+          set_mode (MODE_REFACTOR (!refactor_mode, !refactor_before, x)) ())
+      ]),
+      " (mode) rename a symbol, Usage: --refactor " ^
+      "[\"Class\", \"Function\", \"Method\"] <Current Name> <New Name>";
     "--search", Arg.String (fun x -> set_mode (MODE_SEARCH (x, "")) ()),
       " (mode) fuzzy search symbol definitions";
     "--search-class",
@@ -170,8 +188,8 @@ let parse_check_args cmd =
       " (mode) show human-readable type info for the given name; output is not meant for machine parsing";
     "--lint", Arg.Rest begin fun fn ->
         mode := match !mode with
-          | MODE_UNSPECIFIED -> MODE_LINT [fn]
-          | MODE_LINT fnl -> MODE_LINT (fn :: fnl)
+          | None -> Some (MODE_LINT [fn])
+          | Some (MODE_LINT fnl) -> Some (MODE_LINT (fn :: fnl))
           | _ -> raise (Arg.Bad "only a single mode should be specified")
       end,
       " (mode) lint the given list of files";
@@ -179,6 +197,12 @@ let parse_check_args cmd =
       " (mode) find all occurrences of lint with the given error code";
     "--version", Arg.Set version,
       " (mode) show version and exit\n";
+    "--ide-logname", Arg.Set ide_logname,
+      " (mode) show ide server log filename and exit\n";
+    "--monitor-logname", Arg.Set monitor_logname,
+      " (mode) show monitor log filename and exit\n";
+    "--logname", Arg.Set logname,
+      " (mode) show log filename and exit\n";
     (* Create a checkpoint which can be used to retrieve changed files later *)
     "--create-checkpoint", Arg.String (fun x -> set_mode (MODE_CREATE_CHECKPOINT x) ()),
       "";
@@ -193,12 +217,15 @@ let parse_check_args cmd =
     "--delete-checkpoint",
       Arg.String (fun x -> set_mode (MODE_DELETE_CHECKPOINT x) ()),
       "";
+    "--stats",
+      Arg.Unit (set_mode MODE_STATS),
+      " display some server statistics";
 
     (* flags *)
     "--json", Arg.Set output_json,
       " output json for machine consumption. (default: false)";
     "--retries", Arg.Set_int retries,
-      " set the number of retries. (default: 3)";
+      spf " set the number of retries. (default: %d)" !retries;
     "--retry-if-init", Arg.Bool (fun x -> retry_if_init := x),
       " retry if the server is initializing (default: true)";
     "--no-load", Arg.Set no_load,
@@ -230,7 +257,6 @@ let parse_check_args cmd =
   end;
 
   (* fixups *)
-  if !mode == MODE_UNSPECIFIED then mode := MODE_STATUS;
   let root =
     match args with
     | [] -> get_root None
@@ -239,11 +265,30 @@ let parse_check_args cmd =
         Printf.fprintf stderr "Error: please provide at most one www directory\n%!";
         exit 1;
   in
+
+  if !ide_logname then begin
+    let ide_log_link = ServerFiles.ide_log_link root in
+    Printf.printf "%s\n%!" ide_log_link;
+    exit 0;
+  end;
+
+  if !monitor_logname then begin
+    let monitor_log_link = ServerFiles.monitor_log_link root in
+    Printf.printf "%s\n%!" monitor_log_link;
+    exit 0;
+  end;
+
+  if !logname then begin
+    let log_link = ServerFiles.log_link root in
+    Printf.printf "%s\n%!" log_link;
+    exit 0;
+  end;
+
   let () = if (!from) = "emacs" then
       Printf.fprintf stdout "-*- mode: compilation -*-\n%!"
   in
   CCheck {
-    mode = !mode;
+    mode = Option.value !mode ~default:MODE_STATUS;
     root = root;
     from = !from;
     output_json = !output_json;
@@ -282,6 +327,7 @@ let parse_start_env command =
     root = root;
     wait = !wait;
     no_load = !no_load;
+    silent = false;
   }
 
 let parse_start_args () =
@@ -315,6 +361,7 @@ let parse_build_args () =
       Generates build files\n"
       Sys.argv.(0) in
   let steps = ref None in
+  let ignore_killswitch = ref false in
   let no_steps = ref None in
   let verbose = ref false in
   let serial = ref false in
@@ -332,6 +379,8 @@ let parse_build_args () =
     "--steps", Arg.String (fun x ->
       steps := Some (Str.split (Str.regexp ",") x)),
     " comma-separated list of build steps to run";
+    "--ignore-killswitch", Arg.Set ignore_killswitch,
+    " run all steps (including kill-switched ones) except steps in --no-steps";
     "--no-steps", Arg.String (fun x ->
       no_steps := Some (Str.split (Str.regexp ",") x)),
     " comma-separated list of build steps not to run";
@@ -371,6 +420,7 @@ let parse_build_args () =
     wait = !wait;
     build_opts = { ServerBuild.
       steps = !steps;
+      ignore_killswitch = !ignore_killswitch;
       no_steps = !no_steps;
       run_scripts = !run_scripts;
       serial = !serial;
@@ -383,23 +433,26 @@ let parse_build_args () =
       incremental = !incremental;
       user = Sys_utils.logname ();
       verbose = !verbose;
+      id = Random_id.short_string ();
     }
   }
 
-let parse_prolog_args () =
+let parse_ide_args () =
   let usage =
     Printf.sprintf
-      "Usage: %s prolog [WWW-ROOT]\n\
-      run prolog interpreter on code database\n"
+      "Usage: %s ide [WWW-ROOT]\n"
       Sys.argv.(0) in
+
   let options = [] in
-  let args = parse_without_command options usage "prolog" in
+  let args = parse_without_command options usage "ide" in
   let root =
     match args with
+    | [] -> get_root None
     | [x] -> get_root (Some x)
-    | _ -> Printf.printf "%s\n" usage; exit 2
-  in
-  CProlog { ClientProlog.root = root; }
+    | _ -> Printf.printf "%s\n" usage; exit 2 in
+  CIde { ClientIde.
+    root = root
+  }
 
 let parse_args () =
   match parse_command () with
@@ -409,4 +462,12 @@ let parse_args () =
     | CKStop -> parse_stop_args ()
     | CKRestart -> parse_restart_args ()
     | CKBuild -> parse_build_args ()
-    | CKProlog -> parse_prolog_args ()
+    | CKIde -> parse_ide_args ()
+
+let root = function
+  | CBuild { ClientBuild.root; _ }
+  | CCheck { ClientEnv.root; _ }
+  | CStart { ClientStart.root; _ }
+  | CRestart { ClientStart.root; _ }
+  | CStop { ClientStop.root; _ }
+  | CIde { ClientIde.root; _} -> root

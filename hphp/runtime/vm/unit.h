@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -19,7 +19,6 @@
 
 #include "hphp/parser/location.h"
 
-#include "hphp/runtime/base/types.h"
 #include "hphp/runtime/base/typed-value.h"
 #include "hphp/runtime/vm/class.h"
 #include "hphp/runtime/vm/hhbc.h"
@@ -287,7 +286,7 @@ public:
     Define              = 2,  // Toplevel scalar define.
     PersistentDefine    = 3,  // Cross-request persistent toplevel defines.
     Global              = 4,  // Global variable declarations.
-    // Unused           = 5,
+    TypeAlias           = 5,
     ReqDoc              = 6,
     Done                = 7,
     // We cannot add more kinds here; this has to fit in 3 bits.
@@ -299,6 +298,7 @@ public:
   typedef MergeInfo::FuncRange FuncRange;
   typedef MergeInfo::MutableFuncRange MutableFuncRange;
   typedef Range<std::vector<PreClassPtr>> PreClassRange;
+  typedef Range<FixedVector<TypeAlias>> TypeAliasRange;
 
   /*
    * Cache for pseudomains for this unit, keyed by Class context.
@@ -364,7 +364,7 @@ public:
   /*
    * Get the Op at `instrOffset'.
    */
-  Op getOpcode(size_t instrOffset) const;
+  Op getOp(Offset instrOffset) const;
 
 
   /////////////////////////////////////////////////////////////////////////////
@@ -482,6 +482,10 @@ public:
    */
   void renameFunc(const StringData* oldName, const StringData* newName);
 
+  /*
+   * Visit all functions and methods in this unit.
+   */
+  template<class Fn> void forEachFunc(Fn fn) const;
 
   /////////////////////////////////////////////////////////////////////////////
   // Func lookup.                                                      [static]
@@ -634,6 +638,9 @@ public:
   /////////////////////////////////////////////////////////////////////////////
   // Type aliases.
 
+  TypeAliasRange typeAliases() const;
+  static const TypeAliasReq* loadTypeAlias(const StringData* name);
+
   /*
    * Define the type alias given by `id', binding it to the appropriate
    * NamedEntity for this request.
@@ -767,6 +774,14 @@ public:
    */
   bool isHHFile() const;
 
+  /*
+   * Should calls from this unit use strict types? (This is always true for HH
+   * units).
+   *
+   * With strict types enabled only lossless int->float conversions are allowed
+   */
+  bool useStrictTypes() const;
+
 
   /////////////////////////////////////////////////////////////////////////////
   // Offset accessors.                                                 [static]
@@ -805,6 +820,7 @@ private:
   bool m_mergeOnly: 1;
   bool m_interpretOnly : 1;
   bool m_isHHFile : 1;
+  bool m_useStrictTypes : 1;
   LowStringPtr m_dirpath{nullptr};
 
   TypedValue m_mainReturn;
@@ -821,63 +837,6 @@ private:
   FixedVector<const ArrayData*> m_arrays;
   FuncTable m_funcTable;
   mutable PseudoMainCacheMap* m_pseudoMainCache{nullptr};
-};
-
-///////////////////////////////////////////////////////////////////////////////
-// TODO(#4717225): Rewrite these in iterators.h.
-
-struct AllFuncs {
-  explicit AllFuncs(const Unit* unit)
-    : fr(unit->funcs())
-    , mr(0, 0)
-    , cr(unit->preclasses())
-  {
-    if (fr.empty()) skip();
-  }
-
-  bool empty() const {
-    return fr.empty() && mr.empty() && cr.empty();
-  }
-
-  const Func* front() const {
-    assert(!empty());
-    if (!fr.empty()) return fr.front();
-    assert(!mr.empty());
-    return mr.front();
-  }
-
-  const Func* popFront() {
-    auto f = !fr.empty() ? fr.popFront() :
-             !mr.empty() ? mr.popFront() : 0;
-    assert(f);
-    if (fr.empty() && mr.empty()) skip();
-    return f;
-  }
-
-private:
-  void skip() {
-    assert(fr.empty());
-    while (!cr.empty() && mr.empty()) {
-      auto c = cr.popFront();
-      mr = Unit::FuncRange(c->methods(),
-                           c->methods() + c->numMethods());
-    }
-  }
-
-  Unit::FuncRange fr;
-  Unit::FuncRange mr;
-  Unit::PreClassRange cr;
-};
-
-class AllCachedClasses {
-  NamedEntity::Map::iterator m_next, m_end;
-  void skip();
-
-public:
-  AllCachedClasses();
-  bool empty() const;
-  Class* front();
-  Class* popFront();
 };
 
 ///////////////////////////////////////////////////////////////////////////////

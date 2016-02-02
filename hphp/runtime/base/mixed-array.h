@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -56,20 +56,17 @@ public:
   struct ValIter;
 
   struct Elm {
-    /* The key is either a string pointer or an int value, and the _count
-     * field in data is used to discriminate the key type. _count = 0 means
-     * int, nonzero values contain 32 bits of a string's hashcode.
-     * It is critical that when we return &data to clients, that they not
-     * read or write the _count field! */
     union {
       int64_t ikey;
       StringData* skey;
     };
     // We store values here, but also some information local to this array:
-    // data.m_aux.u_hash contains either a negative number (for an int key) or a
-    // string hashcode (31-bit and thus non-negative); the high bit is the
+    // data.m_aux.u_hash contains either a negative number (for an int key) or
+    // a string hashcode (31-bit and thus non-negative); the high bit is the
     // int/string key descriminator. data.m_type == kInvalidDataType if this is
-    // an empty slot in the array (e.g. after a key is deleted).
+    // an empty slot in the array (e.g. after a key is deleted).  It is
+    // critical that when we return &data to clients, that they not read or
+    // write the m_aux field!
     TypedValueAux data;
 
     bool hasStrKey() const {
@@ -114,6 +111,13 @@ public:
       return MixedArray::isTombstone(data.m_type);
     }
 
+    template<class F> void scan(F& mark) const {
+      if (!isTombstone()) {
+        if (hasStrKey()) mark(skey);
+        mark(data);
+      }
+    }
+
     static constexpr size_t dataOff() {
       return offsetof(Elm, data);
     }
@@ -129,15 +133,6 @@ public:
    */
   static void InitSmall(MixedArray* a, RefCount count, uint32_t size,
                         int64_t nextIntKey);
-
-  /*
-   * Allocate a new, empty, request-local array in packed mode, with
-   * enough space reserved for `capacity' members.
-   *
-   * The returned array is already incref'd.
-   */
-  static ArrayData* MakeReserve(uint32_t capacity);
-  static ArrayData* MakeReserveSlow(uint32_t capacity);
 
   /*
    * Allocate a new, empty, request-local array in mixed mode, with
@@ -157,21 +152,6 @@ public:
   static ArrayData* MakeReserveLike(const ArrayData* other, uint32_t capacity);
 
   /*
-   * Allocate a packed MixedArray.  This is an array in packed
-   * mode, containing `size' values, in the reverse order of the
-   * `values' array.
-   *
-   * This function takes ownership of the TypedValues in `values'.
-   *
-   * The returned array is already incref'd.
-   *
-   * Pre: size > 0
-   */
-  static ArrayData* MakePacked(uint32_t size, const TypedValue* values);
-  static ArrayData* MakePackedHelper(uint32_t size, const TypedValue* values);
-  static ArrayData* MakePackedUninitialized(uint32_t size);
-
-  /*
    * Like MakePacked, but given static strings, make a struct-like array.
    * Also requires size > 0.
    */
@@ -189,8 +169,6 @@ public:
    * when the array has a kPackedKind.
    */
   static ArrayData* MakeUncounted(ArrayData* array);
-  static ArrayData* MakeUncountedPacked(ArrayData* array);
-  static ArrayData* MakeUncountedPackedHelper(ArrayData* array);
 
   // This behaves the same as iter_begin except that it assumes
   // this array is not empty and its not virtual.
@@ -206,6 +184,7 @@ public:
   using ArrayData::decRefCount;
   using ArrayData::hasMultipleRefs;
   using ArrayData::hasExactlyOneRef;
+  using ArrayData::decWillRelease;
   using ArrayData::incRefCount;
 
   /*
@@ -235,8 +214,6 @@ private:
   using ArrayData::release;
 public:
   static Variant CreateVarForUncountedArray(const Variant& source);
-  static void ConvertTvToUncounted(TypedValue* source);
-  static void ReleaseUncountedTypedValue(TypedValue& tv);
 
   static size_t Vsize(const ArrayData*);
   static const Variant& GetValueRef(const ArrayData*, ssize_t pos);
@@ -271,7 +248,7 @@ public:
   static ArrayData* RemoveStr(ArrayData*, const StringData* k, bool copy);
   static ArrayData* Copy(const ArrayData*);
   static ArrayData* CopyWithStrongIterators(const ArrayData*);
-  static ArrayData* NonSmartCopy(const ArrayData*);
+  static ArrayData* CopyStatic(const ArrayData*);
   static ArrayData* Append(ArrayData*, const Variant& v, bool copy);
   static ArrayData* AppendRef(ArrayData*, Variant& v, bool copy);
   static ArrayData* AppendWithRef(ArrayData*, const Variant& v, bool copy);
@@ -284,7 +261,6 @@ public:
   static void OnSetEvalScalar(ArrayData*);
   static void Release(ArrayData*);
   static void ReleaseUncounted(ArrayData*);
-  static void ReleaseUncountedPacked(ArrayData*);
   static constexpr auto ValidMArrayIter = &ArrayCommon::ValidMArrayIter;
   static bool AdvanceMArrayIter(ArrayData*, MArrayIter& fp);
   static ArrayData* Escalate(const ArrayData* ad) {
@@ -307,16 +283,12 @@ private:
 public:
   // Elm's data.m_type == kInvalidDataType for deleted slots.
   static bool isTombstone(DataType t) {
-    assert(IS_REAL_TYPE(t) || t == kInvalidDataType);
+    assert(isRealType(t) || t == kInvalidDataType);
     return t < KindOfUninit;
     static_assert(KindOfUninit == 0 && kInvalidDataType < 0, "");
   }
 
   // Element index, with special values < 0 used for hash tables.
-  // NOTE: Unfortunately, g++ on x64 tends to generate worse machine code for
-  // 32-bit ints than it does for 64-bit ints. As such, we have deliberately
-  // chosen to use ssize_t in some places where ideally we *should* have used
-  // int32_t.
   static constexpr int32_t Empty      = -1;
   static constexpr int32_t Tombstone  = -2;
 
@@ -364,7 +336,6 @@ private:
   friend class c_Set;
   friend class c_ImmSet;
   friend class c_AwaitAllWaitHandle;
-  template <typename F> friend void scan(const MixedArray& this_, F& mark);
   enum class ClonePacked {};
   enum class CloneMixed {};
 
@@ -379,7 +350,7 @@ private:
   static void getElmKey(const Elm& e, TypedValue* out);
 
 private:
-  enum class AllocMode : bool { Smart, NonSmart };
+  enum class AllocMode : bool { Request, Static };
 
   static MixedArray* CopyMixed(const MixedArray& other, AllocMode);
   static MixedArray* CopyReserve(const MixedArray* src, size_t expectedSize);
@@ -464,7 +435,7 @@ private:
   int32_t* findForNewInsert(size_t h0) const;
   int32_t* findForNewInsert(int32_t* table, size_t mask, size_t h0) const;
   int32_t* findForNewInsertCheckUnbalanced(int32_t* table,
-                                           size_t mask, size_t h0) const;
+                                           size_t mask, size_t h0);
 
   bool nextInsert(const Variant& data);
   ArrayData* nextInsertRef(Variant& data);
@@ -502,9 +473,7 @@ private:
 
   Elm& allocElm(int32_t* ei);
 
-  MixedArray* setVal(TypedValue& tv, Cell v);
   MixedArray* getLval(TypedValue& tv, Variant*& ret);
-  MixedArray* initVal(TypedValue& tv, Cell v);
   MixedArray* initRef(TypedValue& tv, Variant& v);
   MixedArray* initLval(TypedValue& tv, Variant*& ret);
   MixedArray* initWithRef(TypedValue& tv, const Variant& v);
@@ -551,7 +520,6 @@ private:
    */
   MixedArray* resize();
   MixedArray* resizeIfNeeded();
-  MixedArray* resizePackedIfNeeded();
 
   Elm* data() const {
     return const_cast<Elm*>(reinterpret_cast<Elm const*>(this + 1));

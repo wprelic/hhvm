@@ -2,7 +2,7 @@
    +----------------------------------------------------------------------+
    | HipHop for PHP                                                       |
    +----------------------------------------------------------------------+
-   | Copyright (c) 2010-2014 Facebook, Inc. (http://www.facebook.com)     |
+   | Copyright (c) 2010-2016 Facebook, Inc. (http://www.facebook.com)     |
    +----------------------------------------------------------------------+
    | This source file is subject to version 3.01 of the PHP license,      |
    | that is bundled with this package in the file LICENSE, and is        |
@@ -17,6 +17,7 @@
 
 #include "hphp/runtime/vm/jit/mc-generator.h"
 
+#include "hphp/runtime/vm/jit/types.h"
 #include "hphp/runtime/vm/jit/irgen.h"
 #include "hphp/runtime/vm/jit/irgen-exit.h"
 #include "hphp/runtime/vm/jit/irgen-inlining.h"
@@ -93,61 +94,130 @@ void freeLocalsAndThis(IRGS& env) {
 }
 
 void normalReturn(IRGS& env, SSATmp* retval) {
-  gen(env, StRetVal, fp(env), retval);
+  gen(env, StRetVal,
+      StRetValData { !curFunc(env)->isAsyncFunction() || resumed(env) },
+      fp(env), retval);
   auto const data = RetCtrlData { offsetToReturnSlot(env), false };
   gen(env, RetCtrl, data, sp(env), fp(env));
 }
 
-void asyncFunctionReturn(IRGS& env, SSATmp* retval) {
-  if (!resumed(env)) {
-    // Return from an eagerly-executed async function: wrap the return value in
-    // a StaticWaitHandle object and return that normally.
-    auto const wrapped = gen(env, CreateSSWH, retval);
-    normalReturn(env, wrapped);
-    return;
-  }
-
+void emitAsyncRetSlow(IRGS& env, SSATmp* retVal) {
+  // Slow path: unblock all parents, then return.
   auto parentChain = gen(env, LdAsyncArParentChain, fp(env));
   gen(env, StAsyncArSucceeded, fp(env));
-  gen(env, StAsyncArResult, fp(env), retval);
+  gen(env, StAsyncArResult, fp(env), retVal);
   gen(env, ABCUnblock, parentChain);
-
-  spillStack(env);
 
   // Must load this before FreeActRec, which adjusts fp(env).
   auto const resumableObj = gen(env, LdResumableArObj, fp(env));
-
   gen(env, FreeActRec, fp(env));
-  gen(env, DecRef, resumableObj);
+  decRef(env, resumableObj);
 
+  auto const spAdjust = offsetFromIRSP(env, BCSPOffset{0});
   gen(
     env,
     AsyncRetCtrl,
-    IRSPOffsetData { offsetFromIRSP(env, BCSPOffset{0}) },
+    RetCtrlData { spAdjust, false },
     sp(env),
     fp(env)
   );
 }
 
+void asyncRetSurpriseCheck(IRGS& env, SSATmp* retVal) {
+  // The AsyncRet unique stub may or may not be able to do fast return (jump to
+  // parent directly).  So we don't know for sure if return hook should be
+  // called.  When profiling is enabled, we call the return hook, and follow the
+  // slow path return (uncommon case).
+
+  updateMarker(env);
+  env.irb->exceptionStackBoundary();
+
+  ifThen(
+    env,
+    [&] (Block* taken) {
+      gen(env, CheckSurpriseFlags, taken, sp(env));
+    },
+    [&] {
+      hint(env, Block::Hint::Unlikely);
+
+      ringbufferMsg(env, Trace::RBTypeMsg, s_returnHook.get());
+      gen(env, ReturnHook, fp(env), retVal);
+      ringbufferMsg(env, Trace::RBTypeFuncExit, curFunc(env)->fullName());
+
+      // Uncommon case: after calling the return hook, follow the slow path.
+      // Next opcode is unreachable on this path.
+      emitAsyncRetSlow(env, retVal);
+    }
+  );
+  ringbufferMsg(env, Trace::RBTypeFuncExit, curFunc(env)->fullName());
+}
+
+void asyncFunctionReturn(IRGS& env, SSATmp* retVal) {
+  if (!resumed(env)) {
+    retSurpriseCheck(env, retVal);
+
+    // Return from an eagerly-executed async function: wrap the return value in
+    // a StaticWaitHandle object and return that normally, unless we were called
+    // via FCallAwait
+    auto const wrapped = cond(
+      env,
+      [&] (Block* taken) {
+        auto flags = gen(env, LdARNumArgsAndFlags, fp(env));
+        auto test = gen(
+          env, AndInt, flags,
+          cns(env, static_cast<int32_t>(ActRec::Flags::IsFCallAwait)));
+        gen(env, JmpNZero, taken, test);
+      },
+      [&] {
+        if (RuntimeOption::EvalHHIRGenerateAsserts) {
+          gen(env, StTVAux, fp(env), cns(env, 0xbad));
+        }
+        return gen(env, CreateSSWH, retVal);
+      },
+      [&] {
+        gen(env, StTVAux, fp(env), cns(env, 0));
+        return retVal;
+      });
+    normalReturn(env, wrapped);
+    return;
+  }
+
+  // When surprise flag is set, the slow path is always used.  So fast path is
+  // never reached in that case (e.g. when debugging).  Consider disabling this
+  // when debugging the fast return path.
+  asyncRetSurpriseCheck(env, retVal);
+
+  // Unblock parents and possibly take fast path to resume parent. SPOffset -1
+  // is for retVal, which will be pushed on stack.
+  auto const spAdjust = offsetFromIRSP(env, BCSPOffset{-1});
+  gen(env,
+      AsyncRetFast,
+      RetCtrlData { spAdjust, false },
+      sp(env),
+      fp(env),
+      retVal
+  );
+}
+
 void generatorReturn(IRGS& env, SSATmp* retval) {
-  // Clear generator's key and value.
+  // Clear generator's key.
   auto const oldKey = gen(env, LdContArKey, TCell, fp(env));
   gen(env, StContArKey, fp(env), cns(env, TInitNull));
-  gen(env, DecRef, oldKey);
+  decRef(env, oldKey);
 
+  // Populate the generator's value with retval to support `getReturn`
   auto const oldValue = gen(env, LdContArValue, TCell, fp(env));
-  gen(env, StContArValue, fp(env), cns(env, TInitNull));
-  gen(env, DecRef, oldValue);
+  gen(env, StContArValue, fp(env), retval);
+  decRef(env, oldValue);
 
   gen(env,
       StContArState,
-      GeneratorState { BaseGeneratorData::State::Done },
+      GeneratorState { BaseGenerator::State::Done },
       fp(env));
 
   // Push return value of next()/send()/raise().
   push(env, cns(env, TInitNull));
 
-  spillStack(env);
   gen(
     env,
     RetCtrl,
@@ -176,11 +246,13 @@ void implRet(IRGS& env) {
     freeLocalsAndThis(env);
   }
 
-  retSurpriseCheck(env, retval);
-
+  // Async function has its own surprise check.
   if (func->isAsyncFunction()) {
     return asyncFunctionReturn(env, retval);
   }
+
+  retSurpriseCheck(env, retval);
+
   if (resumed(env)) {
     assertx(curFunc(env)->isNonAsyncGenerator());
     return generatorReturn(env, retval);
